@@ -1,8 +1,23 @@
 
 from fastapi import FastAPI, Header
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+
 app = FastAPI(title="Clawdbot Server", version="1.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://cotizaexpress.com",
+        "https://www.cotizaexpress.com",
+        "https://buildquote-12.preview.emergentagent.com",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
 
 class ChatRequest(BaseModel):
     app: str = "cotizabot"
