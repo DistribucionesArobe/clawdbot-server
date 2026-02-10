@@ -1,7 +1,31 @@
 import os
 import psycopg2
 from psycopg2 import IntegrityError
-from passlib.context import CryptContext
+
+import bcrypt
+from fastapi import HTTPException
+
+def _pw_bytes(password: str) -> bytes:
+    # Siempre sanitiza igual en register y login
+    return (password or "").strip().encode("utf-8")
+
+
+def hash_password(password: str) -> str:
+    pw = _pw_bytes(password)
+    # bcrypt límite real: 72 BYTES
+    if len(pw) > 72:
+        raise HTTPException(status_code=400, detail="Password demasiado largo (máx 72 bytes)")
+    salt = bcrypt.gensalt(rounds=12)
+    return bcrypt.hashpw(pw, salt).decode("utf-8")
+
+
+def verify_password(password: str, password_hash: str) -> bool:
+    pw = _pw_bytes(password)
+    if len(pw) > 72:
+        return False
+    if not password_hash:
+        return False
+    return bcrypt.checkpw(pw, password_hash.encode("utf-8"))
 
 
 from fastapi import FastAPI, Header, HTTPException
@@ -22,7 +46,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
@@ -83,7 +106,6 @@ def db_ping():
 from fastapi import HTTPException
 
 # Asegúrate de tener esto ya:
-# pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 @app.post("/api/auth/register")
 def register(body: RegisterBody):
@@ -95,10 +117,8 @@ def register(body: RegisterBody):
     if not password:
         raise HTTPException(status_code=400, detail="Password requerido")
 
-    if len(password.encode("utf-8")) > 72:
-        raise HTTPException(status_code=400, detail="Password demasiado largo")
-
-    password_hash = pwd_context.hash(password)
+    # crea hash usando bcrypt directo (helper)
+    password_hash = hash_password(password)
 
     conn = None
     cur = None
@@ -112,7 +132,6 @@ def register(body: RegisterBody):
         row = cur.fetchone()
         if not row:
             raise HTTPException(status_code=500, detail="No se pudo obtener user_id")
-
         user_id = row[0]
         conn.commit()
         return {"ok": True, "user_id": user_id}
@@ -164,12 +183,6 @@ def login(body: LoginBody):
         if not row:
             raise HTTPException(status_code=401, detail="Credenciales inválidas")
 
-        user_id, password_hash = row
-
-        if not pwd_context.verify(password, password_hash):
-            raise HTTPException(status_code=401, detail="Credenciales inválidas")
-
-        return {"ok": True, "user_id": user_id}
 
     except HTTPException:
         raise
