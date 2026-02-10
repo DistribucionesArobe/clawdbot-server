@@ -50,9 +50,10 @@ app.add_middleware(
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 def get_conn():
-    if not DATABASE_URL:
+    db_url = (DATABASE_URL or "").strip()
+    if not db_url:
         raise RuntimeError("DATABASE_URL not set")
-    return psycopg2.connect(DATABASE_URL, sslmode="require", connect_timeout=5)
+    return psycopg2.connect(db_url, sslmode="require", connect_timeout=5)
 
 
 class RegisterBody(BaseModel):
