@@ -118,9 +118,6 @@ def register(body: RegisterBody):
     if not password:
         raise HTTPException(status_code=400, detail="Password requerido")
 
-    # crea hash usando bcrypt directo (helper)
-    password_hash = hash_password(password)
-
     conn = None
     cur = None
     try:
@@ -135,6 +132,7 @@ def register(body: RegisterBody):
         row = cur.fetchone()
         if not row:
             raise HTTPException(status_code=500, detail="No se pudo obtener user_id")
+
         user_id = row[0]
         conn.commit()
         return {"ok": True, "user_id": user_id}
@@ -149,10 +147,10 @@ def register(body: RegisterBody):
             conn.rollback()
         raise
 
-    except Exception as e:
+    except Exception:
         if conn:
             conn.rollback()
-        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error interno")
 
     finally:
         if cur:
@@ -196,9 +194,9 @@ def login(body: LoginBody):
     except HTTPException:
         raise
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {str(e)}")
-
+    except Exception:
+        raise HTTPException(status_code=500, detail="Error interno")
+  
     finally:
         if cur:
             cur.close()
