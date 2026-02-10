@@ -1,5 +1,6 @@
 import os
 import psycopg2
+from psycopg2 import IntegrityError
 from passlib.context import CryptContext
 
 
@@ -28,7 +29,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 def get_conn():
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL not set")
-    return psycopg2.connect(DATABASE_URL, sslmode="require")
+    return psycopg2.connect(DATABASE_URL, sslmode="require", connect_timeout=5)
 
 
 class RegisterBody(BaseModel):
@@ -53,6 +54,36 @@ class ChatRequest(BaseModel):
 def health():
     return {"ok": True}
 
+@app.get("/api/db/ping")
+def db_ping():
+    try:
+        conn = psycopg2.connect(DATABASE_URL, sslmode="require", connect_timeout=5)
+        cur = conn.cursor()
+        cur.execute("select 1;")
+        cur.fetchone()
+        cur.close()
+        conn.close()
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/db/ping")
+def db_ping():
+    try:
+        conn = psycopg2.connect(DATABASE_URL, sslmode="require", connect_timeout=5)
+        cur = conn.cursor()
+        cur.execute("select 1;")
+        cur.fetchone()
+        cur.close()
+        conn.close()
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/auth/register")
+def register(body: RegisterBody):
+    email = body.email.strip().lower()
 
 @app.post("/api/auth/register")
 def register(body: RegisterBody):
@@ -63,6 +94,8 @@ def register(body: RegisterBody):
 
     password_hash = pwd_context.hash(body.password)
 
+    conn = None
+    cur = None
     try:
         conn = get_conn()
         cur = conn.cursor()
@@ -72,15 +105,23 @@ def register(body: RegisterBody):
         )
         user_id = cur.fetchone()[0]
         conn.commit()
-        cur.close()
-        conn.close()
         return {"ok": True, "user_id": user_id}
 
-    except psycopg2.errors.UniqueViolation:
+    except IntegrityError:
+        if conn:
+            conn.rollback()
         raise HTTPException(status_code=400, detail="Email ya registrado")
 
     except Exception as e:
+        if conn:
+            conn.rollback()
         raise HTTPException(status_code=500, detail=str(e))
+
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
 
 
 @app.post("/api/auth/login")
