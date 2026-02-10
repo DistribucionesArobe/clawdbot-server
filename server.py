@@ -85,24 +85,19 @@ from fastapi import HTTPException
 # Asegúrate de tener esto ya:
 # pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-
 @app.post("/api/auth/register")
 def register(body: RegisterBody):
     email = (body.email or "").strip().lower()
     password = (body.password or "").strip()
 
-    # Validaciones básicas
     if not email:
         raise HTTPException(status_code=400, detail="Email requerido")
     if not password:
         raise HTTPException(status_code=400, detail="Password requerido")
 
-    # bcrypt: límite real es 72 BYTES en UTF-8
-    pw_bytes = password.encode("utf-8")
-    if len(pw_bytes) > 72:
-        raise HTTPException(status_code=400, detail="Password demasiado largo (máx 72 bytes)")
+    if len(password.encode("utf-8")) > 72:
+        raise HTTPException(status_code=400, detail="Password demasiado largo")
 
-    # ✅ UN SOLO HASH
     password_hash = pwd_context.hash(password)
 
     conn = None
@@ -114,14 +109,17 @@ def register(body: RegisterBody):
             "insert into users (email, password_hash) values (%s, %s) returning id",
             (email, password_hash),
         )
-        user_id = cur.fetchone()[0]
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=500, detail="No se pudo obtener user_id")
+
+        user_id = row[0]
         conn.commit()
         return {"ok": True, "user_id": user_id}
 
     except IntegrityError:
         if conn:
             conn.rollback()
-        # Mejor 409 (conflict) para email duplicado
         raise HTTPException(status_code=409, detail="Email ya registrado")
 
     except HTTPException:
@@ -132,7 +130,6 @@ def register(body: RegisterBody):
     except Exception:
         if conn:
             conn.rollback()
-        # No expongas el error crudo en prod
         raise HTTPException(status_code=500, detail="Error interno")
 
     finally:
@@ -142,17 +139,14 @@ def register(body: RegisterBody):
             conn.close()
 
 
-
 @app.post("/api/auth/login")
 def login(body: LoginBody):
     email = (body.email or "").strip().lower()
     password = (body.password or "").strip()
 
-    # Evitar user enumeration: mismo mensaje para todo
     if not email or not password:
         raise HTTPException(status_code=401, detail="Credenciales inválidas")
 
-    # bcrypt límite 72 bytes
     if len(password.encode("utf-8")) > 72:
         raise HTTPException(status_code=401, detail="Credenciales inválidas")
 
@@ -172,7 +166,6 @@ def login(body: LoginBody):
 
         user_id, password_hash = row
 
-        # Verificación (passlib)
         if not pwd_context.verify(password, password_hash):
             raise HTTPException(status_code=401, detail="Credenciales inválidas")
 
@@ -180,10 +173,8 @@ def login(body: LoginBody):
 
     except HTTPException:
         raise
-
     except Exception:
         raise HTTPException(status_code=500, detail="Error interno")
-
     finally:
         if cur:
             cur.close()
