@@ -123,6 +123,8 @@ def register(body: RegisterBody):
     conn = None
     cur = None
     try:
+        password_hash = hash_password(password)
+
         conn = get_conn()
         cur = conn.cursor()
         cur.execute(
@@ -146,10 +148,10 @@ def register(body: RegisterBody):
             conn.rollback()
         raise
 
-    except Exception:
+    except Exception as e:
         if conn:
             conn.rollback()
-        raise HTTPException(status_code=500, detail="Error interno")
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {str(e)}")
 
     finally:
         if cur:
@@ -169,19 +171,25 @@ def login(body: LoginBody):
     if len(password.encode("utf-8")) > 72:
         raise HTTPException(status_code=401, detail="Credenciales inválidas")
 
-    conn = None
+  conn = None
     cur = None
     try:
+        # hash SOLO una vez y dentro del try
+        password_hash = hash_password(password)
+
         conn = get_conn()
         cur = conn.cursor()
         cur.execute(
-            "select id, password_hash from users where email=%s and is_active=true",
-            (email,),
+            "insert into users (email, password_hash) values (%s, %s) returning id",
+            (email, password_hash),
         )
         row = cur.fetchone()
-
         if not row:
-            raise HTTPException(status_code=401, detail="Credenciales inválidas")
+            raise HTTPException(status_code=500, detail="No se pudo obtener user_id")
+
+        user_id = row[0]
+        conn.commit()
+        return {"ok": True, "user_id": user_id}
 
 
     except HTTPException:
