@@ -1,5 +1,9 @@
+import os
+import psycopg2
+from passlib.context import CryptContext
 
-from fastapi import FastAPI, Header
+
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -17,6 +21,24 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+def get_conn():
+    if not DATABASE_URL:
+        raise RuntimeError("DATABASE_URL not set")
+    return psycopg2.connect(DATABASE_URL, sslmode="require")
+
+
+class RegisterBody(BaseModel):
+    email: str
+    password: str
+
+
+class LoginBody(BaseModel):
+    email: str
+    password: str
 
 
 class ChatRequest(BaseModel):
@@ -30,6 +52,69 @@ class ChatRequest(BaseModel):
 @app.get("/health")
 def health():
     return {"ok": True}
+
+
+@app.post("/api/auth/register")
+def register(body: RegisterBody):
+    email = body.email.strip().lower()
+
+    if len(body.password) < 8:
+        raise HTTPException(status_code=400, detail="Password mínimo 8 caracteres")
+
+    password_hash = pwd_context.hash(body.password)
+
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "insert into users (email, password_hash) values (%s, %s) returning id",
+            (email, password_hash),
+        )
+        user_id = cur.fetchone()[0]
+        conn.commit()
+        cur.close()
+        conn.close()
+        return {"ok": True, "user_id": user_id}
+
+    except psycopg2.errors.UniqueViolation:
+        raise HTTPException(status_code=400, detail="Email ya registrado")
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/auth/login")
+def login(body: LoginBody):
+    email = body.email.strip().lower()
+
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "select id, password_hash from users where email=%s and is_active=true",
+            (email,),
+        )
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+
+        if not row:
+            raise HTTPException(status_code=401, detail="Credenciales inválidas")
+
+        user_id, password_hash = row
+
+        if not pwd_context.verify(body.password, password_hash):
+            raise HTTPException(status_code=401, detail="Credenciales inválidas")
+
+        return {"ok": True, "user_id": user_id}
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 
 @app.get("/api/health")
 def api_health():
