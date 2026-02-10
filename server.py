@@ -171,31 +171,33 @@ def login(body: LoginBody):
     if len(password.encode("utf-8")) > 72:
         raise HTTPException(status_code=401, detail="Credenciales inválidas")
 
-  conn = None
+    conn = None
     cur = None
     try:
-        # hash SOLO una vez y dentro del try
-        password_hash = hash_password(password)
-
         conn = get_conn()
         cur = conn.cursor()
         cur.execute(
-            "insert into users (email, password_hash) values (%s, %s) returning id",
-            (email, password_hash),
+            "select id, password_hash from users where email=%s and is_active=true",
+            (email,),
         )
         row = cur.fetchone()
+
         if not row:
-            raise HTTPException(status_code=500, detail="No se pudo obtener user_id")
+            raise HTTPException(status_code=401, detail="Credenciales inválidas")
 
-        user_id = row[0]
-        conn.commit()
+        user_id, password_hash = row
+
+        if not verify_password(password, password_hash):
+            raise HTTPException(status_code=401, detail="Credenciales inválidas")
+
         return {"ok": True, "user_id": user_id}
-
 
     except HTTPException:
         raise
-    except Exception:
-        raise HTTPException(status_code=500, detail="Error interno")
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {str(e)}")
+
     finally:
         if cur:
             cur.close()
