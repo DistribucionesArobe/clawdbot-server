@@ -46,6 +46,19 @@ def verify_password(password: str, password_hash: str) -> bool:
         return False
     return bcrypt.checkpw(pw, password_hash.encode("utf-8"))
 
+import hashlib
+import secrets
+
+API_KEY_PREFIX_LEN = 10
+
+def generate_api_key() -> str:
+    return secrets.token_urlsafe(32)
+
+def api_key_prefix(token: str) -> str:
+    return token[:API_KEY_PREFIX_LEN]
+
+def api_key_hash(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -104,6 +117,46 @@ def get_conn():
     if not db_url:
         raise RuntimeError("DATABASE_URL not set")
     return psycopg2.connect(db_url, sslmode="require", connect_timeout=5)
+    
+def get_company_from_bearer(authorization: str):
+    auth = (authorization or "").strip()
+    if not auth.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Missing Bearer token")
+
+    token = auth.split(" ", 1)[1].strip()
+    if len(token) < 20:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    prefix = api_key_prefix(token)
+    key_hash = api_key_hash(token)
+
+    conn = None
+    cur = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT id, company_id
+            FROM api_keys
+            WHERE prefix = %s
+              AND key_hash = %s
+              AND revoked_at IS NULL
+            LIMIT 1
+        """, (prefix, key_hash))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=401, detail="Invalid or revoked token")
+
+        api_key_id, company_id = row
+
+        cur.execute("UPDATE api_keys SET last_used_at = now() WHERE id = %s", (api_key_id,))
+        conn.commit()
+
+        return {"company_id": str(company_id), "api_key_id": str(api_key_id)}
+
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
 
 
 class RegisterBody(BaseModel):
@@ -122,6 +175,11 @@ class ChatRequest(BaseModel):
     user_id: str = None
     source: str = "web"
     country: str = "MX"
+    
+class CompanyCreateBody(BaseModel):
+    name: str
+    slug: str | None = None
+    key_name: str = "default"
 
 
 @app.get("/health")
@@ -253,6 +311,62 @@ def login(body: LoginBody):
         if conn:
             conn.close()
 
+@app.post("/api/companies")
+def create_company(body: CompanyCreateBody):
+    name = (body.name or "").strip()
+    slug = (body.slug or "").strip() if body.slug else None
+    key_name = (body.key_name or "default").strip()
+
+    if not name:
+        raise HTTPException(status_code=400, detail="name requerido")
+
+    token = generate_api_key()
+    prefix = api_key_prefix(token)
+    key_hash = api_key_hash(token)
+
+    conn = None
+    cur = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+
+        cur.execute("""
+            INSERT INTO companies (name, slug)
+            VALUES (%s, %s)
+            RETURNING id
+        """, (name, slug))
+        company_id = cur.fetchone()[0]
+
+        cur.execute("""
+            INSERT INTO api_keys (company_id, name, prefix, key_hash)
+            VALUES (%s, %s, %s, %s)
+            RETURNING id
+        """, (company_id, key_name, prefix, key_hash))
+        api_key_id = cur.fetchone()[0]
+
+        conn.commit()
+
+        return {
+            "ok": True,
+            "company_id": str(company_id),
+            "api_key_id": str(api_key_id),
+            "api_key": token,          # GUARDA ESTO: se muestra una sola vez
+            "api_key_prefix": prefix
+        }
+
+    except IntegrityError:
+        if conn:
+            conn.rollback()
+        raise HTTPException(status_code=409, detail="Slug ya existe o conflicto")
+
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
 
 
 @app.get("/api/health")
