@@ -1,9 +1,36 @@
 import os
+from openai import OpenAI
 import psycopg2
 from psycopg2 import IntegrityError
 
 import bcrypt
 from fastapi import HTTPException
+
+COTIZABOT_SYSTEM_PROMPT = """
+Eres CotizaBot (CotizaExpress).
+Ayudas a cotizar materiales como tablaroca, durock, perfiles y pijas.
+Reglas:
+- No inventes precios ni existencias.
+- Si faltan datos, pide SOLO lo mínimo: ciudad, producto exacto, cantidades/medidas, ¿con IVA?
+- Responde claro y en bullets. Si puedes, incluye desglose y total.
+"""
+
+DONDEVER_SYSTEM_PROMPT = """
+Eres DóndeVer.
+Tu trabajo es decir dónde ver partidos según país (MX/USA).
+Reglas:
+- Pregunta solo lo mínimo: partido y país.
+- Responde con lista clara de opciones oficiales.
+- Si no estás seguro, dilo y pide el dato faltante.
+"""
+
+ENTIENDEUSA_SYSTEM_PROMPT = """
+Eres EntiendeUSA.
+Traduces y explicas textos ES/EN de forma natural.
+- Mantén el sentido original.
+- Si hay ambigüedad, ofrece opciones.
+- Si es para enviar, entrégalo listo para copiar.
+"""
 
 def _pw_bytes(password: str) -> bytes:
     # Siempre sanitiza igual en register y login
@@ -34,6 +61,9 @@ from pydantic import BaseModel
 
 
 app = FastAPI(title="Clawdbot Server", version="1.0")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
