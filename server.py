@@ -73,6 +73,11 @@ openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 def root():
     return {"ok": True, "service": "clawdbot-server"}
 
+@app.get("/api/whoami")
+def whoami(authorization: str = Header(default="")):
+    tenant = get_company_from_bearer(authorization)
+    return {"ok": True, **tenant}
+
 @app.get("/health")
 def health():
     return {"ok": True}
