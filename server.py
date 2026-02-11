@@ -1,3 +1,4 @@
+from prompts_cotizabot import COTIZABOT_SYSTEM_PROMPT
 import os
 from openai import OpenAI
 import psycopg2
@@ -269,10 +270,11 @@ async def chat(req: ChatRequest, authorization: str = Header(default="")):
     else:
         system_prompt = "Eres un asistente útil. Responde claro y directo."
 
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_text},
-    ]
+   messages = [
+    {"role": "system", "content": COTIZABOT_SYSTEM_PROMPT},
+    {"role": "user", "content": req.message}
+]
+
 
     response = openai_client.chat.completions.create(
         model="gpt-4o-mini",
