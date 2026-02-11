@@ -270,11 +270,13 @@ async def chat(req: ChatRequest, authorization: str = Header(default="")):
     else:
         system_prompt = "Eres un asistente útil. Responde claro y directo."
 
-   messages = [
-    {"role": "system", "content": COTIZABOT_SYSTEM_PROMPT},
-    {"role": "user", "content": req.message}
-]
+  @app.post("/api/chat")
+async def chat(req: ChatRequest):
 
+    messages = [
+        {"role": "system", "content": COTIZABOT_SYSTEM_PROMPT},
+        {"role": "user", "content": req.message}
+    ]
 
     response = openai_client.chat.completions.create(
         model="gpt-4o-mini",
