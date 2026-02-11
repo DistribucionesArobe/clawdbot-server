@@ -7,15 +7,6 @@ from psycopg2 import IntegrityError
 import bcrypt
 from fastapi import HTTPException
 
-COTIZABOT_SYSTEM_PROMPT = """
-Eres CotizaBot (CotizaExpress).
-Ayudas a cotizar materiales como tablaroca, durock, perfiles y pijas.
-Reglas:
-- No inventes precios ni existencias.
-- Si faltan datos, pide SOLO lo mínimo: ciudad, producto exacto, cantidades/medidas, ¿con IVA?
-- Responde claro y en bullets. Si puedes, incluye desglose y total.
-"""
-
 DONDEVER_SYSTEM_PROMPT = """
 Eres DóndeVer.
 Tu trabajo es decir dónde ver partidos según país (MX/USA).
