@@ -270,8 +270,9 @@ async def chat(req: ChatRequest, authorization: str = Header(default="")):
     else:
         system_prompt = "Eres un asistente útil. Responde claro y directo."
 
-  @app.post("/api/chat")
+@app.post("/api/chat")
 async def chat(req: ChatRequest):
+    print("USING_COTIZABOT_PROMPT", COTIZABOT_SYSTEM_PROMPT[:80])
 
     messages = [
         {"role": "system", "content": COTIZABOT_SYSTEM_PROMPT},
