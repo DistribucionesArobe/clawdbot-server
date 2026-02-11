@@ -249,6 +249,8 @@ def login(body: LoginBody):
 def api_health():
     return {"ok": True}
 
+from fastapi import Header
+
 @app.post("/api/chat")
 async def chat(req: ChatRequest, authorization: str = Header(default="")):
     app_id = (req.app or "cotizabot").lower().strip()
@@ -260,7 +262,7 @@ async def chat(req: ChatRequest, authorization: str = Header(default="")):
     if not openai_client:
         return {"reply": "Falta configurar OPENAI_API_KEY en Render."}
 
-    # Elegir system prompt según app
+    # Elegir system prompt según app (router)
     if app_id == "cotizabot":
         system_prompt = COTIZABOT_SYSTEM_PROMPT
     elif app_id == "dondever":
@@ -270,13 +272,12 @@ async def chat(req: ChatRequest, authorization: str = Header(default="")):
     else:
         system_prompt = "Eres un asistente útil. Responde claro y directo."
 
-@app.post("/api/chat")
-async def chat(req: ChatRequest):
-    print("USING_COTIZABOT_PROMPT", COTIZABOT_SYSTEM_PROMPT[:80])
+    # (Debug temporal) confirma qué prompt se usa
+    print("USING_APP", app_id, "PROMPT_HEAD", system_prompt[:80])
 
     messages = [
-        {"role": "system", "content": COTIZABOT_SYSTEM_PROMPT},
-        {"role": "user", "content": req.message}
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_text}
     ]
 
     response = openai_client.chat.completions.create(
