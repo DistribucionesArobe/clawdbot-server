@@ -64,6 +64,25 @@ def root():
 def health():
     return {"ok": True}
 
+@app.get("/api/db/test")
+def db_test():
+    conn = None
+    try:
+        db_url = os.getenv("DATABASE_URL", "").strip()
+        if not db_url:
+            return {"db_ok": False, "error": "DATABASE_URL no está configurada en Render."}
+
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        cur = conn.cursor()
+        cur.execute("SELECT 1;")
+        result = cur.fetchone()
+        cur.close()
+        return {"db_ok": True, "result": result}
+    except Exception as e:
+        return {"db_ok": False, "error": str(e)}
+    finally:
+        if conn:
+            conn.close()
 
 app.add_middleware(
     CORSMiddleware,
