@@ -3,12 +3,13 @@ import os
 from openai import OpenAI
 import psycopg2
 from psycopg2 import IntegrityError
-
+from fastapi import UploadFile, File
+from openpyxl import load_workbook
 import bcrypt
 from fastapi import HTTPException
 
 DONDEVER_SYSTEM_PROMPT = """
-Eres DóndeVer.
+Eres DóndeVer..
 Tu trabajo es decir dónde ver partidos según país (MX/USA).
 Reglas:
 - Pregunta solo lo mínimo: partido y país.
@@ -37,7 +38,9 @@ def hash_password(password: str) -> str:
     salt = bcrypt.gensalt(rounds=12)
     return bcrypt.hashpw(pw, salt).decode("utf-8")
 
-
+def norm_name(s: str) -> str:
+    return " ".join((s or "").strip().lower().split())
+    
 def verify_password(password: str, password_hash: str) -> bool:
     pw = _pw_bytes(password)
     if len(pw) > 72:
@@ -68,52 +71,6 @@ from pydantic import BaseModel
 app = FastAPI(title="Clawdbot Server", version="1.0")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
-
-@app.get("/")
-def root():
-    return {"ok": True, "service": "clawdbot-server"}
-
-@app.get("/api/whoami")
-def whoami(authorization: str = Header(default="")):
-    tenant = get_company_from_bearer(authorization)
-    return {"ok": True, **tenant}
-
-@app.get("/health")
-def health():
-    return {"ok": True}
-
-@app.get("/api/db/test")
-def db_test():
-    conn = None
-    try:
-        db_url = os.getenv("DATABASE_URL", "").strip()
-        if not db_url:
-            return {"db_ok": False, "error": "DATABASE_URL no está configurada en Render."}
-
-        conn = psycopg2.connect(db_url, connect_timeout=5)
-        cur = conn.cursor()
-        cur.execute("SELECT 1;")
-        result = cur.fetchone()
-        cur.close()
-        return {"db_ok": True, "result": result}
-    except Exception as e:
-        return {"db_ok": False, "error": str(e)}
-    finally:
-        if conn:
-            conn.close()
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "https://cotizaexpress.com",
-        "https://www.cotizaexpress.com",
-        "https://buildquote-12.preview.emergentagent.com",
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
@@ -185,6 +142,203 @@ class CompanyCreateBody(BaseModel):
     name: str
     slug: str | None = None
     key_name: str = "default"
+
+
+@app.get("/")
+def root():
+    return {"ok": True, "service": "clawdbot-server"}
+
+@app.get("/api/whoami")
+def whoami(authorization: str = Header(default="")):
+    tenant = get_company_from_bearer(authorization)
+    return {"ok": True, **tenant}
+
+@app.post("/api/pricebook/upload")
+def pricebook_upload(
+    authorization: str = Header(default=""),
+    file: UploadFile = File(...),
+):
+    tenant = get_company_from_bearer(authorization)
+    company_id = tenant["company_id"]
+
+    if not file.filename.lower().endswith((".xlsx", ".xlsm")):
+        raise HTTPException(status_code=400, detail="Solo archivos .xlsx o .xlsm")
+
+    conn = None
+    cur = None
+    upload_id = None
+
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+
+        # Log del upload
+        cur.execute("""
+            INSERT INTO pricebook_uploads (company_id, filename, status)
+            VALUES (%s, %s, 'processing')
+            RETURNING id
+        """, (company_id, file.filename))
+        upload_id = cur.fetchone()[0]
+        conn.commit()
+
+        # Leer Excel
+        content = file.file.read()
+        wb = load_workbook(filename=bytes(content))
+        ws = wb.active
+
+        header_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True))
+        headers_norm = [str(h or "").strip().lower() for h in header_row]
+        idx = {h: i for i, h in enumerate(headers_norm)}
+
+        # Requerimos solo name y price
+        required = {"name", "price"}
+        missing = required - set(headers_norm)
+        if missing:
+            raise HTTPException(status_code=400, detail=f"Faltan columnas: {sorted(missing)}")
+
+        rows_total = 0
+        rows_upserted = 0
+        rows_skipped = 0
+
+        for r in ws.iter_rows(min_row=2, values_only=True):
+            if r is None or all(v is None or str(v).strip() == "" for v in r):
+                continue
+
+            rows_total += 1
+
+            name = str(r[idx["name"]]).strip() if r[idx["name"]] is not None else ""
+            price_raw = r[idx["price"]]
+
+            if not name or price_raw is None:
+                rows_skipped += 1
+                continue
+
+            try:
+                price = float(price_raw)
+            except Exception:
+                rows_skipped += 1
+                continue
+
+            if price < 0:
+                rows_skipped += 1
+                continue
+
+            unit = None
+            if "unit" in idx and r[idx["unit"]] is not None:
+                unit = str(r[idx["unit"]]).strip()
+
+            vat_rate = None
+            if "vat_rate" in idx and r[idx["vat_rate"]] is not None:
+                try:
+                    vat_rate = float(r[idx["vat_rate"]])
+                except Exception:
+                    vat_rate = None
+
+            sku = None
+            if "sku" in idx and r[idx["sku"]] is not None:
+                sku_val = str(r[idx["sku"]]).strip()
+                sku = sku_val if sku_val else None
+
+            name_norm = norm_name(name)
+
+            cur.execute("""
+                INSERT INTO pricebook_items
+                    (company_id, sku, name, name_norm, unit, price, vat_rate, source, updated_at)
+                VALUES
+                    (%s, %s, %s, %s, %s, %s, %s, 'excel', now())
+                ON CONFLICT (company_id, name_norm)
+                DO UPDATE SET
+                    sku = EXCLUDED.sku,
+                    name = EXCLUDED.name,
+                    unit = EXCLUDED.unit,
+                    price = EXCLUDED.price,
+                    vat_rate = EXCLUDED.vat_rate,
+                    source = 'excel',
+                    updated_at = now()
+            """, (company_id, sku, name, name_norm, unit, price, vat_rate))
+
+            rows_upserted += 1
+
+        conn.commit()
+
+        cur.execute("""
+            UPDATE pricebook_uploads
+            SET status='success',
+                rows_total=%s,
+                rows_upserted=%s,
+                error=NULL,
+                finished_at=now()
+            WHERE id=%s
+        """, (rows_total, rows_upserted, upload_id))
+        conn.commit()
+
+        return {
+            "ok": True,
+            "company_id": company_id,
+            "upload_id": str(upload_id),
+            "rows_total": rows_total,
+            "rows_upserted": rows_upserted,
+            "rows_skipped": rows_skipped
+        }
+
+    except HTTPException as e:
+        if conn and cur and upload_id:
+            cur.execute("""
+                UPDATE pricebook_uploads
+                SET status='failed', error=%s, finished_at=now()
+                WHERE id=%s
+            """, (str(e.detail), upload_id))
+            conn.commit()
+        raise
+
+    except Exception as e:
+        if conn and cur and upload_id:
+            cur.execute("""
+                UPDATE pricebook_uploads
+                SET status='failed', error=%s, finished_at=now()
+                WHERE id=%s
+            """, (str(e), upload_id))
+            conn.commit()
+        raise HTTPException(status_code=500, detail=str(e))
+
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
+
+    
+@app.get("/api/db/test")
+def db_test():
+    conn = None
+    try:
+        db_url = os.getenv("DATABASE_URL", "").strip()
+        if not db_url:
+            return {"db_ok": False, "error": "DATABASE_URL no está configurada en Render."}
+
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        cur = conn.cursor()
+        cur.execute("SELECT 1;")
+        result = cur.fetchone()
+        cur.close()
+        return {"db_ok": True, "result": result}
+    except Exception as e:
+        return {"db_ok": False, "error": str(e)}
+    finally:
+        if conn:
+            conn.close()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://cotizaexpress.com",
+        "https://www.cotizaexpress.com",
+        "https://buildquote-12.preview.emergentagent.com",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
 
 
 @app.get("/health")
