@@ -88,17 +88,29 @@ from pydantic import BaseModel
 
 
 app = FastAPI(title="Clawdbot Server", version="1.0")
+
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
+# -------------------------
+# Version check
+# -------------------------
+@app.get("/api/_version")
+def _version():
+    return {"version": "pricebook-v2-2026-02-12"}
+
+# -------------------------
+# DB
+# -------------------------
 def get_conn():
     db_url = (DATABASE_URL or "").strip()
     if not db_url:
         raise RuntimeError("DATABASE_URL not set")
     return psycopg2.connect(db_url, sslmode="require", connect_timeout=5)
-    
+
+
 def get_company_from_bearer(authorization: str):
     auth = (authorization or "").strip()
     if not auth.lower().startswith("bearer "):
@@ -116,14 +128,17 @@ def get_company_from_bearer(authorization: str):
     try:
         conn = get_conn()
         cur = conn.cursor()
-        cur.execute("""
+        cur.execute(
+            """
             SELECT id, company_id
             FROM api_keys
             WHERE prefix = %s
               AND key_hash = %s
               AND revoked_at IS NULL
             LIMIT 1
-        """, (prefix, key_hash))
+            """,
+            (prefix, key_hash),
+        )
         row = cur.fetchone()
         if not row:
             raise HTTPException(status_code=401, detail="Invalid or revoked token")
@@ -136,8 +151,11 @@ def get_company_from_bearer(authorization: str):
         return {"company_id": str(company_id), "api_key_id": str(api_key_id)}
 
     finally:
-        if cur: cur.close()
-        if conn: conn.close()
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
+
 
 
 class RegisterBody(BaseModel):
