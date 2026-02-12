@@ -216,10 +216,12 @@ def pricebook_upload(
                 continue
 
             try:
-                price = float(price_raw)
+                price_str = str(price_raw).replace("$", "").replace(",", "").strip()
+                price = float(price_str)
             except Exception:
-                rows_skipped += 1
+               rows_skipped += 1
                 continue
+
 
             if price < 0:
                 rows_skipped += 1
