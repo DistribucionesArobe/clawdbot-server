@@ -179,7 +179,7 @@ def pricebook_upload(
             INSERT INTO pricebook_uploads (company_id, filename, status)
             VALUES (%s, %s, 'processing')
             RETURNING id
-        """,
+            """,
             (company_id, file.filename),
         )
         upload_id = cur.fetchone()[0]
@@ -190,15 +190,58 @@ def pricebook_upload(
         wb = load_workbook(BytesIO(content))
         ws = wb.active
 
+        # --- Headers (fila 1) ---
         header_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True))
-        headers_norm = [str(h or "").strip().lower() for h in header_row]
-        idx = {h: i for i, h in enumerate(headers_norm)}
+        headers_raw = [str(h or "") for h in header_row]
+        headers_norm = [h.strip().lower() for h in headers_raw]
+
+        # --- Aliases ES -> EN (y variantes comunes) ---
+        alias = {
+            # name
+            "nombre": "name",
+            "producto": "name",
+            "product": "name",
+
+            # price
+            "precio": "price",
+            "precio_base": "price",
+            "precio unitario": "price",
+            "costo": "price",
+            "cost": "price",
+
+            # unit
+            "unidad": "unit",
+            "uom": "unit",
+
+            # category
+            "categoria": "category",
+            "categoría": "category",
+
+            # description
+            "descripcion": "description",
+            "descripción": "description",
+
+            # stock
+            "existencia": "stock",
+            "inventario": "stock",
+        }
+
+        headers_mapped = [alias.get(h, h) for h in headers_norm]
+        idx = {h: i for i, h in enumerate(headers_mapped)}
 
         # Requerimos solo name y price
         required = {"name", "price"}
-        missing = required - set(headers_norm)
+        missing = required - set(headers_mapped)
         if missing:
-            raise HTTPException(status_code=400, detail=f"Faltan columnas: {sorted(missing)}")
+            # debug útil (opcional): muestra qué headers vio el server
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": f"Faltan columnas requeridas: {sorted(missing)}",
+                    "headers_detectadas": headers_norm,
+                    "headers_mapeadas": headers_mapped,
+                },
+            )
 
         rows_total = 0
         rows_upserted = 0
@@ -211,7 +254,7 @@ def pricebook_upload(
             rows_total += 1
 
             name = str(r[idx["name"]]).strip() if r[idx["name"]] is not None else ""
-            price_raw = r[idx["price"]]
+            price_raw = r[idx["price"]] if idx.get("price") is not None else None
 
             if not name or price_raw is None:
                 rows_skipped += 1
@@ -225,18 +268,18 @@ def pricebook_upload(
                 continue
 
             unit = None
-            if "unit" in idx and r[idx["unit"]] is not None:
-                unit = str(r[idx["unit"]]).strip()
+            if "unit" in idx and idx["unit"] < len(r) and r[idx["unit"]] is not None:
+                unit = str(r[idx["unit"]]).strip() or None
 
             vat_rate = None
-            if "vat_rate" in idx and r[idx["vat_rate"]] is not None:
+            if "vat_rate" in idx and idx["vat_rate"] < len(r) and r[idx["vat_rate"]] is not None:
                 try:
                     vat_rate = float(r[idx["vat_rate"]])
                 except Exception:
                     vat_rate = None
 
             sku = None
-            if "sku" in idx and r[idx["sku"]] is not None:
+            if "sku" in idx and idx["sku"] < len(r) and r[idx["sku"]] is not None:
                 sku_val = str(r[idx["sku"]]).strip()
                 sku = sku_val if sku_val else None
 
@@ -257,7 +300,7 @@ def pricebook_upload(
                     vat_rate = EXCLUDED.vat_rate,
                     source = 'excel',
                     updated_at = now()
-            """,
+                """,
                 (company_id, sku, name, name_norm, unit, price, vat_rate),
             )
 
@@ -274,7 +317,7 @@ def pricebook_upload(
                 error=NULL,
                 finished_at=now()
             WHERE id=%s
-        """,
+            """,
             (rows_total, rows_upserted, upload_id),
         )
         conn.commit()
@@ -295,7 +338,7 @@ def pricebook_upload(
                 UPDATE pricebook_uploads
                 SET status='failed', error=%s, finished_at=now()
                 WHERE id=%s
-            """,
+                """,
                 (str(e.detail), upload_id),
             )
             conn.commit()
@@ -308,7 +351,7 @@ def pricebook_upload(
                 UPDATE pricebook_uploads
                 SET status='failed', error=%s, finished_at=now()
                 WHERE id=%s
-            """,
+                """,
                 (str(e), upload_id),
             )
             conn.commit()
@@ -321,7 +364,6 @@ def pricebook_upload(
             conn.close()
 
 
-    
 @app.get("/api/db/test")
 def db_test():
     conn = None
