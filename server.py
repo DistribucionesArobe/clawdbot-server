@@ -5,6 +5,7 @@ import psycopg2
 from psycopg2 import IntegrityError
 from fastapi import UploadFile, File
 from openpyxl import load_workbook
+from io import BytesIO
 import bcrypt
 from fastapi import HTTPException
 
@@ -183,8 +184,9 @@ def pricebook_upload(
 
         # Leer Excel
         content = file.file.read()
-        wb = load_workbook(filename=bytes(content))
+        wb = load_workbook(BytesIO(content))
         ws = wb.active
+
 
         header_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True))
         headers_norm = [str(h or "").strip().lower() for h in header_row]
