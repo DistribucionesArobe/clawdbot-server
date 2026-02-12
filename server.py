@@ -41,7 +41,25 @@ def hash_password(password: str) -> str:
 
 def norm_name(s: str) -> str:
     return " ".join((s or "").strip().lower().split())
-    
+
+import re
+
+def extract_product_query(text: str) -> str:
+    t = (text or "").lower().strip()
+    t = re.sub(r"[^a-z0-9áéíóúñü\s]", " ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+
+    words = [w for w in t.split() if w]
+
+    cleaned = [w for w in words if w not in {
+        "precio","precios","cuánto","cuanto","cuesta","vale","costo","cost",
+        "cotiza","cotización","cotizacion","presupuesto","lista","de","del","la","el",
+        "un","una","por","favor","me","dime","oye","quiero","saber"
+    }]
+
+    return " ".join(cleaned).strip() or t
+
+
 def verify_password(password: str, password_hash: str) -> bool:
     pw = _pw_bytes(password)
     if len(pw) > 72:
@@ -651,25 +669,34 @@ def search_pricebook(conn, company_id: str, q: str, limit: int = 8):
     if not q:
         return []
 
-    qn = norm_name(q)
+    q_clean = extract_product_query(q)
+    qn = norm_name(q_clean)
+
+    tokens = [t for t in qn.split() if len(t) >= 3]
+    if not tokens:
+        tokens = [qn]
+
+    where_parts = []
+    params = [company_id]
+
+    for tok in tokens[:6]:
+        where_parts.append("name_norm LIKE %s")
+        params.append(f"%{tok}%")
+
+    where_sql = " AND ".join(where_parts)
+
     cur = conn.cursor()
     try:
         cur.execute(
-            """
+            f"""
             SELECT sku, name, unit, price, vat_rate, updated_at
             FROM pricebook_items
             WHERE company_id=%s
-              AND (name_norm LIKE %s OR sku ILIKE %s)
-            ORDER BY
-              CASE
-                WHEN name_norm = %s THEN 0
-                WHEN name_norm LIKE %s THEN 1
-                ELSE 2
-              END,
-              updated_at DESC
+              AND ({where_sql} OR sku ILIKE %s)
+            ORDER BY updated_at DESC
             LIMIT %s
             """,
-            (company_id, f"%{qn}%", f"%{q}%", qn, f"{qn}%", limit),
+            (*params, f"%{q_clean}%", limit),
         )
         rows = cur.fetchall()
 
@@ -707,7 +734,7 @@ async def chat(req: ChatRequest, authorization: str = Header(default="")):
 
             conn = get_conn()
             try:
-                items = search_pricebook(conn, company_id, user_text, limit=8)
+                items = search_pricebook(conn, company_id, extract_product_query(user_text), limit=8)
             finally:
                 conn.close()
 
