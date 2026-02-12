@@ -675,6 +675,23 @@ def looks_like_price_question(text: str) -> bool:
     ]
     return any(x in t for x in triggers)
 
+import re
+
+def extract_qty_and_product(text: str):
+    """
+    Ejemplos que entiende:
+    - "10 tablaroca ultralight"
+    - "2 basecoat gris"
+    - "15 pija tablaroca"
+    """
+    t = (text or "").strip().lower()
+    m = re.match(r"^\s*(\d+)\s+(.+?)\s*$", t)
+    if not m:
+        return None, None
+    qty = int(m.group(1))
+    product = m.group(2).strip()
+    return qty, product
+
 
 @app.get("/api/health")
 def api_health():
@@ -741,37 +758,79 @@ async def chat(req: ChatRequest, authorization: str = Header(default="")):
     if not user_text:
         return {"reply": "Escribe un mensaje para poder ayudarte."}
 
+    # --- SOLO CotizaBot usa catálogo ---
+    if app_id == "cotizabot":
+
+        # -----------------------------
+        # 1️⃣ Cantidad + producto
+        # -----------------------------
+        qty, prod_query = extract_qty_and_product(user_text)
+        if qty and prod_query:
+            try:
+                tenant = get_company_from_bearer(authorization)
+                company_id = tenant["company_id"]
+
+                conn = get_conn()
+                try:
+                    items = search_pricebook(conn, company_id, prod_query, limit=1)
+                finally:
+                    conn.close()
+
+                if not items:
+                    return {"reply": f"No encontré '{prod_query}' en tu catálogo."}
+
+                it = items[0]
+                unit = it.get("unit") or "unidad"
+                price = float(it.get("price") or 0)
+
+                subtotal = qty * price
+                iva = subtotal * 0.16
+                total = subtotal + iva
+
+                return {"reply":
+                    "Cotización rápida:\n"
+                    f"- {qty} {unit} de {it['name']} x ${price:,.2f} = ${subtotal:,.2f}\n"
+                    f"IVA (16%): ${iva:,.2f}\n"
+                    f"Total: ${total:,.2f}\n\n"
+                    "¿Agregamos otro producto?"
+                }
+
+            except Exception:
+                pass
+
+        # -----------------------------
+        # 2️⃣ Consulta de precio simple
+        # -----------------------------
+        if looks_like_price_question(user_text):
+            try:
+                tenant = get_company_from_bearer(authorization)
+                company_id = tenant["company_id"]
+
+                conn = get_conn()
+                try:
+                    items = search_pricebook(conn, company_id, user_text, limit=8)
+                finally:
+                    conn.close()
+
+                if items:
+                    lines = []
+                    for it in items[:8]:
+                        unit = f" / {it['unit']}" if it.get("unit") else ""
+                        price = it["price"]
+                        lines.append(f"- {it['name']}: ${price:,.2f}{unit}")
+
+                    reply = "Encontré estos precios en tu catálogo:\n" + "\n".join(lines) + \
+                            "\n\nDime cantidades para armar cotización (ej: 10 tablaroca ultralight)."
+                    return {"reply": reply}
+            except Exception:
+                pass
+
+    # -----------------------------
+    # 3️⃣ Fallback a OpenAI
+    # -----------------------------
     if not openai_client:
         return {"reply": "Falta configurar OPENAI_API_KEY en Render."}
 
-    # --- CotizaBot: si parece consulta de precio, busca en pricebook ---
-    if app_id == "cotizabot" and looks_like_price_question(user_text):
-        try:
-            tenant = get_company_from_bearer(authorization)
-            company_id = tenant["company_id"]
-
-            conn = get_conn()
-            try:
-                items = search_pricebook(conn, company_id, extract_product_query(user_text), limit=8)
-            finally:
-                conn.close()
-
-            if items:
-                lines = []
-                for it in items[:8]:
-                    unit = f" / {it['unit']}" if it.get("unit") else ""
-                    price = it["price"]
-                    lines.append(f"- {it['name']}: ${price:,.2f}{unit}")
-
-                reply = "Encontré estos precios en tu catálogo:\n" + "\n".join(lines) + \
-                        "\n\n¿Quieres que te arme una cotización? Dime cantidades (ej: 10 tablarocas ultralight)."
-                return {"reply": reply}
-        except Exception:
-            # Si falla DB, no bloquees el chat; cae a OpenAI normal
-            pass
-
-    
-    # Router por app
     if app_id == "cotizabot":
         system_prompt = COTIZABOT_SYSTEM_PROMPT
     elif app_id == "dondever":
@@ -780,9 +839,6 @@ async def chat(req: ChatRequest, authorization: str = Header(default="")):
         system_prompt = ENTIENDEUSA_SYSTEM_PROMPT
     else:
         system_prompt = "Eres un asistente útil. Responde claro y directo."
-
-    # Debug temporal (verifica que está usando el prompt correcto)
-    print("USING_APP", app_id, "PROMPT_HEAD", system_prompt[:120])
 
     messages = [
         {"role": "system", "content": system_prompt},
