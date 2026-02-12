@@ -432,7 +432,7 @@ def db_test():
         if not db_url:
             return {"db_ok": False, "error": "DATABASE_URL no está configurada en Render."}
 
-        conn = psycopg2.connect(db_url, connect_timeout=5)
+        conn = psycopg2.connect(db_url, sslmode="require", connect_timeout=5)
         cur = conn.cursor()
         cur.execute("SELECT 1;")
         result = cur.fetchone()
@@ -475,21 +475,6 @@ def db_ping():
         return {"ok": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/db/ping")
-def db_ping():
-    try:
-        conn = psycopg2.connect(DATABASE_URL, sslmode="require", connect_timeout=5)
-        cur = conn.cursor()
-        cur.execute("select 1;")
-        cur.fetchone()
-        cur.close()
-        conn.close()
-        return {"ok": True}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-from fastapi import HTTPException
 
 # Asegúrate de tener esto ya:
 
@@ -645,12 +630,63 @@ def create_company(body: CompanyCreateBody):
         if cur: cur.close()
         if conn: conn.close()
 
+def looks_like_price_question(text: str) -> bool:
+    t = (text or "").lower()
+    triggers = [
+        "precio", "cuánto", "cuanto", "vale", "costo", "cost",
+        "$", "cotiza", "cotización", "cotizacion", "presupuesto",
+        "lista de precios", "price", "cuesta"
+    ]
+    return any(x in t for x in triggers)
+
 
 @app.get("/api/health")
 def api_health():
     return {"ok": True}
 
 from fastapi import Header
+
+def search_pricebook(conn, company_id: str, q: str, limit: int = 8):
+    q = (q or "").strip()
+    if not q:
+        return []
+
+    qn = norm_name(q)
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT sku, name, unit, price, vat_rate, updated_at
+            FROM pricebook_items
+            WHERE company_id=%s
+              AND (name_norm LIKE %s OR sku ILIKE %s)
+            ORDER BY
+              CASE
+                WHEN name_norm = %s THEN 0
+                WHEN name_norm LIKE %s THEN 1
+                ELSE 2
+              END,
+              updated_at DESC
+            LIMIT %s
+            """,
+            (company_id, f"%{qn}%", f"%{q}%", qn, f"{qn}%", limit),
+        )
+        rows = cur.fetchall()
+
+        items = []
+        for sku, name, unit, price, vat_rate, updated_at in rows:
+            items.append({
+                "sku": sku,
+                "name": name,
+                "unit": unit,
+                "price": float(price) if price is not None else None,
+                "vat_rate": float(vat_rate) if vat_rate is not None else None,
+                "updated_at": updated_at.isoformat() if updated_at else None,
+            })
+        return items
+    finally:
+        cur.close()
+
 
 @app.post("/api/chat")
 async def chat(req: ChatRequest, authorization: str = Header(default="")):
@@ -663,6 +699,33 @@ async def chat(req: ChatRequest, authorization: str = Header(default="")):
     if not openai_client:
         return {"reply": "Falta configurar OPENAI_API_KEY en Render."}
 
+    # --- CotizaBot: si parece consulta de precio, busca en pricebook ---
+    if app_id == "cotizabot" and looks_like_price_question(user_text):
+        try:
+            tenant = get_company_from_bearer(authorization)
+            company_id = tenant["company_id"]
+
+            conn = get_conn()
+            try:
+                items = search_pricebook(conn, company_id, user_text, limit=8)
+            finally:
+                conn.close()
+
+            if items:
+                lines = []
+                for it in items[:8]:
+                    unit = f" / {it['unit']}" if it.get("unit") else ""
+                    price = it["price"]
+                    lines.append(f"- {it['name']}: ${price:,.2f}{unit}")
+
+                reply = "Encontré estos precios en tu catálogo:\n" + "\n".join(lines) + \
+                        "\n\n¿Quieres que te arme una cotización? Dime cantidades (ej: 10 tablarocas ultralight)."
+                return {"reply": reply}
+        except Exception:
+            # Si falla DB, no bloquees el chat; cae a OpenAI normal
+            pass
+
+    
     # Router por app
     if app_id == "cotizabot":
         system_prompt = COTIZABOT_SYSTEM_PROMPT
