@@ -363,6 +363,66 @@ def pricebook_upload(
         if conn:
             conn.close()
 
+from fastapi import Query
+
+@app.get("/api/pricebook/items")
+def pricebook_items(
+    authorization: str = Header(default=""),
+    q: str | None = Query(default=None),
+    limit: int = Query(default=20, ge=1, le=200),
+):
+    tenant = get_company_from_bearer(authorization)
+    company_id = tenant["company_id"]
+
+    conn = None
+    cur = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+
+        if q:
+            qn = norm_name(q)
+            cur.execute(
+                """
+                SELECT sku, name, unit, price, vat_rate, updated_at
+                FROM pricebook_items
+                WHERE company_id=%s
+                  AND (name_norm LIKE %s OR sku ILIKE %s)
+                ORDER BY updated_at DESC
+                LIMIT %s
+                """,
+                (company_id, f"%{qn}%", f"%{q}%", limit),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT sku, name, unit, price, vat_rate, updated_at
+                FROM pricebook_items
+                WHERE company_id=%s
+                ORDER BY updated_at DESC
+                LIMIT %s
+                """,
+                (company_id, limit),
+            )
+
+        rows = cur.fetchall()
+        items = []
+        for sku, name, unit, price, vat_rate, updated_at in rows:
+            items.append({
+                "sku": sku,
+                "name": name,
+                "unit": unit,
+                "price": float(price) if price is not None else None,
+                "vat_rate": float(vat_rate) if vat_rate is not None else None,
+                "updated_at": updated_at.isoformat() if updated_at else None,
+            })
+
+        return {"ok": True, "company_id": company_id, "count": len(items), "items": items}
+
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
+
 
 @app.get("/api/db/test")
 def db_test():
