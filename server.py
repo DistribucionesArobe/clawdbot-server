@@ -174,11 +174,14 @@ def pricebook_upload(
         cur = conn.cursor()
 
         # Log del upload
-        cur.execute("""
+        cur.execute(
+            """
             INSERT INTO pricebook_uploads (company_id, filename, status)
             VALUES (%s, %s, 'processing')
             RETURNING id
-        """, (company_id, file.filename))
+        """,
+            (company_id, file.filename),
+        )
         upload_id = cur.fetchone()[0]
         conn.commit()
 
@@ -186,7 +189,6 @@ def pricebook_upload(
         content = file.file.read()
         wb = load_workbook(BytesIO(content))
         ws = wb.active
-
 
         header_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True))
         headers_norm = [str(h or "").strip().lower() for h in header_row]
@@ -219,11 +221,6 @@ def pricebook_upload(
                 price_str = str(price_raw).replace("$", "").replace(",", "").strip()
                 price = float(price_str)
             except Exception:
-               rows_skipped += 1
-                continue
-
-
-            if price < 0:
                 rows_skipped += 1
                 continue
 
@@ -245,7 +242,8 @@ def pricebook_upload(
 
             name_norm = norm_name(name)
 
-            cur.execute("""
+            cur.execute(
+                """
                 INSERT INTO pricebook_items
                     (company_id, sku, name, name_norm, unit, price, vat_rate, source, updated_at)
                 VALUES
@@ -259,13 +257,16 @@ def pricebook_upload(
                     vat_rate = EXCLUDED.vat_rate,
                     source = 'excel',
                     updated_at = now()
-            """, (company_id, sku, name, name_norm, unit, price, vat_rate))
+            """,
+                (company_id, sku, name, name_norm, unit, price, vat_rate),
+            )
 
             rows_upserted += 1
 
         conn.commit()
 
-        cur.execute("""
+        cur.execute(
+            """
             UPDATE pricebook_uploads
             SET status='success',
                 rows_total=%s,
@@ -273,7 +274,9 @@ def pricebook_upload(
                 error=NULL,
                 finished_at=now()
             WHERE id=%s
-        """, (rows_total, rows_upserted, upload_id))
+        """,
+            (rows_total, rows_upserted, upload_id),
+        )
         conn.commit()
 
         return {
@@ -282,32 +285,41 @@ def pricebook_upload(
             "upload_id": str(upload_id),
             "rows_total": rows_total,
             "rows_upserted": rows_upserted,
-            "rows_skipped": rows_skipped
+            "rows_skipped": rows_skipped,
         }
 
     except HTTPException as e:
         if conn and cur and upload_id:
-            cur.execute("""
+            cur.execute(
+                """
                 UPDATE pricebook_uploads
                 SET status='failed', error=%s, finished_at=now()
                 WHERE id=%s
-            """, (str(e.detail), upload_id))
+            """,
+                (str(e.detail), upload_id),
+            )
             conn.commit()
         raise
 
     except Exception as e:
         if conn and cur and upload_id:
-            cur.execute("""
+            cur.execute(
+                """
                 UPDATE pricebook_uploads
                 SET status='failed', error=%s, finished_at=now()
                 WHERE id=%s
-            """, (str(e), upload_id))
+            """,
+                (str(e), upload_id),
+            )
             conn.commit()
         raise HTTPException(status_code=500, detail=str(e))
 
     finally:
-        if cur: cur.close()
-        if conn: conn.close()
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
+
 
     
 @app.get("/api/db/test")
