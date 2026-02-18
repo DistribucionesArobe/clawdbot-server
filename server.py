@@ -72,6 +72,9 @@ import hashlib
 import secrets
 
 API_KEY_PREFIX_LEN = 10
+SESSION_COOKIE_NAME = "session"
+SESSION_TTL_DAYS = int(os.getenv("SESSION_TTL_DAYS", "14"))
+
 
 def generate_api_key() -> str:
     return secrets.token_urlsafe(32)
@@ -82,9 +85,10 @@ def api_key_prefix(token: str) -> str:
 def api_key_hash(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from datetime import datetime, timedelta, timezone
 
 
 app = FastAPI(title="Clawdbot Server", version="1.0")
@@ -109,6 +113,46 @@ def get_conn():
     if not db_url:
         raise RuntimeError("DATABASE_URL not set")
     return psycopg2.connect(db_url, sslmode="require", connect_timeout=5)
+
+def create_session(conn, user_id: int) -> str:
+    sid = secrets.token_urlsafe(32)
+    exp = datetime.now(timezone.utc) + timedelta(days=SESSION_TTL_DAYS)
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO sessions (id, user_id, expires_at) VALUES (%s, %s, %s)",
+        (sid, user_id, exp),
+    )
+    return sid
+
+
+def get_user_from_session(request: Request):
+    sid = request.cookies.get(SESSION_COOKIE_NAME)
+    if not sid:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    conn = None
+    cur = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT u.id, u.email
+            FROM sessions s
+            JOIN users u ON u.id = s.user_id
+            WHERE s.id=%s AND s.expires_at > now()
+            LIMIT 1
+            """,
+            (sid,),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=401, detail="Not authenticated")
+        user_id, email = row
+        return {"id": int(user_id), "email": email}
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
 
 
 def get_company_from_bearer(authorization: str):
@@ -486,6 +530,7 @@ app.add_middleware(
         "https://cotizaexpress.com",
         "https://www.cotizaexpress.com",
         "https://buildquote-12.preview.emergentagent.com",
+        "https://ferreteria-whatsapp.emergent.host",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -566,7 +611,7 @@ def register(body: RegisterBody):
 
 
 @app.post("/api/auth/login")
-def login(body: LoginBody):
+def login(body: LoginBody, response: Response):
     email = (body.email or "").strip().lower()
     password = (body.password or "").strip()
 
@@ -595,7 +640,20 @@ def login(body: LoginBody):
         if not verify_password(password, password_hash):
             raise HTTPException(status_code=401, detail="Credenciales inválidas")
 
-        return {"ok": True, "user_id": user_id}
+        sid = create_session(conn, int(user_id))
+        conn.commit()
+
+        response.set_cookie(
+            key=SESSION_COOKIE_NAME,
+            value=sid,
+            httponly=True,
+            secure=True,
+            samesite="lax",
+            path="/",
+            max_age=SESSION_TTL_DAYS * 24 * 3600,
+        )
+
+        return {"ok": True}
 
     except HTTPException:
         raise
@@ -608,6 +666,30 @@ def login(body: LoginBody):
             cur.close()
         if conn:
             conn.close()
+
+@app.get("/api/auth/me")
+def auth_me(request: Request):
+    u = get_user_from_session(request)
+    return {"ok": True, "user": u}
+
+@app.post("/api/auth/logout")
+def auth_logout(request: Request, response: Response):
+    sid = request.cookies.get(SESSION_COOKIE_NAME)
+    if sid:
+        conn = None
+        cur = None
+        try:
+            conn = get_conn()
+            cur = conn.cursor()
+            cur.execute("DELETE FROM sessions WHERE id=%s", (sid,))
+            conn.commit()
+        finally:
+            if cur: cur.close()
+            if conn: conn.close()
+
+    response.delete_cookie(SESSION_COOKIE_NAME, path="/")
+    return {"ok": True}
+
 
 @app.post("/api/companies")
 def create_company(body: CompanyCreateBody):
