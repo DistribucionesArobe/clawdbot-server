@@ -609,6 +609,7 @@ def register(body: RegisterBody):
         if conn:
             conn.close()
 
+from fastapi import HTTPException, Response
 
 @app.post("/api/auth/login")
 def login(body: LoginBody, response: Response):
@@ -618,6 +619,7 @@ def login(body: LoginBody, response: Response):
     if not email or not password:
         raise HTTPException(status_code=401, detail="Credenciales inválidas")
 
+    # bcrypt solo usa los primeros 72 bytes
     if len(password.encode("utf-8")) > 72:
         raise HTTPException(status_code=401, detail="Credenciales inválidas")
 
@@ -643,32 +645,33 @@ def login(body: LoginBody, response: Response):
         sid = create_session(conn, int(user_id))
         conn.commit()
 
-    response.set_cookie(
-        key=SESSION_COOKIE_NAME,
-        value=sid,
-        httponly=True,
-        secure=True,
-        samesite="none",              # ✅ cross-site XHR/fetch
-        domain=".cotizaexpress.com",  # ✅ comparte entre subdominios
-        path="/",
-        max_age=SESSION_TTL_DAYS * 24 * 3600,
-)
+        response.set_cookie(
+            key=SESSION_COOKIE_NAME,
+            value=sid,
+            httponly=True,
+            secure=True,
+            samesite="none",              # cross-site fetch/XHR
+            domain=".cotizaexpress.com",  # comparte entre subdominios
+            path="/",
+            max_age=SESSION_TTL_DAYS * 24 * 3600,
+        )
 
-        
-
-    return {"ok": True}
+        return {"ok": True}
 
     except HTTPException:
         raise
 
     except Exception:
+        # opcional: conn.rollback() si quieres
         raise HTTPException(status_code=500, detail="Error interno")
-  
+
     finally:
         if cur:
             cur.close()
         if conn:
             conn.close()
+
+
 
 @app.get("/api/auth/me")
 def auth_me(request: Request):
