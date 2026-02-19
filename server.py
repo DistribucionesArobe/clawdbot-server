@@ -622,7 +622,6 @@ def login(body: LoginBody, response: Response):
     # bcrypt solo usa los primeros 72 bytes
     if len(password.encode("utf-8")) > 72:
         raise HTTPException(status_code=401, detail="Credenciales inválidas")
-
     conn = None
     cur = None
     try:
@@ -632,14 +631,24 @@ def login(body: LoginBody, response: Response):
             "select id, password_hash from users where email=%s and is_active=true",
             (email,),
         )
+
         row = cur.fetchone()
+
+        # 🔍 DEBUG TEMPORAL
+        print("LOGIN email:", repr(email))
+        print("LOGIN row found?:", bool(row))
+        if row:
+            print("LOGIN user_id:", row[0])
+            print("LOGIN hash prefix:", str(row[1])[:10])
 
         if not row:
             raise HTTPException(status_code=401, detail="Credenciales inválidas")
 
         user_id, password_hash = row
 
-        if not verify_password(password, password_hash):
+        ok = verify_password(password, password_hash)
+        print("LOGIN verify_password:", ok)
+        if not ok:
             raise HTTPException(status_code=401, detail="Credenciales inválidas")
 
         sid = create_session(conn, int(user_id))
@@ -650,8 +659,8 @@ def login(body: LoginBody, response: Response):
             value=sid,
             httponly=True,
             secure=True,
-            samesite="none",              # cross-site fetch/XHR
-            domain=".cotizaexpress.com",  # comparte entre subdominios
+            samesite="none",
+            domain=".cotizaexpress.com",
             path="/",
             max_age=SESSION_TTL_DAYS * 24 * 3600,
         )
@@ -662,7 +671,6 @@ def login(body: LoginBody, response: Response):
         raise
 
     except Exception:
-        # opcional: conn.rollback() si quieres
         raise HTTPException(status_code=500, detail="Error interno")
 
     finally:
@@ -670,7 +678,6 @@ def login(body: LoginBody, response: Response):
             cur.close()
         if conn:
             conn.close()
-
 
 
 @app.get("/api/auth/me")
