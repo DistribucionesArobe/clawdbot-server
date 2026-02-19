@@ -654,9 +654,9 @@ def login(body: LoginBody, response: Response):
         max_age=SESSION_TTL_DAYS * 24 * 3600,
 )
 
-        )
+        
 
-        return {"ok": True}
+    return {"ok": True}
 
     except HTTPException:
         raise
