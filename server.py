@@ -643,14 +643,17 @@ def login(body: LoginBody, response: Response):
         sid = create_session(conn, int(user_id))
         conn.commit()
 
-        response.set_cookie(
-            key=SESSION_COOKIE_NAME,
-            value=sid,
-            httponly=True,
-            secure=True,
-            samesite="lax",
-            path="/",
-            max_age=SESSION_TTL_DAYS * 24 * 3600,
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=sid,
+        httponly=True,
+        secure=True,
+        samesite="none",              # ✅ cross-site XHR/fetch
+        domain=".cotizaexpress.com",  # ✅ comparte entre subdominios
+        path="/",
+        max_age=SESSION_TTL_DAYS * 24 * 3600,
+)
+
         )
 
         return {"ok": True}
@@ -687,9 +690,11 @@ def auth_logout(request: Request, response: Response):
             if cur: cur.close()
             if conn: conn.close()
 
-    response.delete_cookie(SESSION_COOKIE_NAME, path="/")
-    return {"ok": True}
-
+    response.delete_cookie(
+        key=SESSION_COOKIE_NAME,
+        path="/",
+        domain=".cotizaexpress.com",
+)
 
 @app.post("/api/companies")
 def create_company(body: CompanyCreateBody):
