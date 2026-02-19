@@ -8,6 +8,9 @@ from openpyxl import load_workbook
 from io import BytesIO
 import bcrypt
 from fastapi import HTTPException
+from fastapi.responses import StreamingResponse
+from openpyxl import Workbook
+
 
 DONDEVER_SYSTEM_PROMPT = """
 Eres DóndeVer..
@@ -705,6 +708,27 @@ def auth_logout(request: Request, response: Response):
         path="/",
         domain=".cotizaexpress.com",
 )
+
+@app.get("/api/web/pricebook/template")
+def download_template(request: Request):
+    _ = get_user_from_session(request)  # exige sesión por cookie
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "pricebook"
+    ws.append(["nombre", "precio_base", "unidad", "sku", "vat_rate"])
+
+    bio = BytesIO()
+    wb.save(bio)
+    bio.seek(0)
+
+    filename = "plantilla-cotizaexpress.xlsx"
+    return StreamingResponse(
+        bio,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
 
 @app.post("/api/companies")
 def create_company(body: CompanyCreateBody):
