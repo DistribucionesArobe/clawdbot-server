@@ -448,21 +448,39 @@ def pricebook_upload(
 
 from fastapi import Query
 
+from fastapi import Request, HTTPException, Query
+
 @app.get("/api/pricebook/items")
 def pricebook_items(
-    authorization: str = Header(default=""),
+    request: Request,
     q: str | None = Query(default=None),
     limit: int = Query(default=20, ge=1, le=200),
 ):
-    tenant = get_company_from_bearer(authorization)
-    company_id = tenant["company_id"]
-
     conn = None
     cur = None
     try:
+        # ✅ cookie session auth
+        user = get_user_from_session(request)
+
         conn = get_conn()
         cur = conn.cursor()
 
+        # ---- Resolve company_id from session/user ----
+        # OPTION A: session returns dict with company_id
+        company_id = None
+        if isinstance(user, dict) and user.get("company_id"):
+            company_id = int(user["company_id"])
+        else:
+            # OPTION B: session returns user_id only (adjust SQL to your schema)
+            user_id = int(user["user_id"]) if isinstance(user, dict) and user.get("user_id") else int(user)
+
+            cur.execute("SELECT company_id FROM users WHERE id=%s", (user_id,))
+            row = cur.fetchone()
+            if not row or not row[0]:
+                raise HTTPException(status_code=403, detail="Usuario sin empresa asignada")
+            company_id = int(row[0])
+
+        # ---- Fetch items ----
         if q:
             qn = norm_name(q)
             cur.execute(
@@ -491,21 +509,24 @@ def pricebook_items(
         rows = cur.fetchall()
         items = []
         for sku, name, unit, price, vat_rate, updated_at in rows:
-            items.append({
-                "sku": sku,
-                "name": name,
-                "unit": unit,
-                "price": float(price) if price is not None else None,
-                "vat_rate": float(vat_rate) if vat_rate is not None else None,
-                "updated_at": updated_at.isoformat() if updated_at else None,
-            })
+            items.append(
+                {
+                    "sku": sku,
+                    "name": name,
+                    "unit": unit,
+                    "price": float(price) if price is not None else None,
+                    "vat_rate": float(vat_rate) if vat_rate is not None else None,
+                    "updated_at": updated_at.isoformat() if updated_at else None,
+                }
+            )
 
         return {"ok": True, "company_id": company_id, "count": len(items), "items": items}
 
     finally:
-        if cur: cur.close()
-        if conn: conn.close()
-
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
 
 @app.get("/api/db/test")
 def db_test():
