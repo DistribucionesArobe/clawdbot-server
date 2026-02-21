@@ -453,6 +453,10 @@ from fastapi import Query, HTTPException
 from starlette.requests import Request
 import os
 
+from fastapi import Query, HTTPException
+from starlette.requests import Request
+import os
+
 @app.get("/api/pricebook/items")
 def pricebook_items(
     request: Request,
@@ -463,34 +467,28 @@ def pricebook_items(
     cur = None
     try:
         user = get_user_from_session(request)
-        user_id = int(user["id"])  # ok
+        user_id = int(user["id"])  # ok (aunque aquí no lo uses aún)
 
         conn = get_conn()
         cur = conn.cursor()
 
-        # 1) Resolver company_id (MVP)
-        # - Si aún no tienes users.company_id, usamos DEFAULT_COMPANY_ID
         company_id = os.getenv("DEFAULT_COMPANY_ID")
         if not company_id:
-            raise HTTPException(
-                status_code=500,
-                detail="DEFAULT_COMPANY_ID missing en Render Environment",
-            )
+            raise HTTPException(status_code=500, detail="DEFAULT_COMPANY_ID missing en Render")
 
-        # 2) Query items (con búsqueda opcional q)
         if q:
             like = f"%{q.strip()}%"
             cur.execute(
                 """
-                select id, sku, description, unit, price, category
+                select id, company_id, sku, name, unit, price, vat_rate, source, updated_at, created_at
                 from pricebook_items
                 where company_id = %s
                   and (
-                        sku ilike %s
-                     or description ilike %s
-                     or category ilike %s
+                       sku ilike %s
+                    or name ilike %s
+                    or name_norm ilike %s
                   )
-                order by description asc
+                order by name asc
                 limit %s
                 """,
                 (company_id, like, like, like, limit),
@@ -498,10 +496,10 @@ def pricebook_items(
         else:
             cur.execute(
                 """
-                select id, sku, description, unit, price, category
+                select id, company_id, sku, name, unit, price, vat_rate, source, updated_at, created_at
                 from pricebook_items
                 where company_id = %s
-                order by description asc
+                order by name asc
                 limit %s
                 """,
                 (company_id, limit),
@@ -509,33 +507,34 @@ def pricebook_items(
 
         rows = cur.fetchall()
 
-        # 3) Convertir a dicts (para JSON)
         items = []
         for r in rows:
             items.append(
                 {
                     "id": r[0],
-                    "sku": r[1],
-                    "description": r[2],
-                    "unit": r[3],
-                    "price": float(r[4]) if r[4] is not None else None,
-                    "category": r[5],
+                    "company_id": r[1],
+                    "sku": r[2],
+                    "name": r[3],
+                    "unit": r[4],
+                    "price": float(r[5]) if r[5] is not None else None,
+                    "vat_rate": float(r[6]) if r[6] is not None else None,
+                    "source": r[7],
+                    "updated_at": r[8].isoformat() if r[8] else None,
+                    "created_at": r[9].isoformat() if r[9] else None,
                 }
             )
 
         return {"ok": True, "items": items}
 
     except HTTPException:
-        # si tú mismo lanzaste HTTPException, solo propaga
         raise
     except Exception as e:
-        # ✅ CRÍTICO: rollback para limpiar estado de transacción
+        # Limpia transacción si autocommit no está (o si en tu get_conn no lo pusiste)
         if conn:
             try:
                 conn.rollback()
             except Exception:
                 pass
-        # Para debug inicial, regresa detalle (puedes quitarlo luego)
         raise HTTPException(status_code=500, detail=f"pricebook_items failed: {type(e).__name__}: {e}")
     finally:
         if cur:
