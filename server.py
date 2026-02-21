@@ -705,7 +705,6 @@ def pricebook_upload(
         if conn:
             conn.close()
 
-
 # -------------------------
 # Pricebook items (cookie session, DEFAULT_COMPANY_ID)
 # -------------------------
@@ -786,6 +785,107 @@ def pricebook_items(
         print("PRICEBOOK ITEMS ERROR:", repr(e))
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"pricebook_items failed: {type(e).__name__}: {e}")
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
+
+
+# -------------------------
+# Pricebook create item (cookie session, DEFAULT_COMPANY_ID)
+# -------------------------
+class PricebookItemCreateBody(BaseModel):
+    name: str
+    sku: Optional[str] = None
+    unit: Optional[str] = None
+    price: Optional[float] = None
+    vat_rate: Optional[float] = 0.16
+    source: Optional[str] = "manual"
+
+
+@app.post("/api/pricebook/items")
+def pricebook_item_create(request: Request, body: PricebookItemCreateBody):
+    _ = get_user_from_session(request)
+
+    company_id = (os.getenv("DEFAULT_COMPANY_ID") or "").strip()
+    if not company_id:
+        raise HTTPException(status_code=500, detail="DEFAULT_COMPANY_ID missing en Render")
+
+    name = (body.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name requerido")
+
+    sku = (body.sku or "").strip() or None
+    unit = (body.unit or "").strip() or None
+    source = (body.source or "manual").strip() or "manual"
+
+    price = body.price
+    if price is not None:
+        try:
+            price = float(price)
+        except Exception:
+            raise HTTPException(status_code=400, detail="price inválido")
+        if price < 0:
+            raise HTTPException(status_code=400, detail="price debe ser >= 0")
+
+    vat_rate = body.vat_rate
+    if vat_rate is not None:
+        try:
+            vat_rate = float(vat_rate)
+        except Exception:
+            raise HTTPException(status_code=400, detail="vat_rate inválido")
+        if vat_rate < 0 or vat_rate > 1:
+            raise HTTPException(status_code=400, detail="vat_rate debe estar entre 0 y 1")
+
+    name_norm = norm_name(name)
+
+    conn = None
+    cur = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+
+        # UPSERT recomendado (si existe por name_norm, lo actualiza)
+        cur.execute(
+            """
+            INSERT INTO pricebook_items
+                (company_id, sku, name, name_norm, unit, price, vat_rate, source, updated_at, created_at)
+            VALUES
+                (%s, %s, %s, %s, %s, %s, %s, %s, now(), now())
+            ON CONFLICT (company_id, name_norm)
+            DO UPDATE SET
+                sku = EXCLUDED.sku,
+                name = EXCLUDED.name,
+                unit = EXCLUDED.unit,
+                price = EXCLUDED.price,
+                vat_rate = EXCLUDED.vat_rate,
+                source = EXCLUDED.source,
+                updated_at = now()
+            RETURNING id
+            """,
+            (company_id, sku, name, name_norm, unit, price, vat_rate, source),
+        )
+
+        new_id = cur.fetchone()[0]
+
+        # frontend espera {ok:true}. Dejo id extra por debug, si no lo quieres quítalo.
+        return {"ok": True, "id": int(new_id)}
+
+    except IntegrityError as e:
+        msg = str(e).lower()
+        if "duplicate" in msg or "unique" in msg:
+            raise HTTPException(status_code=409, detail="Producto ya existe (conflicto)")
+        raise HTTPException(status_code=400, detail="Integridad inválida")
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        print("PRICEBOOK CREATE ERROR:", repr(e))
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail="pricebook_item_create failed")
+
     finally:
         if cur:
             cur.close()
