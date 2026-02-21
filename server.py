@@ -112,10 +112,9 @@ def _version():
 # DB
 # -------------------------
 def get_conn():
-    db_url = (DATABASE_URL or "").strip()
-    if not db_url:
-        raise RuntimeError("DATABASE_URL not set")
-    return psycopg2.connect(db_url, sslmode="require", connect_timeout=5)
+    conn = psycopg2.connect(os.getenv("DATABASE_URL"))
+    conn.autocommit = True
+    return conn
 
 def create_session(conn, user_id: int) -> str:
     sid = secrets.token_urlsafe(32)
@@ -450,6 +449,10 @@ from fastapi import Request, HTTPException, Query
 import os
 import psycopg2
 
+from fastapi import Query, HTTPException
+from starlette.requests import Request
+import os
+
 @app.get("/api/pricebook/items")
 def pricebook_items(
     request: Request,
@@ -460,74 +463,91 @@ def pricebook_items(
     cur = None
     try:
         user = get_user_from_session(request)
-        user_id = int(user["id"])  # ✅ FIX
+        user_id = int(user["id"])  # ok
 
         conn = get_conn()
         cur = conn.cursor()
 
-        company_id = None
-
-        # Intenta obtener company_id del user (si existe columna)
-        try:
-            cur.execute("SELECT company_id FROM users WHERE id=%s", (user_id,))
-            row = cur.fetchone()
-            if row and row[0]:
-                company_id = row[0]
-        except psycopg2.Error:
-            company_id = None
-
-        # Fallback por env para MVP
+        # 1) Resolver company_id (MVP)
+        # - Si aún no tienes users.company_id, usamos DEFAULT_COMPANY_ID
+        company_id = os.getenv("DEFAULT_COMPANY_ID")
         if not company_id:
-            fallback = (os.getenv("DEFAULT_COMPANY_ID") or "").strip()
-            if not fallback:
-                raise HTTPException(
-                    status_code=500,
-                    detail="No pude resolver company_id. Agrega users.company_id o configura DEFAULT_COMPANY_ID en Render.",
-                )
-            company_id = fallback
+            raise HTTPException(
+                status_code=500,
+                detail="DEFAULT_COMPANY_ID missing en Render Environment",
+            )
 
+        # 2) Query items (con búsqueda opcional q)
         if q:
-            qn = norm_name(q)
+            like = f"%{q.strip()}%"
             cur.execute(
                 """
-                SELECT sku, name, unit, price, vat_rate, updated_at
-                FROM pricebook_items
-                WHERE company_id=%s
-                  AND (name_norm LIKE %s OR sku ILIKE %s)
-                ORDER BY updated_at DESC
-                LIMIT %s
+                select id, sku, description, unit, price, category
+                from pricebook_items
+                where company_id = %s
+                  and (
+                        sku ilike %s
+                     or description ilike %s
+                     or category ilike %s
+                  )
+                order by description asc
+                limit %s
                 """,
-                (company_id, f"%{qn}%", f"%{q}%", limit),
+                (company_id, like, like, like, limit),
             )
         else:
             cur.execute(
                 """
-                SELECT sku, name, unit, price, vat_rate, updated_at
-                FROM pricebook_items
-                WHERE company_id=%s
-                ORDER BY updated_at DESC
-                LIMIT %s
+                select id, sku, description, unit, price, category
+                from pricebook_items
+                where company_id = %s
+                order by description asc
+                limit %s
                 """,
                 (company_id, limit),
             )
 
         rows = cur.fetchall()
+
+        # 3) Convertir a dicts (para JSON)
         items = []
-        for sku, name, unit, price, vat_rate, updated_at in rows:
-            items.append({
-                "sku": sku,
-                "name": name,
-                "unit": unit,
-                "price": float(price) if price is not None else None,
-                "vat_rate": float(vat_rate) if vat_rate is not None else None,
-                "updated_at": updated_at.isoformat() if updated_at else None,
-            })
+        for r in rows:
+            items.append(
+                {
+                    "id": r[0],
+                    "sku": r[1],
+                    "description": r[2],
+                    "unit": r[3],
+                    "price": float(r[4]) if r[4] is not None else None,
+                    "category": r[5],
+                }
+            )
 
-        return {"ok": True, "company_id": str(company_id), "count": len(items), "items": items}
+        return {"ok": True, "items": items}
 
+    except HTTPException:
+        # si tú mismo lanzaste HTTPException, solo propaga
+        raise
+    except Exception as e:
+        # ✅ CRÍTICO: rollback para limpiar estado de transacción
+        if conn:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        # Para debug inicial, regresa detalle (puedes quitarlo luego)
+        raise HTTPException(status_code=500, detail=f"pricebook_items failed: {type(e).__name__}: {e}")
     finally:
-        if cur: cur.close()
-        if conn: conn.close()
+        if cur:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 @app.get("/api/db/test")
 def db_test():
