@@ -446,9 +446,9 @@ def pricebook_upload(
         if conn:
             conn.close()
 
-from fastapi import Query
-
 from fastapi import Request, HTTPException, Query
+import os
+import psycopg2
 
 @app.get("/api/pricebook/items")
 def pricebook_items(
@@ -459,28 +459,33 @@ def pricebook_items(
     conn = None
     cur = None
     try:
-        # ✅ cookie session auth
         user = get_user_from_session(request)
+        user_id = int(user["id"])  # ✅ FIX
 
         conn = get_conn()
         cur = conn.cursor()
 
-        # ---- Resolve company_id from session/user ----
-        # OPTION A: session returns dict with company_id
         company_id = None
-        if isinstance(user, dict) and user.get("company_id"):
-            company_id = int(user["company_id"])
-        else:
-            # OPTION B: session returns user_id only (adjust SQL to your schema)
-            user_id = int(user["user_id"]) if isinstance(user, dict) and user.get("user_id") else int(user)
 
+        # Intenta obtener company_id del user (si existe columna)
+        try:
             cur.execute("SELECT company_id FROM users WHERE id=%s", (user_id,))
             row = cur.fetchone()
-            if not row or not row[0]:
-                raise HTTPException(status_code=403, detail="Usuario sin empresa asignada")
-            company_id = int(row[0])
+            if row and row[0]:
+                company_id = row[0]
+        except psycopg2.Error:
+            company_id = None
 
-        # ---- Fetch items ----
+        # Fallback por env para MVP
+        if not company_id:
+            fallback = (os.getenv("DEFAULT_COMPANY_ID") or "").strip()
+            if not fallback:
+                raise HTTPException(
+                    status_code=500,
+                    detail="No pude resolver company_id. Agrega users.company_id o configura DEFAULT_COMPANY_ID en Render.",
+                )
+            company_id = fallback
+
         if q:
             qn = norm_name(q)
             cur.execute(
@@ -509,24 +514,20 @@ def pricebook_items(
         rows = cur.fetchall()
         items = []
         for sku, name, unit, price, vat_rate, updated_at in rows:
-            items.append(
-                {
-                    "sku": sku,
-                    "name": name,
-                    "unit": unit,
-                    "price": float(price) if price is not None else None,
-                    "vat_rate": float(vat_rate) if vat_rate is not None else None,
-                    "updated_at": updated_at.isoformat() if updated_at else None,
-                }
-            )
+            items.append({
+                "sku": sku,
+                "name": name,
+                "unit": unit,
+                "price": float(price) if price is not None else None,
+                "vat_rate": float(vat_rate) if vat_rate is not None else None,
+                "updated_at": updated_at.isoformat() if updated_at else None,
+            })
 
-        return {"ok": True, "company_id": company_id, "count": len(items), "items": items}
+        return {"ok": True, "company_id": str(company_id), "count": len(items), "items": items}
 
     finally:
-        if cur:
-            cur.close()
-        if conn:
-            conn.close()
+        if cur: cur.close()
+        if conn: conn.close()
 
 @app.get("/api/db/test")
 def db_test():
