@@ -184,7 +184,7 @@ def get_company_by_twilio_number(to_phone: str):
         row = cur.fetchone()
         if not row:
             return None
-        return {"id": str(row[0]), "name": row[1]}
+        return {"company_id": str(row[0]), "name": row[1]}
     finally:
         cur.close()
         conn.close()
@@ -1122,6 +1122,34 @@ def create_company(body: CompanyCreateBody):
         if conn:
             conn.close()
 
+class TwilioPhoneBody(BaseModel):
+    twilio_phone: str  # "whatsapp:+15715463202"
+
+@app.post("/api/companies/{company_id}/twilio_phone")
+def set_company_twilio_phone(company_id: str, body: TwilioPhoneBody, request: Request):
+    _ = get_user_from_session(request)  # protege con tu login web
+
+    tw = (body.twilio_phone or "").strip()
+    if not tw.startswith("whatsapp:+"):
+        raise HTTPException(status_code=400, detail="Formato inválido. Usa whatsapp:+E164")
+
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "UPDATE companies SET twilio_phone=%s, updated_at=now() WHERE id=%s RETURNING id",
+            (tw, company_id),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Company not found")
+        return {"ok": True}
+    except IntegrityError:
+        raise HTTPException(status_code=409, detail="Ese número ya está asignado a otra empresa")
+    finally:
+        cur.close()
+        conn.close()
+
 
 # -------------------------
 # Search pricebook (bearer)
@@ -1351,7 +1379,7 @@ async def twilio_webhook(
         twiml = "<Response><Message>Hola 👋 ¿A qué empresa deseas cotizar?</Message></Response>"
         return Response(content=twiml, media_type="application/xml")
 
-    reply_text = f"✅ {company['name']}: Recibí tu mensaje: {Body}"
+    reply_text = build_reply_for_company(company["company_id"], Body)
 
     twiml = f"<Response><Message>{reply_text}</Message></Response>"
     return Response(content=twiml, media_type="application/xml")
