@@ -1379,7 +1379,8 @@ async def twilio_webhook(
         twiml = "<Response><Message>Hola 👋 ¿A qué empresa deseas cotizar?</Message></Response>"
         return Response(content=twiml, media_type="application/xml")
 
-    reply_text = build_reply_for_company(company["company_id"], Body)
+    # 🔥 AQUÍ ESTÁ EL CAMBIO CLAVE
+    reply_text = build_reply_for_company(company["id"], Body)
 
     twiml = f"<Response><Message>{reply_text}</Message></Response>"
     return Response(content=twiml, media_type="application/xml")
