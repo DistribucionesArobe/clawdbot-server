@@ -32,6 +32,8 @@ from pydantic import BaseModel
 
 from openpyxl import load_workbook, Workbook
 
+from fastapi import Form
+from fastapi.responses import Response
 
 # -------------------------
 # Prompts (otras apps)
@@ -170,6 +172,22 @@ def get_conn():
     conn = psycopg2.connect(dsn, connect_timeout=5)
     conn.autocommit = True
     return conn
+
+def get_company_by_twilio_number(to_phone: str):
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT id, name FROM companies WHERE twilio_phone = %s LIMIT 1",
+            (to_phone,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return {"id": str(row[0]), "name": row[1]}
+    finally:
+        cur.close()
+        conn.close()
 
 # -------------------------
 # WhatsApp tenant lookup
@@ -1318,3 +1336,22 @@ async def chat(req: ChatRequest, authorization: str = Header(default="")):
 
     reply = response.choices[0].message.content or ""
     return {"reply": reply}
+
+@app.post("/webhook/twilio")
+async def twilio_webhook(
+    From: str = Form(...),
+    To: str = Form(...),
+    Body: str = Form(...)
+):
+    print("TWILIO IN:", {"from": From, "to": To, "body": Body})
+
+    company = get_company_by_twilio_number(To)
+
+    if not company:
+        twiml = "<Response><Message>Hola 👋 ¿A qué empresa deseas cotizar?</Message></Response>"
+        return Response(content=twiml, media_type="application/xml")
+
+    reply_text = f"✅ {company['name']}: Recibí tu mensaje: {Body}"
+
+    twiml = f"<Response><Message>{reply_text}</Message></Response>"
+    return Response(content=twiml, media_type="application/xml")
