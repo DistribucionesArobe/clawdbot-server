@@ -5,6 +5,7 @@ import re
 import hashlib
 import secrets
 import traceback
+import requests
 from io import BytesIO
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -170,6 +171,48 @@ def get_conn():
     conn.autocommit = True
     return conn
 
+# -------------------------
+# WhatsApp tenant lookup
+# -------------------------
+def get_company_by_phone_number_id(phone_number_id: str):
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT id, wa_api_key, wa_phone_number_id
+            FROM companies
+            WHERE wa_phone_number_id=%s
+            LIMIT 1
+            """,
+            (phone_number_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return {"company_id": str(row[0]), "wa_api_key": row[1], "wa_phone_number_id": row[2]}
+    finally:
+        cur.close()
+        conn.close()
+
+# -------------------------
+# WhatsApp send
+# -------------------------
+def send_whatsapp_text(wa_api_key: str, phone_number_id: str, to: str, text: str):
+    url = f"https://graph.facebook.com/v19.0/{phone_number_id}/messages"
+    headers = {
+        "Authorization": f"Bearer {wa_api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "text",
+        "text": {"body": text},
+    }
+    r = requests.post(url, headers=headers, json=payload, timeout=20)
+    if r.status_code >= 300:
+        raise RuntimeError(f"WhatsApp send failed {r.status_code}: {r.text[:400]}")
 
 # -------------------------
 # Sessions
@@ -313,6 +356,45 @@ app.add_middleware(
 def root():
     return {"ok": True, "service": "clawdbot-server"}
 
+# -------------------------
+# WhatsApp webhook receive
+# -------------------------
+@app.post("/webhook/whatsapp")
+async def whatsapp_webhook(request: Request):
+    payload = await request.json()
+
+    # 1) extraer phone_number_id
+    try:
+        phone_number_id = payload["entry"][0]["changes"][0]["value"]["metadata"]["phone_number_id"]
+    except Exception:
+        return {"ok": True}
+
+    company = get_company_by_phone_number_id(phone_number_id)
+    if not company:
+        print("No company mapped for phone_number_id:", phone_number_id)
+        return {"ok": True}
+
+    value = payload["entry"][0]["changes"][0]["value"]
+    messages = value.get("messages") or []
+    if not messages:
+        return {"ok": True}
+
+    msg = messages[0]
+    from_phone = msg.get("from")
+    text = (msg.get("text") or {}).get("body") or ""
+
+    print("WA IN:", {"company_id": company["company_id"], "from": from_phone, "text": text})
+
+    reply = build_reply_for_company(company["company_id"], text)
+
+    send_whatsapp_text(
+        wa_api_key=company["wa_api_key"],
+        phone_number_id=company["wa_phone_number_id"],
+        to=from_phone,
+        text=reply,
+    )
+
+    return {"ok": True}
 
 @app.get("/api/_version")
 def _version():
@@ -1077,6 +1159,65 @@ def search_pricebook(conn, company_id: str, q: str, limit: int = 8):
         return items
     finally:
         cur.close()
+
+# -------------------------
+# WhatsApp reply builder
+# -------------------------
+def build_reply_for_company(company_id: str, user_text: str) -> str:
+    qty, prod_query = extract_qty_and_product(user_text)
+
+    if qty and prod_query:
+        conn = get_conn()
+        try:
+            items = search_pricebook(conn, company_id, prod_query, limit=1)
+        finally:
+            conn.close()
+
+        if items:
+            it = items[0]
+            unit = it.get("unit") or "unidad"
+            price = float(it.get("price") or 0)
+            subtotal = qty * price
+            iva = subtotal * 0.16
+            total = subtotal + iva
+            return (
+                "Cotización rápida:\n"
+                f"- {qty} {unit} de {it['name']} x ${price:,.2f} = ${subtotal:,.2f}\n"
+                f"IVA (16%): ${iva:,.2f}\n"
+                f"Total: ${total:,.2f}\n\n"
+                "¿Agregamos otro producto?"
+            )
+
+    if looks_like_price_question(user_text):
+        conn = get_conn()
+        try:
+            items = search_pricebook(conn, company_id, user_text, limit=8)
+        finally:
+            conn.close()
+
+        if items:
+            lines = []
+            for it in items[:8]:
+                unit = f" / {it['unit']}" if it.get("unit") else ""
+                lines.append(f"- {it['name']}: ${it['price']:,.2f}{unit}")
+            return (
+                "Encontré estos precios:\n"
+                + "\n".join(lines)
+                + "\n\nDime cantidades para cotizar (ej: 10 tablaroca ultralight)."
+            )
+
+    if not openai_client:
+        return "Estoy en mantenimiento. Intenta más tarde."
+
+    resp = openai_client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": COTIZABOT_SYSTEM_PROMPT},
+            {"role": "user", "content": user_text},
+        ],
+        temperature=0.3,
+    )
+    return resp.choices[0].message.content or "¿Me repites eso?"
 
 
 # -------------------------
