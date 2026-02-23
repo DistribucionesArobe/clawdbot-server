@@ -425,6 +425,41 @@ async def whatsapp_webhook(request: Request):
 def _version():
     return {"version": "pricebook-v2-2026-02-12"}
 
+@app.get("/api/company/me")
+def company_me(request: Request):
+    _ = get_user_from_session(request)
+
+    company_id = (os.getenv("DEFAULT_COMPANY_ID") or "").strip()
+    if not company_id:
+        raise HTTPException(status_code=500, detail="DEFAULT_COMPANY_ID missing en Render")
+
+    conn = None
+    cur = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id::text, name, slug, twilio_phone FROM companies WHERE id=%s LIMIT 1",
+            (company_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Company no encontrada")
+
+        return {
+            "ok": True,
+            "company": {
+                "id": row[0],
+                "name": row[1],
+                "slug": row[2],
+                "twilio_phone": row[3],
+            },
+        }
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
 
 @app.get("/api/health")
 def api_health():
@@ -543,6 +578,11 @@ def register(body: RegisterBody):
         if conn:
             conn.close()
 
+@app.post("/api/whatsapp/provision")
+def whatsapp_provision(request: Request):
+    _ = get_user_from_session(request)
+    # stub: evita 404
+    raise HTTPException(status_code=501, detail="WhatsApp provisioning aún no disponible")
 
 @app.post("/api/auth/login")
 def login(body: LoginBody, response: Response):
@@ -1132,19 +1172,26 @@ def create_company(body: CompanyCreateBody):
 class TwilioPhoneBody(BaseModel):
     twilio_phone: str  # "whatsapp:+15715463202"
 
+
 @app.post("/api/admin/companies/{company_id}/twilio/provision")
 def provision_twilio_number(company_id: str, request: Request):
-    # Reusa tu login (cookie session)
     _ = get_user_from_session(request)
-
     client = twilio_client()
 
-    # Compra un número US (cambia el area_code si quieres)
-    num = client.incoming_phone_numbers.create(area_code="571")
+    # 1) Buscar un número disponible (USA ejemplo)
+    available = client.available_phone_numbers("US").local.list(area_code="571", limit=1)
+    if not available:
+        raise HTTPException(status_code=409, detail="No hay números disponibles en ese area_code")
 
-    twilio_phone = f"whatsapp:{num.phone_number}"  # ej whatsapp:+1571...
+    chosen = available[0].phone_number  # ej +1571XXXXXXX
 
-    # Guarda en DB
+    # 2) Comprar el número
+    purchased = client.incoming_phone_numbers.create(phone_number=chosen)
+
+    # 3) Guardar en formato que tu webhook usa
+    twilio_phone = f"whatsapp:{purchased.phone_number}"  # ej whatsapp:+1571...
+
+    # 4) Guardar en DB
     conn = get_conn()
     cur = conn.cursor()
     try:
