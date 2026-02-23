@@ -110,7 +110,20 @@ def twilio_client():
     if not sid or not token:
         raise RuntimeError("Falta TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN en Render")
     return Client(sid, token)
-    
+
+def twilio_send_whatsapp(from_twilio_whatsapp: str, to_user_whatsapp: str, text: str):
+    """
+    Envío activo por API (más confiable que TwiML para WhatsApp)
+    from_twilio_whatsapp: ej "whatsapp:+1555..."
+    to_user_whatsapp: ej "whatsapp:+521..."
+    """
+    client = twilio_client()
+    client.messages.create(
+        from_=from_twilio_whatsapp,
+        to=to_user_whatsapp,
+        body=text
+    )
+
 def extract_product_query(text: str) -> str:
     t = (text or "").lower().strip()
     t = re.sub(r"[^a-z0-9áéíóúñü\s]", " ", t)
@@ -1532,19 +1545,25 @@ async def twilio_webhook(
         print("TWILIO company:", company)
 
         if not company:
-            msg = "Hola 👋 ¿A qué empresa deseas cotizar?"
-            twiml = f"<Response><Message>{escape(msg)}</Message></Response>"
-            return Response(content=twiml, media_type="application/xml")
+            msg = "Hola 👋 Este número aún no está ligado a una empresa. Pide a tu proveedor que lo configure en CotizaExpress."
+            twilio_send_whatsapp(from_twilio_whatsapp=To, to_user_whatsapp=From, text=msg)
+            return Response(content="", media_type="text/plain")
 
-        # 👇 temporalmente NO llames OpenAI todavía (para debug)
         reply_text = build_reply_for_company(company["company_id"], Body)
 
-        twiml = f"<Response><Message>{escape(reply_text)}</Message></Response>"
-        return Response(content=twiml, media_type="application/xml")
+        # ✅ Enviar por API (más confiable que TwiML en WhatsApp)
+        twilio_send_whatsapp(from_twilio_whatsapp=To, to_user_whatsapp=From, text=reply_text)
+
+        # ✅ Responder 200 simple a Twilio
+        return Response(content="", media_type="text/plain")
 
     except Exception as e:
         print("TWILIO WEBHOOK ERROR:", repr(e))
         traceback.print_exc()
         msg = "Error interno. Intenta de nuevo en 1 minuto."
-        twiml = f"<Response><Message>{escape(msg)}</Message></Response>"
-        return Response(content=twiml, media_type="application/xml")
+        # intentamos avisar al usuario
+        try:
+            twilio_send_whatsapp(from_twilio_whatsapp=To, to_user_whatsapp=From, text=msg)
+        except Exception:
+            pass
+        return Response(content="", media_type="text/plain")
