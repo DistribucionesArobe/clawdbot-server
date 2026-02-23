@@ -331,6 +331,7 @@ def health():
 # -------------------------
 # WhatsApp webhook verify
 # -------------------------
+
 @app.get("/webhook/whatsapp")
 def whatsapp_verify(
     hub_mode: str = Query(default=None, alias="hub.mode"),
@@ -338,10 +339,18 @@ def whatsapp_verify(
     hub_challenge: str = Query(default=None, alias="hub.challenge"),
 ):
     expected = (os.getenv("WA_VERIFY_TOKEN") or "").strip()
+
+    print("WA VERIFY DEBUG:", {
+        "mode": hub_mode,
+        "got_len": len(hub_verify_token or ""),
+        "exp_len": len(expected or ""),
+        "match": (hub_verify_token or "") == expected,
+        "has_challenge": bool(hub_challenge),
+    })
+
     if hub_mode == "subscribe" and hub_verify_token == expected and hub_challenge:
         return Response(content=str(hub_challenge), media_type="text/plain")
     raise HTTPException(status_code=403, detail="verify failed")
-
 
 @app.get("/api/db/ping")
 def db_ping():
