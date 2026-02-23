@@ -255,7 +255,6 @@ def create_session(conn, user_id: int) -> str:
     finally:
         cur.close()
 
-
 def get_user_from_session(request: Request):
     sid = request.cookies.get(SESSION_COOKIE_NAME)
     if not sid:
@@ -268,7 +267,7 @@ def get_user_from_session(request: Request):
         cur = conn.cursor()
         cur.execute(
             """
-            SELECT u.id, u.email
+            SELECT u.id, u.email, u.company_id::text
             FROM sessions s
             JOIN users u ON u.id = s.user_id
             WHERE s.id=%s AND s.expires_at > now()
@@ -279,14 +278,26 @@ def get_user_from_session(request: Request):
         row = cur.fetchone()
         if not row:
             raise HTTPException(status_code=401, detail="Not authenticated")
-        user_id, email = row
-        return {"id": int(user_id), "email": email}
+
+        user_id, email, company_id = row
+
+        if not company_id:
+            # Esto es importante: sin company_id no hay tenant
+            raise HTTPException(status_code=400, detail="User sin company_id asignado")
+
+        return {"id": int(user_id), "email": email, "company_id": company_id}
     finally:
         if cur:
             cur.close()
         if conn:
             conn.close()
 
+def require_company_id(request: Request) -> str:
+    u = get_user_from_session(request)
+    cid = (u.get("company_id") or "").strip()
+    if not cid:
+        raise HTTPException(status_code=400, detail="No pude resolver company_id")
+    return cid
 
 def get_company_from_bearer(authorization: str):
     auth = (authorization or "").strip()
@@ -427,11 +438,7 @@ def _version():
 
 @app.get("/api/company/me")
 def company_me(request: Request):
-    _ = get_user_from_session(request)
-
-    company_id = (os.getenv("DEFAULT_COMPANY_ID") or "").strip()
-    if not company_id:
-        raise HTTPException(status_code=500, detail="DEFAULT_COMPANY_ID missing en Render")
+    company_id = require_company_id(request)
 
     conn = None
     cur = None
@@ -583,6 +590,68 @@ def whatsapp_provision(request: Request):
     _ = get_user_from_session(request)
     # stub: evita 404
     raise HTTPException(status_code=501, detail="WhatsApp provisioning aún no disponible")
+
+@app.post("/api/company/whatsapp/provision")
+def company_whatsapp_provision(request: Request):
+    company_id = require_company_id(request)
+
+    # 1) Si ya hay número, regresa el existente (idempotente)
+    conn = None
+    cur = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT twilio_phone FROM companies WHERE id=%s", (company_id,))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Company no encontrada")
+
+        existing = (row[0] or "").strip()
+        if existing:
+            return {"ok": True, "twilio_phone": existing, "already_assigned": True}
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
+
+    # 2) Comprar número Twilio (correcto: buscar disponible y luego comprar)
+    client = twilio_client()
+
+    # Puedes parametrizar país/area_code después. Por ahora US 571 como traías.
+    available = client.available_phone_numbers("US").local.list(area_code="571", limit=1)
+    if not available:
+        raise HTTPException(status_code=409, detail="No hay números disponibles (area_code=571)")
+
+    chosen = available[0].phone_number  # ej +1571...
+    purchased = client.incoming_phone_numbers.create(phone_number=chosen)
+
+    twilio_phone = f"whatsapp:{purchased.phone_number}"  # ej whatsapp:+1571...
+
+    # 3) Guardar en DB (y proteger contra duplicados con unique index)
+    conn = None
+    cur = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE companies SET twilio_phone=%s, updated_at=now() WHERE id=%s RETURNING id",
+            (twilio_phone, company_id),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Company no encontrada")
+
+    except IntegrityError:
+        # Si por alguna razón el mismo twilio_phone ya existe en otra company
+        raise HTTPException(status_code=409, detail="Ese número ya está asignado a otra empresa")
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
+
+    return {"ok": True, "twilio_phone": twilio_phone, "already_assigned": False}
 
 @app.post("/api/auth/login")
 def login(body: LoginBody, response: Response):
@@ -889,9 +958,9 @@ def pricebook_items(
     try:
         _ = get_user_from_session(request)
 
-        company_id = (os.getenv("DEFAULT_COMPANY_ID") or "").strip()
+        company_id = require_company_id(request)
         if not company_id:
-            raise HTTPException(status_code=500, detail="DEFAULT_COMPANY_ID missing en Render")
+            raise HTTPException(status_code=400, detail="No pude resolver company_id")
 
         conn = get_conn()
         cur = conn.cursor()
@@ -979,7 +1048,7 @@ class PricebookItemCreateBody(BaseModel):
 def pricebook_item_create(request: Request, body: PricebookItemCreateBody):
     _ = get_user_from_session(request)
 
-    company_id = (os.getenv("DEFAULT_COMPANY_ID") or "").strip()
+    company_id = require_company_id(request)
     if not company_id:
         raise HTTPException(status_code=500, detail="DEFAULT_COMPANY_ID missing en Render")
 
@@ -1072,7 +1141,7 @@ def pricebook_item_create(request: Request, body: PricebookItemCreateBody):
 def pricebook_item_delete(request: Request, item_id: str):
     _ = get_user_from_session(request)
 
-    company_id = (os.getenv("DEFAULT_COMPANY_ID") or "").strip()
+    company_id = require_company_id(request)
     if not company_id:
         raise HTTPException(status_code=500, detail="DEFAULT_COMPANY_ID missing en Render")
 
