@@ -870,7 +870,7 @@ def pricebook_item_create(request: Request, body: PricebookItemCreateBody):
         new_id = cur.fetchone()[0]
 
         # frontend espera {ok:true}. Dejo id extra por debug, si no lo quieres quítalo.
-        return {"ok": True, "id": int(new_id)}
+        return {"ok": True, "id": str(new_id)}
 
     except IntegrityError as e:
         msg = str(e).lower()
