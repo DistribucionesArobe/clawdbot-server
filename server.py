@@ -804,6 +804,7 @@ class PricebookItemCreateBody(BaseModel):
     source: Optional[str] = "manual"
 
 
+
 @app.post("/api/pricebook/items")
 def pricebook_item_create(request: Request, body: PricebookItemCreateBody):
     _ = get_user_from_session(request)
@@ -896,6 +897,49 @@ def pricebook_item_create(request: Request, body: PricebookItemCreateBody):
 # -------------------------
 # Companies create (bearer)
 # -------------------------
+
+@app.delete("/api/pricebook/items/{item_id}")
+def pricebook_item_delete(request: Request, item_id: str):
+    _ = get_user_from_session(request)
+
+    company_id = (os.getenv("DEFAULT_COMPANY_ID") or "").strip()
+    if not company_id:
+        raise HTTPException(status_code=500, detail="DEFAULT_COMPANY_ID missing en Render")
+
+    conn = None
+    cur = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+
+        # Borra SOLO si pertenece a la company
+        cur.execute(
+            """
+            DELETE FROM pricebook_items
+            WHERE company_id = %s AND id = %s
+            RETURNING id
+            """,
+            (company_id, item_id),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Producto no encontrado")
+
+        return {"ok": True}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print("PRICEBOOK DELETE ERROR:", repr(e))
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail="pricebook_item_delete failed")
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
+
+
 @app.post("/api/companies")
 def create_company(body: CompanyCreateBody):
     name = (body.name or "").strip()
