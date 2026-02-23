@@ -1365,22 +1365,34 @@ async def chat(req: ChatRequest, authorization: str = Header(default="")):
     reply = response.choices[0].message.content or ""
     return {"reply": reply}
 
+from xml.sax.saxutils import escape
+
 @app.post("/webhook/twilio")
 async def twilio_webhook(
     From: str = Form(...),
     To: str = Form(...),
     Body: str = Form(...)
 ):
-    print("TWILIO IN:", {"from": From, "to": To, "body": Body})
+    try:
+        print("TWILIO IN:", {"from": From, "to": To, "body": Body})
 
-    company = get_company_by_twilio_number(To)
+        company = get_company_by_twilio_number(To)
+        print("TWILIO company:", company)
 
-    if not company:
-        twiml = "<Response><Message>Hola 👋 ¿A qué empresa deseas cotizar?</Message></Response>"
+        if not company:
+            msg = "Hola 👋 ¿A qué empresa deseas cotizar?"
+            twiml = f"<Response><Message>{escape(msg)}</Message></Response>"
+            return Response(content=twiml, media_type="application/xml")
+
+        # 👇 temporalmente NO llames OpenAI todavía (para debug)
+        reply_text = build_reply_for_company(company["id"], Body)
+
+        twiml = f"<Response><Message>{escape(reply_text)}</Message></Response>"
         return Response(content=twiml, media_type="application/xml")
 
-    # 🔥 AQUÍ ESTÁ EL CAMBIO CLAVE
-    reply_text = build_reply_for_company(company["id"], Body)
-
-    twiml = f"<Response><Message>{reply_text}</Message></Response>"
-    return Response(content=twiml, media_type="application/xml")
+    except Exception as e:
+        print("TWILIO WEBHOOK ERROR:", repr(e))
+        traceback.print_exc()
+        msg = "Error interno. Intenta de nuevo en 1 minuto."
+        twiml = f"<Response><Message>{escape(msg)}</Message></Response>"
+        return Response(content=twiml, media_type="application/xml")
