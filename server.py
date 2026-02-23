@@ -9,6 +9,7 @@ import requests
 from io import BytesIO
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+from twilio.rest import Client
 
 import bcrypt
 import psycopg2
@@ -103,7 +104,13 @@ def verify_password(password: str, password_hash: str) -> bool:
 def norm_name(s: str) -> str:
     return " ".join((s or "").strip().lower().split())
 
-
+def twilio_client():
+    sid = (os.getenv("TWILIO_ACCOUNT_SID") or "").strip()
+    token = (os.getenv("TWILIO_AUTH_TOKEN") or "").strip()
+    if not sid or not token:
+        raise RuntimeError("Falta TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN en Render")
+    return Client(sid, token)
+    
 def extract_product_query(text: str) -> str:
     t = (text or "").lower().strip()
     t = re.sub(r"[^a-z0-9áéíóúñü\s]", " ", t)
@@ -1124,6 +1131,35 @@ def create_company(body: CompanyCreateBody):
 
 class TwilioPhoneBody(BaseModel):
     twilio_phone: str  # "whatsapp:+15715463202"
+
+@app.post("/api/admin/companies/{company_id}/twilio/provision")
+def provision_twilio_number(company_id: str, request: Request):
+    # Reusa tu login (cookie session)
+    _ = get_user_from_session(request)
+
+    client = twilio_client()
+
+    # Compra un número US (cambia el area_code si quieres)
+    num = client.incoming_phone_numbers.create(area_code="571")
+
+    twilio_phone = f"whatsapp:{num.phone_number}"  # ej whatsapp:+1571...
+
+    # Guarda en DB
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "UPDATE companies SET twilio_phone=%s WHERE id=%s RETURNING id",
+            (twilio_phone, company_id),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Empresa no encontrada")
+    finally:
+        cur.close()
+        conn.close()
+
+    return {"ok": True, "company_id": company_id, "twilio_phone": twilio_phone}
 
 @app.post("/api/companies/{company_id}/twilio_phone")
 def set_company_twilio_phone(company_id: str, body: TwilioPhoneBody, request: Request):
