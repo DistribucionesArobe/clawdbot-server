@@ -1385,7 +1385,7 @@ async def twilio_webhook(
             return Response(content=twiml, media_type="application/xml")
 
         # 👇 temporalmente NO llames OpenAI todavía (para debug)
-        reply_text = build_reply_for_company(company["id"], Body)
+        reply_text = build_reply_for_company(company["company_id"], Body)
 
         twiml = f"<Response><Message>{escape(reply_text)}</Message></Response>"
         return Response(content=twiml, media_type="application/xml")
