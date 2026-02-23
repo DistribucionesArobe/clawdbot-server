@@ -7,3 +7,4 @@ httpx
 openpyxl==3.1.5
 python-multipart==0.0.9
 requests==2.32.3
+twilio==9.4.3
