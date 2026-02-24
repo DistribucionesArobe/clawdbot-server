@@ -1548,8 +1548,8 @@ def extract_qty_items_robust(text: str):
                 items.append((int(qty_s), prod))
 
     return items
-
-def build_reply_for_company(company_id: str, user_text: str, wa_from: str) -> str:
+    
+def build_reply_for_company(company_id: str, user_text: str, wa_from: str = None) -> str:
     user_text = (user_text or "").strip()
 
     # =========================================================
