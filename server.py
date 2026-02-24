@@ -116,6 +116,41 @@ def twilio_client():
         raise RuntimeError("Falta TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN en Render")
     return Client(sid, token)
 
+def extract_qty_items_robust(text: str):
+    """
+    Extrae (qty, producto) de frases tipo:
+    'cotiza 10 tablarocas, 5 postes 4.10, 5 redimix 10 perfacinta y 1000 pijas'
+    """
+    t = (text or "").lower()
+    t = t.replace("+", " ")
+    t = re.sub(r"[•;]", " ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+
+    # quitamos palabras “ruido”
+    t = re.sub(r"\b(cotiza|cotización|cotizacion|precio|precios|por favor|pls|porfa)\b", " ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+
+    # separa por coma primero
+    parts = [p.strip() for p in t.split(",") if p.strip()]
+    items = []
+
+    for part in parts:
+        # dentro de cada parte, puede venir " ... y 10 ..."
+        # pero ojo: "4.10" NO debe partirse por "y" (no contiene y)
+        subparts = [s.strip() for s in re.split(r"\s+y\s+", part) if s.strip()]
+
+        for s in subparts:
+            # Ahora extraemos TODOS los pares (qty, texto hasta antes del siguiente qty)
+            pattern = r"(\d+)\s+(.+?)(?=\s+\d+\s+|$)"
+            matches = re.findall(pattern, s)
+            for qty_s, prod in matches:
+                prod = prod.strip()
+                if not prod:
+                    continue
+                items.append((int(qty_s), prod))
+
+    return items
+
 def twilio_send_whatsapp(to_user_whatsapp: str, text: str):
     client = twilio_client()
 
@@ -166,24 +201,23 @@ def extract_qty_and_product(text: str):
     product = m.group(2).strip()
     return qty, product
 
-def build_reply_for_company(company_id: str, user_text: str) -> str:
-    # 1) intentar multi-items primero
-    items_multi = extract_qty_items(user_text)
 
-    # Si encontró 2+ items, arma cotización con precios
-    if len(items_multi) >= 2:
+def build_reply_for_company(company_id: str, user_text: str) -> str:
+    items_multi = extract_qty_items_robust(user_text)
+
+    if items_multi:
         conn = get_conn()
         try:
             lines = []
+            missing = []
             subtotal = 0.0
 
             for qty, prod_raw in items_multi:
-                # aquí reusamos tu extractor para limpiar
                 prod_query = extract_product_query(prod_raw)
 
                 found = search_pricebook(conn, company_id, prod_query, limit=1)
                 if not found:
-                    lines.append(f"- {qty} x {prod_raw}: ❌ No encontrado")
+                    missing.append(f"- {qty} x {prod_raw}")
                     continue
 
                 it = found[0]
@@ -193,25 +227,31 @@ def build_reply_for_company(company_id: str, user_text: str) -> str:
                 subtotal += imp
                 lines.append(f"- {qty} {unit} de {it['name']} x ${price:,.2f} = ${imp:,.2f}")
 
-            if subtotal <= 0:
-                return "No pude encontrar esos productos. Escribe el nombre exacto o manda una foto/lista."
+            if lines:
+                iva = subtotal * 0.16
+                total = subtotal + iva
+                msg = (
+                    "Cotización rápida:\n"
+                    + "\n".join(lines)
+                    + f"\n\nSubtotal: ${subtotal:,.2f}"
+                    + f"\nIVA (16%): ${iva:,.2f}"
+                    + f"\nTotal: ${total:,.2f}"
+                )
+            else:
+                msg = "No encontré productos de tu lista en el catálogo."
 
-            iva = subtotal * 0.16
-            total = subtotal + iva
-            return (
-                "Cotización rápida:\n"
-                + "\n".join(lines)
-                + f"\n\nSubtotal: ${subtotal:,.2f}"
-                + f"\nIVA (16%): ${iva:,.2f}"
-                + f"\nTotal: ${total:,.2f}"
-                + "\n\n¿Agregamos otro producto?"
-            )
+            if missing:
+                msg += (
+                    "\n\nNo encontrados (necesito nombre más exacto o SKU):\n"
+                    + "\n".join(missing[:12])
+                )
+
+            msg += "\n\n¿Agregamos algo más?"
+            return msg
         finally:
             conn.close()
 
-    # 2) si no, cae al flujo actual de 1 item
-    qty, prod_query = extract_qty_and_product(user_text)
-    ...
+    # ... (tu flujo actual de qty+product y price_question)
 
 
 def looks_like_price_question(text: str) -> bool:
@@ -1455,7 +1495,100 @@ def search_pricebook(conn, company_id: str, q: str, limit: int = 8):
 # -------------------------
 # WhatsApp reply builder
 # -------------------------
+
+def extract_qty_items_robust(text: str):
+    """
+    Extrae (qty, producto) de frases tipo:
+    'cotiza 10 tablarocas, 5 postes 4.10, 5 redimix 10 perfacinta y 1000 pijas...'
+    """
+    t = (text or "").lower()
+    t = t.replace("+", " ")
+    t = re.sub(r"[•;]", " ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+
+    # quita palabras ruido
+    t = re.sub(r"\b(cotiza|cotización|cotizacion|precio|precios|por favor|porfa|pls)\b", " ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+
+    # separa por comas primero
+    parts = [p.strip() for p in t.split(",") if p.strip()]
+    items = []
+
+    for part in parts:
+        # dentro de cada parte, puede venir " ... y 10 ..."
+        subparts = [s.strip() for s in re.split(r"\s+y\s+", part) if s.strip()]
+
+        for s in subparts:
+            # extrae TODOS los pares (qty, texto hasta antes del siguiente qty) dentro del chunk
+            pattern = r"(\d+)\s+(.+?)(?=\s+\d+\s+|$)"
+            matches = re.findall(pattern, s)
+            for qty_s, prod in matches:
+                prod = prod.strip()
+                if not prod:
+                    continue
+                items.append((int(qty_s), prod))
+
+    return items
+
+
 def build_reply_for_company(company_id: str, user_text: str) -> str:
+    user_text = (user_text or "").strip()
+
+    # -------------------------
+    # 1) MULTI-ITEMS (primero)
+    # -------------------------
+    multi = extract_qty_items_robust(user_text)
+    if multi:
+        conn = get_conn()
+        try:
+            lines = []
+            missing = []
+            subtotal = 0.0
+            found_any = False
+
+            for qty, prod_raw in multi:
+                prod_query = extract_product_query(prod_raw)
+                items = search_pricebook(conn, company_id, prod_query, limit=1)
+
+                if not items:
+                    missing.append(f"- {qty} x {prod_raw}")
+                    continue
+
+                found_any = True
+                it = items[0]
+                unit = it.get("unit") or "unidad"
+                price = float(it.get("price") or 0)
+                imp = qty * price
+                subtotal += imp
+                lines.append(f"- {qty} {unit} de {it['name']} x ${price:,.2f} = ${imp:,.2f}")
+
+            if found_any:
+                iva = subtotal * 0.16
+                total = subtotal + iva
+                msg = (
+                    "Cotización rápida:\n"
+                    + "\n".join(lines)
+                    + f"\n\nSubtotal: ${subtotal:,.2f}"
+                    + f"\nIVA (16%): ${iva:,.2f}"
+                    + f"\nTotal: ${total:,.2f}"
+                )
+            else:
+                msg = "Veo cantidades, pero no encontré esos productos en el catálogo."
+
+            if missing:
+                msg += (
+                    "\n\nNo encontrados (escríbelos más exacto o con SKU):\n"
+                    + "\n".join(missing[:12])
+                )
+
+            msg += "\n\n¿Agregamos algo más?"
+            return msg
+        finally:
+            conn.close()
+
+    # -------------------------
+    # 2) SINGLE ITEM (tu lógica actual)
+    # -------------------------
     qty, prod_query = extract_qty_and_product(user_text)
 
     if qty and prod_query:
@@ -1480,6 +1613,9 @@ def build_reply_for_company(company_id: str, user_text: str) -> str:
                 "¿Agregamos otro producto?"
             )
 
+    # -------------------------
+    # 3) PRICE QUESTION (tu lógica actual)
+    # -------------------------
     if looks_like_price_question(user_text):
         conn = get_conn()
         try:
@@ -1498,6 +1634,20 @@ def build_reply_for_company(company_id: str, user_text: str) -> str:
                 + "\n\nDime cantidades para cotizar (ej: 10 tablaroca ultralight)."
             )
 
+    # -------------------------
+    # 4) GUARD ANTI-ALUCINACIÓN (AQUÍ VA)
+    # Si hay números, NO mandes a OpenAI.
+    # -------------------------
+    if re.search(r"\b\d+\b", user_text):
+        return (
+            "Veo cantidades en tu mensaje, pero no pude encontrar esos productos en el catálogo.\n\n"
+            "👉 Escríbelos con nombre más exacto o SKU.\n"
+            "Ejemplo: '10 tablaroca ultralight usg' o '1000 pija tablaroca 6x1'."
+        )
+
+    # -------------------------
+    # 5) OpenAI fallback (solo para preguntas generales)
+    # -------------------------
     if not openai_client:
         return "Estoy en mantenimiento. Intenta más tarde."
 
@@ -1510,7 +1660,6 @@ def build_reply_for_company(company_id: str, user_text: str) -> str:
         temperature=0.3,
     )
     return resp.choices[0].message.content or "¿Me repites eso?"
-
 
 # -------------------------
 # Chat (cotizabot uses bearer for catalog)
