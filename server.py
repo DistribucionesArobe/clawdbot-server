@@ -117,37 +117,23 @@ def twilio_client():
     return Client(sid, token)
 
 def extract_qty_items_robust(text: str):
-    """
-    Extrae (qty, producto) de frases tipo:
-    'cotiza 10 tablarocas, 5 postes 4.10, 5 redimix 10 perfacinta y 1000 pijas'
-    """
     t = (text or "").lower()
-    t = t.replace("+", " ")
-    t = re.sub(r"[•;]", " ", t)
-    t = re.sub(r"\s+", " ", t).strip()
 
-    # quitamos palabras “ruido”
-    t = re.sub(r"\b(cotiza|cotización|cotizacion|precio|precios|por favor|pls|porfa)\b", " ", t)
-    t = re.sub(r"\s+", " ", t).strip()
+    # 🔥 FIX crítico: 6 x 1 -> 6x1
+    t = re.sub(r"\b(\d+)\s*x\s*(\d+)\b", r"\1x\2", t)
 
-    # separa por coma primero
-    parts = [p.strip() for p in t.split(",") if p.strip()]
+    # normaliza separadores
+    t = t.replace(",", " , ")
+    t = re.sub(r"\s+y\s+", " , ", t)
+
+    pattern = r"(\d+)\s+([^,]+)"
+    matches = re.findall(pattern, t)
+
     items = []
-
-    for part in parts:
-        # dentro de cada parte, puede venir " ... y 10 ..."
-        # pero ojo: "4.10" NO debe partirse por "y" (no contiene y)
-        subparts = [s.strip() for s in re.split(r"\s+y\s+", part) if s.strip()]
-
-        for s in subparts:
-            # Ahora extraemos TODOS los pares (qty, texto hasta antes del siguiente qty)
-            pattern = r"(\d+)\s+(.+?)(?=\s+\d+\s+|$)"
-            matches = re.findall(pattern, s)
-            for qty_s, prod in matches:
-                prod = prod.strip()
-                if not prod:
-                    continue
-                items.append((int(qty_s), prod))
+    for qty, prod in matches:
+        prod = prod.strip()
+        if prod:
+            items.append((int(qty), prod))
 
     return items
 
@@ -201,6 +187,15 @@ def extract_qty_and_product(text: str):
     product = m.group(2).strip()
     return qty, product
 
+def split_clarifications(text: str):
+    t = (text or "").lower().strip()
+    t = t.replace("+", " ")
+    t = re.sub(r"\s+", " ", t)
+    parts = [p.strip() for p in t.split(",") if p.strip()]
+    out = []
+    for p in parts:
+        out.extend([s.strip() for s in re.split(r"\s+y\s+", p) if s.strip()])
+    return [x for x in out if x]
 
 def build_reply_for_company(company_id: str, user_text: str) -> str:
     items_multi = extract_qty_items_robust(user_text)
@@ -217,7 +212,7 @@ def build_reply_for_company(company_id: str, user_text: str) -> str:
 
                 found = search_pricebook(conn, company_id, prod_query, limit=1)
                 if not found:
-                    missing.append(f"- {qty} x {prod_raw}")
+                    missing_pairs.append((qty, prod_raw))
                     continue
 
                 it = found[0]
@@ -326,6 +321,101 @@ def get_company_by_twilio_number(to_phone: str):
         if not row:
             return None
         return {"company_id": row[0], "name": row[1]}
+    finally:
+        cur.close()
+        conn.close()
+
+import json
+
+# -------------------------
+# Quote state helpers (tabla quote_states)
+# -------------------------
+def get_quote_state(company_id: str, wa_from: str):
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT state_json
+            FROM quote_states
+            WHERE company_id=%s AND wa_from=%s
+            LIMIT 1
+            """,
+            (company_id, wa_from),
+        )
+        row = cur.fetchone()
+        return row[0] if row else None
+    finally:
+        cur.close()
+        conn.close()
+
+
+def upsert_quote_state(company_id: str, wa_from: str, state: dict):
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            INSERT INTO quote_states (company_id, wa_from, state_json, updated_at)
+            VALUES (%s, %s, %s::jsonb, now())
+            ON CONFLICT (company_id, wa_from)
+            DO UPDATE SET
+                state_json = EXCLUDED.state_json,
+                updated_at = now()
+            """,
+            (company_id, wa_from, json.dumps(state)),
+        )
+    finally:
+        cur.close()
+        conn.close()
+
+
+def clear_quote_state(company_id: str, wa_from: str):
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "DELETE FROM quote_states WHERE company_id=%s AND wa_from=%s",
+            (company_id, wa_from),
+        )
+    finally:
+        cur.close()
+        conn.close()
+
+
+# -------------------------
+# Clarifications splitter
+# -------------------------
+def split_clarifications(text: str):
+    t = (text or "").lower()
+    parts = re.split(r",|\sy\s", t)
+    return [p.strip() for p in parts if p.strip()]
+
+def upsert_quote_state(company_id: str, wa_from: str, state: dict):
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            insert into wa_quote_state(company_id, wa_from, state, updated_at)
+            values (%s, %s, %s::jsonb, now())
+            on conflict (company_id, wa_from)
+            do update set state=excluded.state, updated_at=now()
+            """,
+            (company_id, wa_from, json.dumps(state)),
+        )
+    finally:
+        cur.close()
+        conn.close()
+
+def clear_quote_state(company_id: str, wa_from: str):
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "delete from wa_quote_state where company_id=%s and wa_from=%s",
+            (company_id, wa_from),
+        )
     finally:
         cur.close()
         conn.close()
@@ -1530,19 +1620,18 @@ def extract_qty_items_robust(text: str):
 
     return items
 
-
-def build_reply_for_company(company_id: str, user_text: str) -> str:
+def build_reply_for_company(company_id: str, user_text: str, wa_from: str) -> str:
     user_text = (user_text or "").strip()
 
-    # -------------------------
-    # 1) MULTI-ITEMS (primero)
-    # -------------------------
+    # =========================================================
+    # 1) MULTI-ITEMS (PRIORIDAD MÁXIMA)
+    # =========================================================
     multi = extract_qty_items_robust(user_text)
     if multi:
         conn = get_conn()
         try:
             lines = []
-            missing = []
+            missing_pairs = []
             subtotal = 0.0
             found_any = False
 
@@ -1551,7 +1640,7 @@ def build_reply_for_company(company_id: str, user_text: str) -> str:
                 items = search_pricebook(conn, company_id, prod_query, limit=1)
 
                 if not items:
-                    missing.append(f"- {qty} x {prod_raw}")
+                    missing_pairs.append((qty, prod_raw))
                     continue
 
                 found_any = True
@@ -1575,20 +1664,26 @@ def build_reply_for_company(company_id: str, user_text: str) -> str:
             else:
                 msg = "Veo cantidades, pero no encontré esos productos en el catálogo."
 
-            if missing:
+            if missing_pairs:
                 msg += (
                     "\n\nNo encontrados (escríbelos más exacto o con SKU):\n"
-                    + "\n".join(missing[:12])
+                    + "\n".join([f"- {q} x {r}" for (q, r) in missing_pairs[:12]])
                 )
+
+                upsert_quote_state(company_id, wa_from, {
+                    "pending": [{"qty": q, "raw": r} for (q, r) in missing_pairs]
+                })
+            else:
+                clear_quote_state(company_id, wa_from)
 
             msg += "\n\n¿Agregamos algo más?"
             return msg
         finally:
             conn.close()
 
-    # -------------------------
-    # 2) SINGLE ITEM (tu lógica actual)
-    # -------------------------
+    # =========================================================
+    # 2) SINGLE ITEM
+    # =========================================================
     qty, prod_query = extract_qty_and_product(user_text)
 
     if qty and prod_query:
@@ -1613,9 +1708,9 @@ def build_reply_for_company(company_id: str, user_text: str) -> str:
                 "¿Agregamos otro producto?"
             )
 
-    # -------------------------
-    # 3) PRICE QUESTION (tu lógica actual)
-    # -------------------------
+    # =========================================================
+    # 3) PRICE QUESTION
+    # =========================================================
     if looks_like_price_question(user_text):
         conn = get_conn()
         try:
@@ -1634,10 +1729,76 @@ def build_reply_for_company(company_id: str, user_text: str) -> str:
                 + "\n\nDime cantidades para cotizar (ej: 10 tablaroca ultralight)."
             )
 
-    # -------------------------
-    # 4) GUARD ANTI-ALUCINACIÓN (AQUÍ VA)
-    # Si hay números, NO mandes a OpenAI.
-    # -------------------------
+    # =========================================================
+    # 3.5) CONTEXTO DE ACLARACIONES
+    # =========================================================
+    state = get_quote_state(company_id, wa_from)
+    if state and state.get("pending"):
+        clarifs = split_clarifications(user_text)
+
+        if clarifs:
+            pend = state["pending"]
+            mapped = []
+
+            for i, p in enumerate(pend):
+                qty = int(p.get("qty") or 0)
+                raw = (p.get("raw") or "").strip()
+                new_prod = clarifs[i] if i < len(clarifs) else raw
+                mapped.append((qty, new_prod))
+
+            conn = get_conn()
+            try:
+                lines = []
+                still_missing = []
+                subtotal = 0.0
+
+                for qty, prod_raw in mapped:
+                    prod_query = extract_product_query(prod_raw)
+                    found = search_pricebook(conn, company_id, prod_query, limit=1)
+
+                    if not found:
+                        still_missing.append((qty, prod_raw))
+                        continue
+
+                    it = found[0]
+                    unit = it.get("unit") or "unidad"
+                    price = float(it.get("price") or 0)
+                    imp = qty * price
+                    subtotal += imp
+                    lines.append(f"- {qty} {unit} de {it['name']} x ${price:,.2f} = ${imp:,.2f}")
+
+                if lines:
+                    iva = subtotal * 0.16
+                    total = subtotal + iva
+                    msg = (
+                        "Cotización (con tus aclaraciones):\n"
+                        + "\n".join(lines)
+                        + f"\n\nSubtotal: ${subtotal:,.2f}"
+                        + f"\nIVA (16%): ${iva:,.2f}"
+                        + f"\nTotal: ${total:,.2f}"
+                    )
+                else:
+                    msg = "Gracias. Aún no pude encontrar esos productos en el catálogo."
+
+                if still_missing:
+                    upsert_quote_state(company_id, wa_from, {
+                        "pending": [{"qty": q, "raw": r} for (q, r) in still_missing]
+                    })
+                    msg += "\n\nAún pendientes:\n" + "\n".join(
+                        [f"- {q} x {r}" for (q, r) in still_missing[:12]]
+                    )
+                    msg += "\n\nMándame el nombre exacto o SKU de esos pendientes."
+                else:
+                    clear_quote_state(company_id, wa_from)
+                    msg += "\n\n✅ Listo. ¿Agregamos algo más?"
+
+                return msg
+            finally:
+                conn.close()
+
+    # =========================================================
+    # 4) GUARD ANTI-ALUCINACIÓN
+    # =========================================================
     if re.search(r"\b\d+\b", user_text):
         return (
             "Veo cantidades en tu mensaje, pero no pude encontrar esos productos en el catálogo.\n\n"
@@ -1645,9 +1806,9 @@ def build_reply_for_company(company_id: str, user_text: str) -> str:
             "Ejemplo: '10 tablaroca ultralight usg' o '1000 pija tablaroca 6x1'."
         )
 
-    # -------------------------
-    # 5) OpenAI fallback (solo para preguntas generales)
-    # -------------------------
+    # =========================================================
+    # 5) OPENAI FALLBACK
+    # =========================================================
     if not openai_client:
         return "Estoy en mantenimiento. Intenta más tarde."
 
@@ -1661,9 +1822,6 @@ def build_reply_for_company(company_id: str, user_text: str) -> str:
     )
     return resp.choices[0].message.content or "¿Me repites eso?"
 
-# -------------------------
-# Chat (cotizabot uses bearer for catalog)
-# -------------------------
 @app.post("/api/chat")
 async def chat(req: ChatRequest, authorization: str = Header(default="")):
     app_id = (getattr(req, "app", None) or "cotizabot").lower().strip()
@@ -1790,7 +1948,7 @@ async def twilio_webhook(
             )
             return TWIML_OK
 
-        reply_text = build_reply_for_company(company["company_id"], Body)
+        reply_text = build_reply_for_company(company["company_id"], Body, wa_from=From)
         print("REPLY TEXT:", repr(reply_text))
 
         twilio_send_whatsapp(to_user_whatsapp=From, text=reply_text)
