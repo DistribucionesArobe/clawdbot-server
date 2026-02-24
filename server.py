@@ -10,6 +10,7 @@ from io import BytesIO
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from twilio.rest import Client
+from rapidfuzz import fuzz
 
 import bcrypt
 import psycopg2
@@ -194,6 +195,172 @@ def looks_like_price_question(text: str) -> bool:
 def generate_api_key() -> str:
     return secrets.token_urlsafe(32)
 
+def cart_add_item(state: dict, item: dict):
+    state = state or {}
+    cart = state.get("cart") or []
+
+    sku = (item.get("sku") or "").strip()
+    name = (item.get("name") or "").strip()
+    unit = (item.get("unit") or "unidad").strip()
+    price = float(item.get("price") or 0.0)
+    vat_rate = item.get("vat_rate")
+    vat_rate = float(vat_rate) if vat_rate is not None else 0.16
+
+    qty = int(item.get("qty") or 0)
+    if qty <= 0:
+        return state
+
+    # merge por sku si existe, si no por name
+    merged = False
+    for it in cart:
+        if sku and it.get("sku") == sku:
+            it["qty"] = int(it.get("qty") or 0) + qty
+            merged = True
+            break
+        if (not sku) and it.get("name") == name:
+            it["qty"] = int(it.get("qty") or 0) + qty
+            merged = True
+            break
+
+    if not merged:
+        cart.append({
+            "sku": sku,
+            "name": name,
+            "unit": unit,
+            "price": price,
+            "vat_rate": vat_rate,
+            "qty": qty,
+        })
+
+    state["cart"] = cart
+    return state
+
+def extract_specs(text: str):
+    t = norm_name(text)
+    # medida como 6.35, 4.10, 2.44, etc.
+    m = re.search(r"\b(\d+(?:\.\d+)?)\b", t)
+    medida = m.group(1) if m else None
+
+    cal = None
+    mc = re.search(r"\bcal(?:ibre)?\s*(\d+)\b", t)
+    if mc:
+        cal = mc.group(1)
+    return {"medida": medida, "cal": cal}
+
+def passes_constraints(item_name: str, specs: dict) -> bool:
+    n = norm_name(item_name)
+    medida = specs.get("medida")
+    cal = specs.get("cal")
+    # Si el usuario pidió medida, EXIGE que esté en el nombre del producto
+    if medida and medida not in n:
+        return False
+    # Si pidió cal, también
+    if cal and (f"cal {cal}" not in n and f"cal{cal}" not in n):
+        return False
+    return True
+
+def rank_best_match(query: str, items: list):
+    qn = norm_name(query)
+    scored = []
+    for it in items:
+        name = it.get("name") or ""
+        sn = norm_name(name)
+        sku = norm_name(it.get("sku") or "")
+        # score por tokens (mejor que LIKE)
+        s1 = fuzz.token_set_ratio(qn, sn)
+        s2 = fuzz.token_set_ratio(qn, sku) if sku else 0
+        score = max(s1, s2 + 5)  # leve boost a SKU
+        scored.append((score, it))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return scored[0][1] if scored else None, (scored[0][0] if scored else 0)
+
+def search_pricebook_best(conn, company_id: str, q: str, limit: int = 12):
+    q = (q or "").strip()
+    if not q:
+        return None
+
+    q_clean = extract_product_query(q)
+    qn = norm_name(q_clean)
+    specs = extract_specs(q_clean)
+
+    tokens = [t for t in qn.split() if len(t) >= 3] or [qn]
+
+    where_parts = []
+    params = [company_id]
+    for tok in tokens[:6]:
+        where_parts.append("name_norm LIKE %s")
+        params.append(f"%{tok}%")
+    where_sql = " AND ".join(where_parts)
+
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            f"""
+            SELECT sku, name, unit, price, vat_rate, updated_at
+            FROM pricebook_items
+            WHERE company_id=%s
+              AND ({where_sql} OR sku ILIKE %s OR name ILIKE %s)
+            LIMIT %s
+            """,
+            (*params, f"%{q_clean}%", f"%{q_clean}%", max(limit, 12)),
+        )
+        rows = cur.fetchall()
+
+        items = []
+        for sku, name, unit, price, vat_rate, _updated_at in rows:
+            items.append({
+                "sku": sku,
+                "name": name,
+                "unit": unit,
+                "price": float(price) if price is not None else None,
+                "vat_rate": float(vat_rate) if vat_rate is not None else None,
+            })
+
+        if not items:
+            return None
+
+        # 1) Si hay specs, filtra por restricciones duras (evita 6.35->4.10)
+        constrained = [it for it in items if passes_constraints(it["name"], specs)]
+        pool = constrained if constrained else items
+
+        # 2) Rank real por similitud
+        best, score = rank_best_match(q_clean, pool)
+
+        if not best or score < 72:
+            return None
+
+        return best
+    finally:
+        cur.close()
+        
+def cart_render_quote(state: dict) -> str:
+    cart = (state or {}).get("cart") or []
+    if not cart:
+        return ""
+
+    lines = []
+    subtotal = 0.0
+    # Si tienes vat_rate por producto distinto, aquí lo podrías manejar por item.
+    # Para mantener tu formato, uso 0.16 global.
+    for it in cart:
+        qty = int(it.get("qty") or 0)
+        price = float(it.get("price") or 0.0)
+        unit = it.get("unit") or "unidad"
+        name = it.get("name") or ""
+        imp = qty * price
+        subtotal += imp
+        lines.append(f"- {qty} {unit} de {name} x ${price:,.2f} = ${imp:,.2f}")
+
+    iva = subtotal * 0.16
+    total = subtotal + iva
+
+    return (
+        "Cotización rápida:\n"
+        + "\n".join(lines)
+        + f"\n\nSubtotal: ${subtotal:,.2f}"
+        + f"\nIVA (16%): ${iva:,.2f}"
+        + f"\nTotal: ${total:,.2f}"
+    )
 
 def api_key_prefix(token: str) -> str:
     return token[:API_KEY_PREFIX_LEN]
@@ -285,7 +452,6 @@ def get_quote_state(company_id: str, wa_from: str):
 def upsert_quote_state(company_id: str, wa_from: str, state: dict):
     if not wa_from:
         return
-
     conn = get_conn()
     cur = conn.cursor()
     try:
@@ -307,7 +473,6 @@ def upsert_quote_state(company_id: str, wa_from: str, state: dict):
 def clear_quote_state(company_id: str, wa_from: str):
     if not wa_from:
         return
-
     conn = get_conn()
     cur = conn.cursor()
     try:
@@ -321,60 +486,6 @@ def clear_quote_state(company_id: str, wa_from: str):
         cur.close()
         conn.close()
 
-
-def clear_quote_state(company_id: str, wa_from: str):
-    conn = get_conn()
-    cur = conn.cursor()
-    try:
-        cur.execute(
-            "DELETE FROM quote_states WHERE company_id=%s AND wa_from=%s",
-            (company_id, wa_from),
-        )
-    finally:
-        cur.close()
-        conn.close()
-
-
-# -------------------------
-# Clarifications splitter
-# -------------------------
-def split_clarifications(text: str):
-    t = (text or "").lower()
-    parts = re.split(r",|\sy\s", t)
-    return [p.strip() for p in parts if p.strip()]
-
-def upsert_quote_state(company_id: str, wa_from: str, state: dict):
-    conn = get_conn()
-    cur = conn.cursor()
-    try:
-        cur.execute(
-            """
-            insert into wa_quote_state(company_id, wa_from, state, updated_at)
-            values (%s, %s, %s::jsonb, now())
-            on conflict (company_id, wa_from)
-            do update set state=excluded.state, updated_at=now()
-            """,
-            (company_id, wa_from, json.dumps(state)),
-        )
-    finally:
-        cur.close()
-        conn.close()
-
-def clear_quote_state(company_id: str, wa_from: str):
-    conn = get_conn()
-    cur = conn.cursor()
-    try:
-        cur.execute(
-            "delete from wa_quote_state where company_id=%s and wa_from=%s",
-            (company_id, wa_from),
-        )
-    finally:
-        cur.close()
-        conn.close()
-
-# -------------------------
-# WhatsApp tenant lookup
-# -------------------------
 def get_company_by_phone_number_id(phone_number_id: str):
     conn = get_conn()
     cur = conn.cursor()
@@ -597,8 +708,8 @@ async def whatsapp_webhook(request: Request):
 
     print("WA IN:", {"company_id": company["company_id"], "from": from_phone, "text": text})
 
-    reply = build_reply_for_company(company["company_id"], text)
-
+    reply = build_reply_for_company(company["company_id"], text, wa_from=from_phone)
+    
     send_whatsapp_text(
         wa_api_key=company["wa_api_key"],
         phone_number_id=company["wa_phone_number_id"],
@@ -1489,6 +1600,7 @@ def search_pricebook(conn, company_id: str, q: str, limit: int = 8):
 
     q_clean = extract_product_query(q)
     qn = norm_name(q_clean)
+    specs = extract_specs(q_clean)
 
     tokens = [t for t in qn.split() if len(t) >= 3]
     if not tokens:
@@ -1510,11 +1622,10 @@ def search_pricebook(conn, company_id: str, q: str, limit: int = 8):
             SELECT sku, name, unit, price, vat_rate, updated_at
             FROM pricebook_items
             WHERE company_id=%s
-              AND ({where_sql} OR sku ILIKE %s)
-            ORDER BY updated_at DESC
+              AND ({where_sql} OR sku ILIKE %s OR name ILIKE %s)
             LIMIT %s
             """,
-            (*params, f"%{q_clean}%", limit),
+            (*params, f"%{q_clean}%", f"%{q_clean}%", max(limit, 12)),
         )
         rows = cur.fetchall()
 
@@ -1530,13 +1641,21 @@ def search_pricebook(conn, company_id: str, q: str, limit: int = 8):
                     "updated_at": updated_at.isoformat() if updated_at else None,
                 }
             )
-        return items
+
+        # 1) si hay specs, filtra por restricciones duras
+        constrained = [it for it in items if passes_constraints(it["name"], specs)]
+        pool = constrained if constrained else items
+
+        # 2) rankea por similitud real
+        best, score = rank_best_match(q_clean, pool)
+
+        # score bajo => mejor pedir confirmación / SKU
+        if not best or score < 72:
+            return []
+
+        return [best]
     finally:
         cur.close()
-
-# -------------------------
-# WhatsApp reply builder
-# -------------------------
 
 def extract_qty_items_robust(text: str):
     """
@@ -1577,59 +1696,71 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
     wa_from = (wa_from or "").strip()
 
     # =========================================================
-    # 1) MULTI-ITEMS (PRIORIDAD MÁXIMA)
+    # 1) MULTI-ITEMS (PRIORIDAD MÁXIMA) + CARRITO PERSISTENTE
     # =========================================================
     multi = extract_qty_items_robust(user_text)
     if multi:
         conn = get_conn()
         try:
-            lines = []
+            # carga estado actual (carrito + pending)
+            state = get_quote_state(company_id, wa_from) if wa_from else None
+            if not state:
+                state = {}
+
             missing_pairs = []
-            subtotal = 0.0
             found_any = False
 
             for qty, prod_raw in multi:
                 prod_query = extract_product_query(prod_raw)
-                items = search_pricebook(conn, company_id, prod_query, limit=1)
 
-                if not items:
+                # Trae varios y luego rankea (evita "6.35" -> "4.10")
+                # Si aún no tienes search_pricebook_best, cámbialo por search_pricebook(conn,...,limit=1)[0]
+                best = None
+                try:
+                    best = search_pricebook_best(conn, company_id, prod_query, limit=12)  # <- recomendado
+                except Exception:
+                    best_items = search_pricebook(conn, company_id, prod_query, limit=1)
+                    best = best_items[0] if best_items else None
+
+                if not best:
                     missing_pairs.append((qty, prod_raw))
                     continue
 
                 found_any = True
-                it = items[0]
-                unit = it.get("unit") or "unidad"
-                price = float(it.get("price") or 0.0)
-                imp = qty * price
-                subtotal += imp
-                lines.append(f"- {qty} {unit} de {it['name']} x ${price:,.2f} = ${imp:,.2f}")
+                unit = best.get("unit") or "unidad"
+                price = float(best.get("price") or 0.0)
 
-            if found_any:
-                iva = subtotal * 0.16
-                total = subtotal + iva
-                msg = (
-                    "Cotización rápida:\n"
-                    + "\n".join(lines)
-                    + f"\n\nSubtotal: ${subtotal:,.2f}"
-                    + f"\nIVA (16%): ${iva:,.2f}"
-                    + f"\nTotal: ${total:,.2f}"
-                )
+                # ✅ suma al carrito (en vez de recalcular desde cero)
+                state = cart_add_item(state, {
+                    "sku": best.get("sku"),
+                    "name": best.get("name"),
+                    "unit": unit,
+                    "price": price,
+                    "vat_rate": best.get("vat_rate"),
+                    "qty": qty,
+                })
+
+            # Actualiza pending en el mismo state
+            if missing_pairs:
+                state["pending"] = [{"qty": q, "raw": r} for (q, r) in missing_pairs]
+            else:
+                state.pop("pending", None)
+
+            # Guarda state si aplica
+            if wa_from:
+                upsert_quote_state(company_id, wa_from, state)
+
+            # Renderiza cotización desde carrito
+            if (state.get("cart") or []):
+                msg = cart_render_quote(state)
             else:
                 msg = "Veo cantidades, pero no encontré esos productos en el catálogo."
 
-            # Guardar pendientes (solo si wa_from existe)
             if missing_pairs:
                 msg += (
                     "\n\nNo encontrados (escríbelos más exacto o con SKU):\n"
                     + "\n".join([f"- {q} x {r}" for (q, r) in missing_pairs[:12]])
                 )
-                if wa_from:
-                    upsert_quote_state(company_id, wa_from, {
-                        "pending": [{"qty": q, "raw": r} for (q, r) in missing_pairs]
-                    })
-            else:
-                if wa_from:
-                    clear_quote_state(company_id, wa_from)
 
             msg += "\n\n¿Agregamos algo más?"
             return msg
@@ -1638,33 +1769,47 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
 
     # =========================================================
     # 2) SINGLE ITEM (ej: "10 tablaroca ultralight")
+    #    AHORA TAMBIÉN SUMA AL CARRITO
     # =========================================================
     qty, prod_query = extract_qty_and_product(user_text)
     if qty and prod_query:
         conn = get_conn()
         try:
-            items = search_pricebook(conn, company_id, prod_query, limit=1)
+            # mejor: best match
+            best = None
+            try:
+                best = search_pricebook_best(conn, company_id, prod_query, limit=12)
+            except Exception:
+                items = search_pricebook(conn, company_id, prod_query, limit=1)
+                best = items[0] if items else None
         finally:
             conn.close()
 
-        if items:
-            it = items[0]
-            unit = it.get("unit") or "unidad"
-            price = float(it.get("price") or 0.0)
-            subtotal = qty * price
-            iva = subtotal * 0.16
-            total = subtotal + iva
+        if best:
+            unit = best.get("unit") or "unidad"
+            price = float(best.get("price") or 0.0)
+
+            # carga state
+            state = get_quote_state(company_id, wa_from) if wa_from else None
+            if not state:
+                state = {}
+
+            state = cart_add_item(state, {
+                "sku": best.get("sku"),
+                "name": best.get("name"),
+                "unit": unit,
+                "price": price,
+                "vat_rate": best.get("vat_rate"),
+                "qty": qty,
+            })
+
+            # al cotizar, limpia pendientes (si quieres mantenerlos, quita estas 2 líneas)
+            state.pop("pending", None)
 
             if wa_from:
-                clear_quote_state(company_id, wa_from)
+                upsert_quote_state(company_id, wa_from, state)
 
-            return (
-                "Cotización rápida:\n"
-                f"- {qty} {unit} de {it['name']} x ${price:,.2f} = ${subtotal:,.2f}\n"
-                f"IVA (16%): ${iva:,.2f}\n"
-                f"Total: ${total:,.2f}\n\n"
-                "¿Agregamos otro producto?"
-            )
+            return cart_render_quote(state) + "\n\n¿Agregamos algo más?"
 
     # =========================================================
     # 3) PRICE QUESTION (ej: "precio tablaroca")
@@ -1682,7 +1827,6 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
                 unit = f" / {it['unit']}" if it.get("unit") else ""
                 lines.append(f"- {it['name']}: ${float(it['price']):,.2f}{unit}")
 
-            # No limpiamos estado aquí porque el usuario puede estar explorando precios
             return (
                 "Encontré estos precios:\n"
                 + "\n".join(lines)
@@ -1691,17 +1835,14 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
 
     # =========================================================
     # 3.5) CONTEXTO (aclaraciones para pendientes)
-    # Solo aplica si tenemos wa_from y existe state.pending
     # =========================================================
     state = get_quote_state(company_id, wa_from) if wa_from else None
     if state and state.get("pending"):
         clarifs = split_clarifications(user_text)
-
         if clarifs:
             pend = state["pending"]
             mapped = []
 
-            # Mapeo por orden: aclaración i reemplaza pendiente i
             for i, p in enumerate(pend):
                 qty = int(p.get("qty") or 0)
                 raw = (p.get("raw") or "").strip()
@@ -1710,58 +1851,59 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
 
             conn = get_conn()
             try:
-                lines = []
                 still_missing = []
-                subtotal = 0.0
+                any_added = False
 
                 for qty, prod_raw in mapped:
                     prod_query = extract_product_query(prod_raw)
-                    found = search_pricebook(conn, company_id, prod_query, limit=1)
 
-                    if not found:
+                    best = None
+                    try:
+                        best = search_pricebook_best(conn, company_id, prod_query, limit=12)
+                    except Exception:
+                        found = search_pricebook(conn, company_id, prod_query, limit=1)
+                        best = found[0] if found else None
+
+                    if not best:
                         still_missing.append((qty, prod_raw))
                         continue
 
-                    it = found[0]
-                    unit = it.get("unit") or "unidad"
-                    price = float(it.get("price") or 0.0)
-                    imp = qty * price
-                    subtotal += imp
-                    lines.append(f"- {qty} {unit} de {it['name']} x ${price:,.2f} = ${imp:,.2f}")
+                    any_added = True
+                    unit = best.get("unit") or "unidad"
+                    price = float(best.get("price") or 0.0)
 
-                if lines:
-                    iva = subtotal * 0.16
-                    total = subtotal + iva
-                    msg = (
-                        "Cotización (con tus aclaraciones):\n"
-                        + "\n".join(lines)
-                        + f"\n\nSubtotal: ${subtotal:,.2f}"
-                        + f"\nIVA (16%): ${iva:,.2f}"
-                        + f"\nTotal: ${total:,.2f}"
-                    )
-                else:
-                    msg = "Gracias. Aún no pude encontrar esos productos en el catálogo."
+                    state = cart_add_item(state, {
+                        "sku": best.get("sku"),
+                        "name": best.get("name"),
+                        "unit": unit,
+                        "price": price,
+                        "vat_rate": best.get("vat_rate"),
+                        "qty": qty,
+                    })
 
                 if still_missing:
-                    upsert_quote_state(company_id, wa_from, {
-                        "pending": [{"qty": q, "raw": r} for (q, r) in still_missing]
-                    })
-                    msg += "\n\nAún pendientes:\n" + "\n".join(
-                        [f"- {q} x {r}" for (q, r) in still_missing[:12]]
-                    )
-                    msg += "\n\nMándame el nombre exacto o SKU de esos pendientes."
-                else:
-                    clear_quote_state(company_id, wa_from)
-                    msg += "\n\n✅ Listo. ¿Agregamos algo más?"
+                    state["pending"] = [{"qty": q, "raw": r} for (q, r) in still_missing]
+                    if wa_from:
+                        upsert_quote_state(company_id, wa_from, state)
 
+                    msg = cart_render_quote(state) if (state.get("cart") or []) else "Gracias. Aún no pude encontrar esos productos en el catálogo."
+                    msg += "\n\nAún pendientes:\n" + "\n".join([f"- {q} x {r}" for (q, r) in still_missing[:12]])
+                    msg += "\n\nMándame el nombre exacto o SKU de esos pendientes."
+                    return msg
+
+                # nada pendiente
+                state.pop("pending", None)
+                if wa_from:
+                    upsert_quote_state(company_id, wa_from, state)
+
+                msg = cart_render_quote(state) if any_added else "✅ Listo."
+                msg += "\n\n✅ Listo. ¿Agregamos algo más?"
                 return msg
             finally:
                 conn.close()
 
     # =========================================================
-    # 4) GUARD ANTI-ALUCINACIÓN:
-    # Si hay números y no pudimos resolver catálogo/contexto,
-    # NO mandamos a OpenAI.
+    # 4) GUARD ANTI-ALUCINACIÓN
     # =========================================================
     if re.search(r"\b\d+\b", user_text):
         return (
@@ -1771,7 +1913,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
         )
 
     # =========================================================
-    # 5) OPENAI FALLBACK (solo preguntas generales)
+    # 5) OPENAI FALLBACK
     # =========================================================
     if not openai_client:
         return "Estoy en mantenimiento. Intenta más tarde."
