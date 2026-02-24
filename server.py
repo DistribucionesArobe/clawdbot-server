@@ -111,6 +111,31 @@ def twilio_client():
         raise RuntimeError("Falta TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN en Render")
     return Client(sid, token)
 
+def twilio_send_whatsapp(to_user_whatsapp: str, text: str):
+    """
+    Envío activo por Twilio usando Messaging Service (recomendado para WhatsApp).
+    to_user_whatsapp: ej "whatsapp:+5218118001161"
+    """
+    client = twilio_client()
+
+    msid = (os.getenv("TWILIO_MESSAGING_SERVICE_SID") or "").strip()
+    if not msid:
+        raise RuntimeError("Falta TWILIO_MESSAGING_SERVICE_SID en env vars")
+
+    to_user_whatsapp = (to_user_whatsapp or "").strip()
+    if not to_user_whatsapp.startswith("whatsapp:"):
+        raise ValueError("to_user_whatsapp debe iniciar con 'whatsapp:'")
+
+    text = (text or "").strip()
+    if not text:
+        raise ValueError("text vacío")
+
+    client.messages.create(
+        messaging_service_sid=msid,
+        to=to_user_whatsapp,
+        body=text,
+    )
+
 def twilio_send_whatsapp(from_twilio_whatsapp: str, to_user_whatsapp: str, text: str):
     """
     Envío activo por API (más confiable que TwiML para WhatsApp)
@@ -119,10 +144,11 @@ def twilio_send_whatsapp(from_twilio_whatsapp: str, to_user_whatsapp: str, text:
     """
     client = twilio_client()
     client.messages.create(
-        from_=from_twilio_whatsapp,
-        to=to_user_whatsapp,
-        body=text
+        from_=f"whatsapp:{twilio_phone}",
+        to=to_number,
+        body=reply_text,
     )
+
 
 def extract_product_query(text: str) -> str:
     t = (text or "").lower().strip()
