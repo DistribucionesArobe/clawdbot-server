@@ -101,6 +101,26 @@ def verify_password(password: str, password_hash: str) -> bool:
         return False
     return bcrypt.checkpw(pw, password_hash.encode("utf-8"))
 
+def looks_like_product_phrase(text: str) -> bool:
+    t = norm_name(text)
+
+    # debe tener al menos una palabra útil (>=3 chars)
+    tokens = [w for w in t.split() if len(w) >= 3]
+    if not tokens:
+        return False
+
+    # saludos comunes → NO producto
+    blacklist = {
+        "hola", "buenas", "gracias", "ok", "sale",
+        "perfecto", "listo", "va", "dale"
+    }
+
+    # si TODOS los tokens son de saludo → falso
+    if all(tok in blacklist for tok in tokens):
+        return False
+
+    return True
+
 def normalize_wa(addr: str) -> str:
     a = (addr or "").strip().replace(" ", "")
     if a and not a.startswith("whatsapp:"):
@@ -1833,74 +1853,86 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
                 + "\n\nDime cantidades para cotizar (ej: 10 tablaroca ultralight)."
             )
 
-    # =========================================================
-    # 3.5) CONTEXTO (aclaraciones para pendientes)
-    # =========================================================
-    state = get_quote_state(company_id, wa_from) if wa_from else None
-    if state and state.get("pending"):
-        clarifs = split_clarifications(user_text)
-        if clarifs:
-            pend = state["pending"]
-            mapped = []
+# =========================================================
+# 3.5) CONTEXTO (aclaraciones para pendientes)
+# =========================================================
+state = get_quote_state(company_id, wa_from) if wa_from else None
+if state and state.get("pending"):
+    clarifs_raw = split_clarifications(user_text)
+    clarifs = [c for c in clarifs_raw if looks_like_product_phrase(c)]
 
-            for i, p in enumerate(pend):
-                qty = int(p.get("qty") or 0)
-                raw = (p.get("raw") or "").strip()
-                new_prod = clarifs[i] if i < len(clarifs) else raw
-                mapped.append((qty, new_prod))
+    # Si el mensaje NO parece producto (hola/ok/gracias), no lo uses como aclaración
+    if not clarifs:
+        pend = state["pending"]
+        pendientes_txt = "\n".join([f"- {int(p.get('qty') or 0)} x {(p.get('raw') or '').strip()}" for p in pend[:12]])
+        return (
+            "👍 Cuando tengas el nombre exacto o SKU de los pendientes, mándamelo y lo agrego.\n\n"
+            "Pendientes actuales:\n"
+            f"{pendientes_txt}"
+        )
 
-            conn = get_conn()
+    pend = state["pending"]
+    mapped = []
+
+    # Mapeo por orden: aclaración i reemplaza pendiente i
+    for i, p in enumerate(pend):
+        qty = int(p.get("qty") or 0)
+        raw = (p.get("raw") or "").strip()
+        new_prod = clarifs[i] if i < len(clarifs) else raw
+        mapped.append((qty, new_prod))
+
+    conn = get_conn()
+    try:
+        still_missing = []
+        any_added = False
+
+        for qty, prod_raw in mapped:
+            prod_query = extract_product_query(prod_raw)
+
+            best = None
             try:
-                still_missing = []
-                any_added = False
+                best = search_pricebook_best(conn, company_id, prod_query, limit=12)
+            except Exception:
+                found = search_pricebook(conn, company_id, prod_query, limit=1)
+                best = found[0] if found else None
 
-                for qty, prod_raw in mapped:
-                    prod_query = extract_product_query(prod_raw)
+            if not best:
+                still_missing.append((qty, prod_raw))
+                continue
 
-                    best = None
-                    try:
-                        best = search_pricebook_best(conn, company_id, prod_query, limit=12)
-                    except Exception:
-                        found = search_pricebook(conn, company_id, prod_query, limit=1)
-                        best = found[0] if found else None
+            any_added = True
+            unit = best.get("unit") or "unidad"
+            price = float(best.get("price") or 0.0)
 
-                    if not best:
-                        still_missing.append((qty, prod_raw))
-                        continue
+            state = cart_add_item(state, {
+                "sku": best.get("sku"),
+                "name": best.get("name"),
+                "unit": unit,
+                "price": price,
+                "vat_rate": best.get("vat_rate"),
+                "qty": qty,
+            })
 
-                    any_added = True
-                    unit = best.get("unit") or "unidad"
-                    price = float(best.get("price") or 0.0)
+        if still_missing:
+            state["pending"] = [{"qty": q, "raw": r} for (q, r) in still_missing]
+            if wa_from:
+                upsert_quote_state(company_id, wa_from, state)
 
-                    state = cart_add_item(state, {
-                        "sku": best.get("sku"),
-                        "name": best.get("name"),
-                        "unit": unit,
-                        "price": price,
-                        "vat_rate": best.get("vat_rate"),
-                        "qty": qty,
-                    })
+            msg = cart_render_quote(state) if (state.get("cart") or []) else "Gracias. Aún no pude encontrar esos productos en el catálogo."
+            msg += "\n\nAún pendientes:\n" + "\n".join([f"- {q} x {r}" for (q, r) in still_missing[:12]])
+            msg += "\n\nMándame el nombre exacto o SKU de esos pendientes."
+            return msg
 
-                if still_missing:
-                    state["pending"] = [{"qty": q, "raw": r} for (q, r) in still_missing]
-                    if wa_from:
-                        upsert_quote_state(company_id, wa_from, state)
+        # nada pendiente
+        state.pop("pending", None)
+        if wa_from:
+            upsert_quote_state(company_id, wa_from, state)
 
-                    msg = cart_render_quote(state) if (state.get("cart") or []) else "Gracias. Aún no pude encontrar esos productos en el catálogo."
-                    msg += "\n\nAún pendientes:\n" + "\n".join([f"- {q} x {r}" for (q, r) in still_missing[:12]])
-                    msg += "\n\nMándame el nombre exacto o SKU de esos pendientes."
-                    return msg
-
-                # nada pendiente
-                state.pop("pending", None)
-                if wa_from:
-                    upsert_quote_state(company_id, wa_from, state)
-
-                msg = cart_render_quote(state) if any_added else "✅ Listo."
-                msg += "\n\n✅ Listo. ¿Agregamos algo más?"
-                return msg
-            finally:
-                conn.close()
+        msg = cart_render_quote(state) if any_added else "✅ Listo."
+        msg += "\n\n✅ Listo. ¿Agregamos algo más?"
+        return msg
+    finally:
+        conn.close()
 
     # =========================================================
     # 4) GUARD ANTI-ALUCINACIÓN
