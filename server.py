@@ -197,57 +197,6 @@ def split_clarifications(text: str):
         out.extend([s.strip() for s in re.split(r"\s+y\s+", p) if s.strip()])
     return [x for x in out if x]
 
-def build_reply_for_company(company_id: str, user_text: str) -> str:
-    items_multi = extract_qty_items_robust(user_text)
-
-    if items_multi:
-        conn = get_conn()
-        try:
-            lines = []
-            missing = []
-            subtotal = 0.0
-
-            for qty, prod_raw in items_multi:
-                prod_query = extract_product_query(prod_raw)
-
-                found = search_pricebook(conn, company_id, prod_query, limit=1)
-                if not found:
-                    missing_pairs.append((qty, prod_raw))
-                    continue
-
-                it = found[0]
-                unit = it.get("unit") or "unidad"
-                price = float(it.get("price") or 0)
-                imp = qty * price
-                subtotal += imp
-                lines.append(f"- {qty} {unit} de {it['name']} x ${price:,.2f} = ${imp:,.2f}")
-
-            if lines:
-                iva = subtotal * 0.16
-                total = subtotal + iva
-                msg = (
-                    "Cotización rápida:\n"
-                    + "\n".join(lines)
-                    + f"\n\nSubtotal: ${subtotal:,.2f}"
-                    + f"\nIVA (16%): ${iva:,.2f}"
-                    + f"\nTotal: ${total:,.2f}"
-                )
-            else:
-                msg = "No encontré productos de tu lista en el catálogo."
-
-            if missing:
-                msg += (
-                    "\n\nNo encontrados (necesito nombre más exacto o SKU):\n"
-                    + "\n".join(missing[:12])
-                )
-
-            msg += "\n\n¿Agregamos algo más?"
-            return msg
-        finally:
-            conn.close()
-
-    # ... (tu flujo actual de qty+product y price_question)
-
 
 def looks_like_price_question(text: str) -> bool:
     t = (text or "").lower()
