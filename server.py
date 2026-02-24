@@ -2156,3 +2156,62 @@ async def chat(req: ChatRequest, authorization: str = Header(default="")):
 
     reply = response.choices[0].message.content or ""
     return {"reply": reply}
+
+from xml.sax.saxutils import escape
+
+@app.post("/webhook/twilio")
+async def twilio_webhook(
+    From: str = Form(...),
+    To: str = Form(...),
+    Body: str = Form(default=""),
+):
+    From = normalize_wa(From)
+    To = normalize_wa(To)
+    Body = (Body or "").strip()
+
+    # Twilio espera TwiML válido para cerrar el webhook
+    TWIML_OK = Response(
+        content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+        media_type="text/xml",
+    )
+
+    try:
+        print("TWILIO IN:", {"from": From, "to": To, "body": Body})
+
+        # Mensajes sin texto (imagenes, audio, etc.)
+        if not Body:
+            twilio_send_whatsapp(
+                to_user_whatsapp=From,
+                text="Solo proceso mensajes de texto por ahora 📝",
+            )
+            return TWIML_OK
+
+        company = get_company_by_twilio_number(To)
+        print("TWILIO company:", company)
+
+        if not company:
+            twilio_send_whatsapp(
+                to_user_whatsapp=From,
+                text="Hola 👋 Este número aún no está ligado a una empresa.",
+            )
+            return TWIML_OK
+
+        reply_text = build_reply_for_company(company["company_id"], Body, wa_from=From)
+        reply_text = (reply_text or "").strip() or "¿Me repites eso?"
+        print("REPLY TEXT:", repr(reply_text))
+
+        twilio_send_whatsapp(to_user_whatsapp=From, text=reply_text)
+        print("WHATSAPP ENVIADO OK")
+        return TWIML_OK
+
+    except Exception as e:
+        print("TWILIO WEBHOOK ERROR:", repr(e))
+        traceback.print_exc()
+        try:
+            twilio_send_whatsapp(
+                to_user_whatsapp=From,
+                text="Error interno. Intenta de nuevo en 1 minuto.",
+            )
+        except Exception:
+            pass
+        return TWIML_OK
