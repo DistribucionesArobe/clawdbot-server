@@ -112,10 +112,6 @@ def twilio_client():
     return Client(sid, token)
 
 def twilio_send_whatsapp(to_user_whatsapp: str, text: str):
-    """
-    Envío activo por Twilio usando Messaging Service (recomendado para WhatsApp).
-    to_user_whatsapp: ej "whatsapp:+5218118001161"
-    """
     client = twilio_client()
 
     msid = (os.getenv("TWILIO_MESSAGING_SERVICE_SID") or "").strip()
@@ -1571,25 +1567,20 @@ async def twilio_webhook(
         print("TWILIO company:", company)
 
         if not company:
-            msg = "Hola 👋 Este número aún no está ligado a una empresa. Pide a tu proveedor que lo configure en CotizaExpress."
-            twilio_send_whatsapp(from_twilio_whatsapp=To, to_user_whatsapp=From, text=msg)
-            return Response(content="", media_type="text/plain")
+            msg = "Hola 👋 Este número aún no está ligado a una empresa."
+            twilio_send_whatsapp(to_user_whatsapp=From, text=msg)
+            return Response(content="ok", media_type="text/plain")
 
         reply_text = build_reply_for_company(company["company_id"], Body)
 
-        # ✅ Enviar por API (más confiable que TwiML en WhatsApp)
-        twilio_send_whatsapp(from_twilio_whatsapp=To, to_user_whatsapp=From, text=reply_text)
-
-        # ✅ Responder 200 simple a Twilio
-        return Response(content="", media_type="text/plain")
+        twilio_send_whatsapp(to_user_whatsapp=From, text=reply_text)
+        return Response(content="ok", media_type="text/plain")
 
     except Exception as e:
         print("TWILIO WEBHOOK ERROR:", repr(e))
         traceback.print_exc()
-        msg = "Error interno. Intenta de nuevo en 1 minuto."
-        # intentamos avisar al usuario
         try:
-            twilio_send_whatsapp(from_twilio_whatsapp=To, to_user_whatsapp=From, text=msg)
+            twilio_send_whatsapp(to_user_whatsapp=From, text="Error interno. Intenta de nuevo en 1 minuto.")
         except Exception:
             pass
-        return Response(content="", media_type="text/plain")
+        return Response(content="ok", media_type="text/plain")
