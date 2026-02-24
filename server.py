@@ -1576,6 +1576,11 @@ async def twilio_webhook(
     To = normalize_wa(To)
     Body = (Body or "").strip()
 
+    TWIML_OK = Response(
+        content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+        media_type="text/xml"
+    )
+
     try:
         print("TWILIO IN:", {"from": From, "to": To, "body": Body})
 
@@ -1587,7 +1592,7 @@ async def twilio_webhook(
                 to_user_whatsapp=From,
                 text="Hola 👋 Este número aún no está ligado a una empresa."
             )
-            return Response(content="ok", media_type="text/plain")
+            return TWIML_OK
 
         reply_text = build_reply_for_company(company["company_id"], Body)
         print("REPLY TEXT:", repr(reply_text))
@@ -1595,7 +1600,7 @@ async def twilio_webhook(
         twilio_send_whatsapp(to_user_whatsapp=From, text=reply_text)
         print("WHATSAPP ENVIADO OK")
 
-        return Response(content="ok", media_type="text/plain")
+        return TWIML_OK
 
     except Exception as e:
         print("TWILIO WEBHOOK ERROR:", repr(e))
@@ -1604,4 +1609,4 @@ async def twilio_webhook(
             twilio_send_whatsapp(to_user_whatsapp=From, text="Error interno. Intenta de nuevo en 1 minuto.")
         except Exception:
             pass
-        return Response(content="ok", media_type="text/plain")
+        return TWIML_OK
