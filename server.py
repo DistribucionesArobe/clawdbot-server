@@ -1549,8 +1549,9 @@ def extract_qty_items_robust(text: str):
 
     return items
     
-def build_reply_for_company(company_id: str, user_text: str, wa_from: str = None) -> str:
+def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") -> str:
     user_text = (user_text or "").strip()
+    wa_from = (wa_from or "").strip()
 
     # =========================================================
     # 1) MULTI-ITEMS (PRIORIDAD MÁXIMA)
@@ -1575,7 +1576,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = None
                 found_any = True
                 it = items[0]
                 unit = it.get("unit") or "unidad"
-                price = float(it.get("price") or 0)
+                price = float(it.get("price") or 0.0)
                 imp = qty * price
                 subtotal += imp
                 lines.append(f"- {qty} {unit} de {it['name']} x ${price:,.2f} = ${imp:,.2f}")
@@ -1593,17 +1594,19 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = None
             else:
                 msg = "Veo cantidades, pero no encontré esos productos en el catálogo."
 
+            # Guardar pendientes (solo si wa_from existe)
             if missing_pairs:
                 msg += (
                     "\n\nNo encontrados (escríbelos más exacto o con SKU):\n"
                     + "\n".join([f"- {q} x {r}" for (q, r) in missing_pairs[:12]])
                 )
-
-                upsert_quote_state(company_id, wa_from, {
-                    "pending": [{"qty": q, "raw": r} for (q, r) in missing_pairs]
-                })
+                if wa_from:
+                    upsert_quote_state(company_id, wa_from, {
+                        "pending": [{"qty": q, "raw": r} for (q, r) in missing_pairs]
+                    })
             else:
-                clear_quote_state(company_id, wa_from)
+                if wa_from:
+                    clear_quote_state(company_id, wa_from)
 
             msg += "\n\n¿Agregamos algo más?"
             return msg
@@ -1611,10 +1614,9 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = None
             conn.close()
 
     # =========================================================
-    # 2) SINGLE ITEM
+    # 2) SINGLE ITEM (ej: "10 tablaroca ultralight")
     # =========================================================
     qty, prod_query = extract_qty_and_product(user_text)
-
     if qty and prod_query:
         conn = get_conn()
         try:
@@ -1625,10 +1627,14 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = None
         if items:
             it = items[0]
             unit = it.get("unit") or "unidad"
-            price = float(it.get("price") or 0)
+            price = float(it.get("price") or 0.0)
             subtotal = qty * price
             iva = subtotal * 0.16
             total = subtotal + iva
+
+            if wa_from:
+                clear_quote_state(company_id, wa_from)
+
             return (
                 "Cotización rápida:\n"
                 f"- {qty} {unit} de {it['name']} x ${price:,.2f} = ${subtotal:,.2f}\n"
@@ -1638,7 +1644,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = None
             )
 
     # =========================================================
-    # 3) PRICE QUESTION
+    # 3) PRICE QUESTION (ej: "precio tablaroca")
     # =========================================================
     if looks_like_price_question(user_text):
         conn = get_conn()
@@ -1651,7 +1657,9 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = None
             lines = []
             for it in items[:8]:
                 unit = f" / {it['unit']}" if it.get("unit") else ""
-                lines.append(f"- {it['name']}: ${it['price']:,.2f}{unit}")
+                lines.append(f"- {it['name']}: ${float(it['price']):,.2f}{unit}")
+
+            # No limpiamos estado aquí porque el usuario puede estar explorando precios
             return (
                 "Encontré estos precios:\n"
                 + "\n".join(lines)
@@ -1659,9 +1667,10 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = None
             )
 
     # =========================================================
-    # 3.5) CONTEXTO DE ACLARACIONES
+    # 3.5) CONTEXTO (aclaraciones para pendientes)
+    # Solo aplica si tenemos wa_from y existe state.pending
     # =========================================================
-    state = get_quote_state(company_id, wa_from)
+    state = get_quote_state(company_id, wa_from) if wa_from else None
     if state and state.get("pending"):
         clarifs = split_clarifications(user_text)
 
@@ -1669,6 +1678,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = None
             pend = state["pending"]
             mapped = []
 
+            # Mapeo por orden: aclaración i reemplaza pendiente i
             for i, p in enumerate(pend):
                 qty = int(p.get("qty") or 0)
                 raw = (p.get("raw") or "").strip()
@@ -1691,7 +1701,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = None
 
                     it = found[0]
                     unit = it.get("unit") or "unidad"
-                    price = float(it.get("price") or 0)
+                    price = float(it.get("price") or 0.0)
                     imp = qty * price
                     subtotal += imp
                     lines.append(f"- {qty} {unit} de {it['name']} x ${price:,.2f} = ${imp:,.2f}")
@@ -1726,7 +1736,9 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = None
                 conn.close()
 
     # =========================================================
-    # 4) GUARD ANTI-ALUCINACIÓN
+    # 4) GUARD ANTI-ALUCINACIÓN:
+    # Si hay números y no pudimos resolver catálogo/contexto,
+    # NO mandamos a OpenAI.
     # =========================================================
     if re.search(r"\b\d+\b", user_text):
         return (
@@ -1736,7 +1748,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = None
         )
 
     # =========================================================
-    # 5) OPENAI FALLBACK
+    # 5) OPENAI FALLBACK (solo preguntas generales)
     # =========================================================
     if not openai_client:
         return "Estoy en mantenimiento. Intenta más tarde."
@@ -1885,7 +1897,7 @@ async def twilio_webhook(
             )
             return TWIML_OK
 
-        reply_text = build_reply_for_company(company["company_id"], Body)
+        reply_text = build_reply_for_company(company["company_id"], Body, wa_from=From)
         print("REPLY TEXT:", repr(reply_text))
 
         twilio_send_whatsapp(to_user_whatsapp=From, text=reply_text)
