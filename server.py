@@ -202,6 +202,18 @@ def get_conn():
     conn.autocommit = True
     return conn
 
+def print_db_fingerprint():
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("select inet_server_addr(), inet_server_port(), current_database()")
+        print("DB FINGERPRINT (Render):", cur.fetchone())
+        conn.close()
+    except Exception as e:
+        print("DB FINGERPRINT ERROR:", repr(e))
+
+print_db_fingerprint()
+
 def get_company_by_twilio_number(to_phone: str):
     conn = get_conn()
     cur = conn.cursor()
