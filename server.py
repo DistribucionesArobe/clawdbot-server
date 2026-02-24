@@ -254,19 +254,19 @@ def get_company_by_twilio_number(to_phone: str):
         cur.close()
         conn.close()
 
-import json
+import psycopg2
 
-# -------------------------
-# Quote state helpers (tabla quote_states)
-# -------------------------
 def get_quote_state(company_id: str, wa_from: str):
+    if not wa_from:
+        return None
+
     conn = get_conn()
     cur = conn.cursor()
     try:
         cur.execute(
             """
-            SELECT state_json
-            FROM quote_states
+            SELECT state
+            FROM wa_quote_state
             WHERE company_id=%s AND wa_from=%s
             LIMIT 1
             """,
@@ -274,26 +274,49 @@ def get_quote_state(company_id: str, wa_from: str):
         )
         row = cur.fetchone()
         return row[0] if row else None
+
+    except psycopg2.errors.UndefinedTable:
+        return None
+
     finally:
         cur.close()
         conn.close()
 
-
 def upsert_quote_state(company_id: str, wa_from: str, state: dict):
+    if not wa_from:
+        return
+
     conn = get_conn()
     cur = conn.cursor()
     try:
         cur.execute(
             """
-            INSERT INTO quote_states (company_id, wa_from, state_json, updated_at)
-            VALUES (%s, %s, %s::jsonb, now())
-            ON CONFLICT (company_id, wa_from)
-            DO UPDATE SET
-                state_json = EXCLUDED.state_json,
-                updated_at = now()
+            insert into wa_quote_state(company_id, wa_from, state, updated_at)
+            values (%s, %s, %s::jsonb, now())
+            on conflict (company_id, wa_from)
+            do update set state=excluded.state, updated_at=now()
             """,
             (company_id, wa_from, json.dumps(state)),
         )
+    except psycopg2.errors.UndefinedTable:
+        return
+    finally:
+        cur.close()
+        conn.close()
+
+def clear_quote_state(company_id: str, wa_from: str):
+    if not wa_from:
+        return
+
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "delete from wa_quote_state where company_id=%s and wa_from=%s",
+            (company_id, wa_from),
+        )
+    except psycopg2.errors.UndefinedTable:
+        return
     finally:
         cur.close()
         conn.close()
