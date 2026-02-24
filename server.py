@@ -116,26 +116,6 @@ def twilio_client():
         raise RuntimeError("Falta TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN en Render")
     return Client(sid, token)
 
-def extract_qty_items_robust(text: str):
-    t = (text or "").lower()
-
-    # 🔥 FIX crítico: 6 x 1 -> 6x1
-    t = re.sub(r"\b(\d+)\s*x\s*(\d+)\b", r"\1x\2", t)
-
-    # normaliza separadores
-    t = t.replace(",", " , ")
-    t = re.sub(r"\s+y\s+", " , ", t)
-
-    pattern = r"(\d+)\s+([^,]+)"
-    matches = re.findall(pattern, t)
-
-    items = []
-    for qty, prod in matches:
-        prod = prod.strip()
-        if prod:
-            items.append((int(qty), prod))
-
-    return items
 
 def twilio_send_whatsapp(to_user_whatsapp: str, text: str):
     client = twilio_client()
@@ -1873,7 +1853,7 @@ from xml.sax.saxutils import escape
 async def twilio_webhook(
     From: str = Form(...),
     To: str = Form(...),
-    Body: str = Form(...)
+    Body: str = Form(default="")
 ):
     From = normalize_wa(From)
     To = normalize_wa(To)
@@ -1887,6 +1867,14 @@ async def twilio_webhook(
     try:
         print("TWILIO IN:", {"from": From, "to": To, "body": Body})
 
+        # Mensajes sin texto (imágenes, audio, etc.)
+        if not Body:
+            twilio_send_whatsapp(
+                to_user_whatsapp=From,
+                text="Solo proceso mensajes de texto por ahora 📝"
+            )
+            return TWIML_OK
+
         company = get_company_by_twilio_number(To)
         print("TWILIO company:", company)
 
@@ -1897,7 +1885,7 @@ async def twilio_webhook(
             )
             return TWIML_OK
 
-        reply_text = build_reply_for_company(company["company_id"], Body, wa_from=From)
+        reply_text = build_reply_for_company(company["company_id"], Body)
         print("REPLY TEXT:", repr(reply_text))
 
         twilio_send_whatsapp(to_user_whatsapp=From, text=reply_text)
@@ -1909,7 +1897,10 @@ async def twilio_webhook(
         print("TWILIO WEBHOOK ERROR:", repr(e))
         traceback.print_exc()
         try:
-            twilio_send_whatsapp(to_user_whatsapp=From, text="Error interno. Intenta de nuevo en 1 minuto.")
+            twilio_send_whatsapp(
+                to_user_whatsapp=From,
+                text="Error interno. Intenta de nuevo en 1 minuto."
+            )
         except Exception:
             pass
         return TWIML_OK
