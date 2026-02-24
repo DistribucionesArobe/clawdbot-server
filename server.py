@@ -120,8 +120,8 @@ def twilio_send_whatsapp(to_user_whatsapp: str, text: str):
 
     to_user_whatsapp = (to_user_whatsapp or "").strip()
     if not to_user_whatsapp.startswith("whatsapp:"):
-        raise ValueError("to_user_whatsapp debe iniciar con 'whatsapp:'")
-
+        to_user_whatsapp = f"whatsapp:{to_user_whatsapp}"
+    
     text = (text or "").strip()
     if not text:
         raise ValueError("text vacío")
@@ -130,19 +130,6 @@ def twilio_send_whatsapp(to_user_whatsapp: str, text: str):
         messaging_service_sid=msid,
         to=to_user_whatsapp,
         body=text,
-    )
-
-def twilio_send_whatsapp(from_twilio_whatsapp: str, to_user_whatsapp: str, text: str):
-    """
-    Envío activo por API (más confiable que TwiML para WhatsApp)
-    from_twilio_whatsapp: ej "whatsapp:+1555..."
-    to_user_whatsapp: ej "whatsapp:+521..."
-    """
-    client = twilio_client()
-    client.messages.create(
-        from_=f"whatsapp:{twilio_phone}",
-        to=to_number,
-        body=reply_text,
     )
 
 
