@@ -166,6 +166,53 @@ def extract_qty_and_product(text: str):
     product = m.group(2).strip()
     return qty, product
 
+def build_reply_for_company(company_id: str, user_text: str) -> str:
+    # 1) intentar multi-items primero
+    items_multi = extract_qty_items(user_text)
+
+    # Si encontró 2+ items, arma cotización con precios
+    if len(items_multi) >= 2:
+        conn = get_conn()
+        try:
+            lines = []
+            subtotal = 0.0
+
+            for qty, prod_raw in items_multi:
+                # aquí reusamos tu extractor para limpiar
+                prod_query = extract_product_query(prod_raw)
+
+                found = search_pricebook(conn, company_id, prod_query, limit=1)
+                if not found:
+                    lines.append(f"- {qty} x {prod_raw}: ❌ No encontrado")
+                    continue
+
+                it = found[0]
+                unit = it.get("unit") or "unidad"
+                price = float(it.get("price") or 0)
+                imp = qty * price
+                subtotal += imp
+                lines.append(f"- {qty} {unit} de {it['name']} x ${price:,.2f} = ${imp:,.2f}")
+
+            if subtotal <= 0:
+                return "No pude encontrar esos productos. Escribe el nombre exacto o manda una foto/lista."
+
+            iva = subtotal * 0.16
+            total = subtotal + iva
+            return (
+                "Cotización rápida:\n"
+                + "\n".join(lines)
+                + f"\n\nSubtotal: ${subtotal:,.2f}"
+                + f"\nIVA (16%): ${iva:,.2f}"
+                + f"\nTotal: ${total:,.2f}"
+                + "\n\n¿Agregamos otro producto?"
+            )
+        finally:
+            conn.close()
+
+    # 2) si no, cae al flujo actual de 1 item
+    qty, prod_query = extract_qty_and_product(user_text)
+    ...
+
 
 def looks_like_price_question(text: str) -> bool:
     t = (text or "").lower()
