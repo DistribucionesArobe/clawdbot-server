@@ -1559,6 +1559,9 @@ async def twilio_webhook(
             return Response(content="ok", media_type="text/plain")
 
         reply_text = build_reply_for_company(company["company_id"], Body)
+        print("REPLY TEXT:", repr(reply_text))
+        twilio_send_whatsapp(to_user_whatsapp=From, text=reply_text)
+        print("WHATSAPP ENVIADO OK")
 
         twilio_send_whatsapp(to_user_whatsapp=From, text=reply_text)
         return Response(content="ok", media_type="text/plain")
