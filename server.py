@@ -100,6 +100,11 @@ def verify_password(password: str, password_hash: str) -> bool:
         return False
     return bcrypt.checkpw(pw, password_hash.encode("utf-8"))
 
+def normalize_wa(addr: str) -> str:
+    a = (addr or "").strip().replace(" ", "")
+    if a and not a.startswith("whatsapp:"):
+        a = "whatsapp:" + a
+    return a
 
 def norm_name(s: str) -> str:
     return " ".join((s or "").strip().lower().split())
@@ -215,17 +220,25 @@ def print_db_fingerprint():
 print_db_fingerprint()
 
 def get_company_by_twilio_number(to_phone: str):
+    to_phone = normalize_wa(to_phone)
+
     conn = get_conn()
     cur = conn.cursor()
     try:
-        cur.execute(
-            "SELECT id, name FROM companies WHERE twilio_phone = %s LIMIT 1",
-            (to_phone,),
-        )
+        cur.execute("""
+            select c.id::text, c.name
+            from channels ch
+            join companies c on c.id = ch.company_id
+            where ch.provider='twilio'
+              and ch.channel_type='whatsapp'
+              and ch.address=%s
+              and ch.is_active=true
+            limit 1
+        """, (to_phone,))
         row = cur.fetchone()
         if not row:
             return None
-        return {"company_id": str(row[0]), "name": row[1]}
+        return {"company_id": row[0], "name": row[1]}
     finally:
         cur.close()
         conn.close()
@@ -1559,6 +1572,10 @@ async def twilio_webhook(
     To: str = Form(...),
     Body: str = Form(...)
 ):
+    From = normalize_wa(From)
+    To = normalize_wa(To)
+    Body = (Body or "").strip()
+
     try:
         print("TWILIO IN:", {"from": From, "to": To, "body": Body})
 
@@ -1566,16 +1583,18 @@ async def twilio_webhook(
         print("TWILIO company:", company)
 
         if not company:
-            msg = "Hola 👋 Este número aún no está ligado a una empresa."
-            twilio_send_whatsapp(to_user_whatsapp=From, text=msg)
+            twilio_send_whatsapp(
+                to_user_whatsapp=From,
+                text="Hola 👋 Este número aún no está ligado a una empresa."
+            )
             return Response(content="ok", media_type="text/plain")
 
         reply_text = build_reply_for_company(company["company_id"], Body)
         print("REPLY TEXT:", repr(reply_text))
+
         twilio_send_whatsapp(to_user_whatsapp=From, text=reply_text)
         print("WHATSAPP ENVIADO OK")
 
-        twilio_send_whatsapp(to_user_whatsapp=From, text=reply_text)
         return Response(content="ok", media_type="text/plain")
 
     except Exception as e:
