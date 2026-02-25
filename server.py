@@ -3,6 +3,7 @@ import json
 import os
 import re
 import hashlib
+import string
 import secrets
 import traceback
 import requests
@@ -416,6 +417,98 @@ def search_pricebook_best(conn, company_id: str, q: str, limit: int = 12):
     finally:
         cur.close()
         
+def search_pricebook_candidates(conn, company_id: str, q: str, limit: int = 5):
+    """
+    Devuelve candidatos (no solo best). Útil para sugerir opciones cuando no hay match claro.
+    """
+    q = (q or "").strip()
+    if not q:
+        return []
+
+    q_clean = extract_product_query(q)
+    qn = norm_name(q_clean)
+    tokens = [t for t in qn.split() if len(t) >= 3] or [qn]
+
+    where_parts = []
+    params = [company_id]
+
+    # OR para mejor recall
+    for tok in tokens[:6]:
+        where_parts.append("name_norm LIKE %s")
+        params.append(f"%{tok}%")
+
+    where_sql = " OR ".join(where_parts)
+
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            f"""
+            SELECT sku, name, unit, price, vat_rate
+            FROM pricebook_items
+            WHERE company_id=%s
+              AND ({where_sql} OR sku ILIKE %s OR name ILIKE %s)
+            ORDER BY updated_at DESC NULLS LAST
+            LIMIT %s
+            """,
+            (*params, f"%{q_clean}%", f"%{q_clean}%", max(5, limit)),
+        )
+        rows = cur.fetchall()
+
+        out = []
+        for sku, name, unit, price, vat_rate in rows:
+            out.append({
+                "sku": sku,
+                "name": name,
+                "unit": unit,
+                "price": float(price) if price is not None else None,
+                "vat_rate": float(vat_rate) if vat_rate is not None else None,
+            })
+        return out
+    finally:
+        cur.close()
+
+
+def render_pending_suggestions(pending: list) -> str:
+    """
+    Renderiza pendientes con formato A1, A2... B1...
+    """
+    if not pending:
+        return ""
+
+    letters = string.ascii_uppercase
+    lines = ["No pude identificar algunos productos. Elige del catálogo:"]
+
+    for i, p in enumerate(pending[:6]):
+        tag = letters[i]
+        qty = int(p.get("qty") or 0)
+        raw = (p.get("raw") or "").strip()
+        cands = p.get("candidates") or []
+
+        lines.append(f"\n❓ ({tag}) {qty} x {raw}")
+
+        if not cands:
+            lines.append("   (sin sugerencias) Mándalo más exacto o con SKU.")
+            continue
+
+        for j, it in enumerate(cands[:5], start=1):
+            unit = it.get("unit") or "unidad"
+            price = float(it.get("price") or 0.0)
+            sku = (it.get("sku") or "").strip()
+            sku_txt = f" (SKU {sku})" if sku else ""
+            lines.append(f"   {tag}{j}) {it['name']}{sku_txt} — ${price:,.2f} / {unit}")
+
+    lines.append("\n✅ Responde con: A1, B2, C1 (ejemplo).")
+    return "\n".join(lines)
+
+
+def parse_pending_picks(text: str):
+    """
+    Parse A1, B2, C3... (no importa si vienen con comas/espacios)
+    """
+    t = (text or "").upper()
+    t = t.replace(" ", "")
+    return [(m[0], int(m[1])) for m in re.findall(r"\b([A-Z])(\d+)\b", t)]
+
 def cart_render_quote(state: dict) -> str:
     cart = (state or {}).get("cart") or []
     if not cart:
@@ -1778,6 +1871,103 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
     user_text = (user_text or "").strip()
     wa_from = (wa_from or "").strip()
 
+    # -------------------------
+    # Helpers locales (para que no dependas de más cambios afuera)
+    # -------------------------
+    import string as _string
+
+    def _search_pricebook_candidates(conn, company_id: str, q: str, limit: int = 5):
+        """
+        Devuelve candidatos (no solo best). Útil para sugerir opciones cuando no hay match claro.
+        """
+        q = (q or "").strip()
+        if not q:
+            return []
+
+        q_clean = extract_product_query(q)
+        qn = norm_name(q_clean)
+        tokens = [t for t in qn.split() if len(t) >= 3] or [qn]
+
+        where_parts = []
+        params = [company_id]
+
+        # OR para mejor recall
+        for tok in tokens[:6]:
+            where_parts.append("name_norm LIKE %s")
+            params.append(f"%{tok}%")
+
+        where_sql = " OR ".join(where_parts)
+
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                f"""
+                SELECT sku, name, unit, price, vat_rate
+                FROM pricebook_items
+                WHERE company_id=%s
+                  AND ({where_sql} OR sku ILIKE %s OR name ILIKE %s)
+                ORDER BY updated_at DESC NULLS LAST
+                LIMIT %s
+                """,
+                (*params, f"%{q_clean}%", f"%{q_clean}%", max(5, int(limit or 5))),
+            )
+            rows = cur.fetchall()
+
+            out = []
+            for sku, name, unit, price, vat_rate in rows:
+                out.append({
+                    "sku": sku,
+                    "name": name,
+                    "unit": unit,
+                    "price": float(price) if price is not None else None,
+                    "vat_rate": float(vat_rate) if vat_rate is not None else None,
+                })
+            return out
+        finally:
+            cur.close()
+
+    def _render_pending_suggestions(pending: list) -> str:
+        """
+        Renderiza pendientes con formato A1, A2... B1...
+        pending items deben ser dicts:
+          {"qty": int, "raw": str, "candidates": [ {sku,name,unit,price,vat_rate}, ... ] }
+        """
+        if not pending:
+            return ""
+
+        letters = _string.ascii_uppercase
+        lines = ["No pude identificar algunos productos. Elige del catálogo:"]
+
+        for i, p in enumerate(pending[:6]):
+            tag = letters[i]
+            qty = int(p.get("qty") or 0)
+            raw = (p.get("raw") or "").strip()
+            cands = p.get("candidates") or []
+
+            lines.append(f"\n❓ ({tag}) {qty} x {raw}")
+
+            if not cands:
+                lines.append("   (sin sugerencias) Mándalo más exacto o con SKU.")
+                continue
+
+            for j, it in enumerate(cands[:5], start=1):
+                unit = it.get("unit") or "unidad"
+                price = float(it.get("price") or 0.0)
+                sku = (it.get("sku") or "").strip()
+                sku_txt = f" (SKU {sku})" if sku else ""
+                lines.append(f"   {tag}{j}) {it['name']}{sku_txt} — ${price:,.2f} / {unit}")
+
+        lines.append("\n✅ Responde con: A1, B2, C1 (ejemplo).")
+        return "\n".join(lines)
+
+    def _parse_pending_picks(text: str):
+        """
+        Parse A1, B2, C3... (no importa si vienen con comas/espacios)
+        """
+        t = (text or "").upper()
+        t = t.replace(" ", "")
+        return [(m[0], int(m[1])) for m in re.findall(r"\b([A-Z])(\d+)\b", t)]
+
     # =========================================================
     # 0) COMANDOS (reset / salir) - ANTES DE TODO
     # =========================================================
@@ -1810,11 +2000,11 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
         "gracias", "muchas gracias",
         "ok", "sale", "listo", "perfecto", "va", "dale",
         "menu", "menú", "ayuda", "inicio",
-        "cotizacion", "cotización", "nueva",  # a veces escriben esto suelto
+        "cotizacion", "cotización", "nueva",
     }
 
     if tnorm in help_triggers or tnorm.startswith("hola"):
-        # si existe pending viejo, límpialo de basura (ej: "5 x nueva cotizacion")
+        # limpia pending basura (por si quedó algo raro)
         if wa_from:
             st = get_quote_state(company_id, wa_from) or {}
             pend = st.get("pending") or []
@@ -1823,7 +2013,11 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
                 raw = (p.get("raw") or "").strip()
                 qty = int(p.get("qty") or 0)
                 if qty > 0 and looks_like_product_phrase(raw):
-                    pend2.append({"qty": qty, "raw": raw})
+                    # conserva también candidates si existían
+                    x = {"qty": qty, "raw": raw}
+                    if p.get("candidates"):
+                        x["candidates"] = p["candidates"]
+                    pend2.append(x)
             if pend2:
                 st["pending"] = pend2
             else:
@@ -1850,10 +2044,9 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
             if not state:
                 state = {}
 
-            missing_pairs = []
+            missing = []
 
             for qty, prod_raw in multi:
-                # si el "producto" no parece producto (hola/salir/gracias), ignóralo
                 if not looks_like_product_phrase(prod_raw):
                     continue
 
@@ -1867,7 +2060,12 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
                     best = best_items[0] if best_items else None
 
                 if not best:
-                    missing_pairs.append((qty, prod_raw))
+                    cands = _search_pricebook_candidates(conn, company_id, prod_query, limit=5)
+                    missing.append({
+                        "qty": qty,
+                        "raw": prod_raw,
+                        "candidates": cands[:5],
+                    })
                     continue
 
                 unit = best.get("unit") or "unidad"
@@ -1882,8 +2080,8 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
                     "qty": qty,
                 })
 
-            if missing_pairs:
-                state["pending"] = [{"qty": q, "raw": r} for (q, r) in missing_pairs]
+            if missing:
+                state["pending"] = missing
             else:
                 state.pop("pending", None)
 
@@ -1893,11 +2091,8 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
             msg = cart_render_quote(state) if (state.get("cart") or []) else \
                 "Veo cantidades, pero no encontré esos productos en el catálogo."
 
-            if missing_pairs:
-                msg += (
-                    "\n\nNo encontrados (escríbelos más exacto o con SKU):\n"
-                    + "\n".join([f"- {q} x {r}" for (q, r) in missing_pairs[:12]])
-                )
+            if missing:
+                msg += "\n\n" + _render_pending_suggestions(missing)
 
             msg += (
                 "\n\n¿Agregamos algo más?\n"
@@ -1981,15 +2176,83 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
             )
 
     # =========================================================
-    # 3.5) CONTEXTO (aclaraciones para pendientes)
+    # 3.5) CONTEXTO (selección A1/B2 o aclaraciones para pendientes)
     # =========================================================
     state = get_quote_state(company_id, wa_from) if wa_from else None
     if state and state.get("pending"):
+        pend = state.get("pending") or []
+
+        # --- (A) Selección por picks tipo A1, B2 ---
+        picks = _parse_pending_picks(user_text)
+        if picks:
+            letters = _string.ascii_uppercase
+            letter_to_idx = {ch: i for i, ch in enumerate(letters)}
+
+            remove_idxs = set()
+            any_added = False
+
+            for letter, opt in picks:
+                pi = letter_to_idx.get(letter)
+                if pi is None or pi < 0 or pi >= len(pend):
+                    continue
+
+                p = pend[pi]
+                cands = p.get("candidates") or []
+                if not cands:
+                    continue
+                if opt < 1 or opt > len(cands):
+                    continue
+
+                chosen = cands[opt - 1]
+                qty = int(p.get("qty") or 0)
+
+                state = cart_add_item(state, {
+                    "sku": chosen.get("sku"),
+                    "name": chosen.get("name"),
+                    "unit": chosen.get("unit") or "unidad",
+                    "price": float(chosen.get("price") or 0.0),
+                    "vat_rate": chosen.get("vat_rate"),
+                    "qty": qty,
+                })
+
+                any_added = True
+                remove_idxs.add(pi)
+
+            new_pending = [p for i, p in enumerate(pend) if i not in remove_idxs]
+            if new_pending:
+                state["pending"] = new_pending
+            else:
+                state.pop("pending", None)
+
+            if wa_from:
+                upsert_quote_state(company_id, wa_from, state)
+
+            msg = cart_render_quote(state) if (state.get("cart") or []) else "✅ Listo."
+            if state.get("pending"):
+                msg += "\n\n" + _render_pending_suggestions(state["pending"])
+            msg += (
+                "\n\n¿Agregamos algo más?\n"
+                "🧭 Comandos:\n"
+                "• 'nueva cotizacion' → empezar de cero\n"
+                "• 'salir' → cancelar"
+            )
+            return msg
+
+        # --- (B) Si no eligió picks, re-muestra sugerencias si existen ---
+        # (Esto evita que se sienta “chatbot”: solo repite opciones y ya)
+        if pend and pend[0].get("candidates"):
+            return (
+                _render_pending_suggestions(pend)
+                + "\n\n🧭 Comandos:\n"
+                  "• 'nueva cotizacion' → empezar de cero\n"
+                  "• 'salir' → cancelar"
+            )
+
+        # --- (C) Compat viejo: aclaraciones por texto (si tu pending no trae candidates) ---
         clarifs_raw = split_clarifications(user_text)
         clarifs = [c for c in clarifs_raw if looks_like_product_phrase(c)]
 
         if not clarifs:
-            pend = state["pending"]
             pendientes_txt = "\n".join([
                 f"- {int(p.get('qty') or 0)} x {(p.get('raw') or '').strip()}"
                 for p in pend[:12]
@@ -2003,7 +2266,6 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
                 "• 'salir' → cancelar"
             )
 
-        pend = state["pending"]
         mapped = []
         for i, p in enumerate(pend):
             qty = int(p.get("qty") or 0)
@@ -2102,6 +2364,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
         temperature=0.3,
     )
     return resp.choices[0].message.content or "¿Me repites eso?"
+
 
 @app.post("/api/chat")
 async def chat(req: ChatRequest, authorization: str = Header(default="")):
