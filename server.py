@@ -923,6 +923,62 @@ async def whatsapp_webhook(request: Request):
 def _version():
     return {"version": "pricebook-v2-2026-02-12"}
 
+class CompanySettingsBody(BaseModel):
+    hours_text: Optional[str] = None
+    address_text: Optional[str] = None
+    google_maps_url: Optional[str] = None
+
+@app.post("/api/company/settings")
+def company_settings_update(request: Request, body: CompanySettingsBody):
+    company_id = require_company_id(request)
+
+    hours = (body.hours_text or "").strip() or None
+    addr  = (body.address_text or "").strip() or None
+    maps  = (body.google_maps_url or "").strip() or None
+
+    conn = None
+    cur = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE companies
+            SET hours_text=%s, address_text=%s, google_maps_url=%s, updated_at=now()
+            WHERE id=%s
+            RETURNING id
+            """,
+            (hours, addr, maps, company_id),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Company no encontrada")
+        return {"ok": True}
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
+
+@app.get("/api/company/settings")
+def company_settings_get(request: Request):
+    company_id = require_company_id(request)
+
+    conn = None
+    cur = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT hours_text, address_text, google_maps_url FROM companies WHERE id=%s LIMIT 1",
+            (company_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Company no encontrada")
+        return {"ok": True, "settings": {"hours_text": row[0], "address_text": row[1], "google_maps_url": row[2]}}
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
+
 @app.get("/api/company/me")
 def company_me(request: Request):
     company_id = require_company_id(request)
@@ -1890,7 +1946,6 @@ def extract_qty_items_robust(text: str):
                 items.append((int(qty_s), prod))
 
     return items
-
 def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") -> str:
     user_text = (user_text or "").strip()
     wa_from = (wa_from or "").strip()
@@ -1949,14 +2004,14 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
                 sku_n = norm_name(sku or "")
                 it["_score"] = max(
                     fuzz.token_set_ratio(qn, sn),
-                    fuzz.token_set_ratio(qn, sku_n) if sku else 0
+                    fuzz.token_set_ratio(qn, sku_n) if sku else 0,
                 )
                 items.append(it)
 
             items.sort(key=lambda x: x.get("_score", 0), reverse=True)
 
             out = []
-            for it in items[:max(1, int(limit or 5))]:
+            for it in items[: max(1, int(limit or 5))]:
                 it.pop("_score", None)
                 out.append(it)
             return out
@@ -2005,6 +2060,9 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
         return [(m[0], int(m[1])) for m in re.findall(r"\b([A-Z])(\d+)\b", t)]
 
     def _is_greeting_like(tnorm: str) -> bool:
+        """
+        Solo saludos/menú. NO incluir "gracias" aquí (porque eso no debe resetear).
+        """
         t = (tnorm or "").strip()
         if not t:
             return False
@@ -2014,9 +2072,6 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
             return True
         if t.startswith("buenos") or t.startswith("buenas"):
             return True
-        # "gracias" y "ok" también pueden resetear pending sucio
-        if t in {"gracias", "muchas gracias", "ok", "sale", "listo", "perfecto", "va", "dale"}:
-            return True
         return False
 
     # =========================================================
@@ -2025,9 +2080,19 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
     tnorm = norm_name(user_text).replace("cotización", "cotizacion")
 
     reset_triggers = {
-        "salir", "cancelar", "cancel", "reset", "reiniciar",
-        "nueva cotizacion", "nuevo", "empezar de nuevo",
-        "borrar", "borrar carrito", "vaciar carrito", "limpiar", "limpiar carrito",
+        "salir",
+        "cancelar",
+        "cancel",
+        "reset",
+        "reiniciar",
+        "nueva cotizacion",
+        "nuevo",
+        "empezar de nuevo",
+        "borrar",
+        "borrar carrito",
+        "vaciar carrito",
+        "limpiar",
+        "limpiar carrito",
     }
 
     if any(rt == tnorm or rt in tnorm for rt in reset_triggers):
@@ -2042,6 +2107,9 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
             "• 'salir' → cancelar"
         )
 
+    # =========================================================
+    # 0.25) GRACIAS / CORTESÍA (NO resetear)
+    # =========================================================
     thanks_triggers = {"gracias", "muchas gracias", "mil gracias", "thx", "thanks"}
     if tnorm in thanks_triggers:
         return (
@@ -2051,10 +2119,10 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
             "• 'nueva cotizacion' → empezar de cero\n"
             "• 'salir' → cancelar"
         )
-    
+
     # =========================================================
     # 0.5) SALUDOS / AYUDA / MENU
-    # FIX: si hay estado previo (cart/pending), NO arrastres; empieza limpio.
+    # FIX: si hay estado previo (cart/pending), empieza limpio.
     # =========================================================
     if _is_greeting_like(tnorm):
         if wa_from:
@@ -2107,24 +2175,23 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
 
                 if not best:
                     cands = _search_pricebook_candidates(conn, company_id, prod_query, limit=5)
-                    missing.append({
-                        "qty": qty,
-                        "raw": prod_raw,
-                        "candidates": cands[:5],
-                    })
+                    missing.append({"qty": qty, "raw": prod_raw, "candidates": cands[:5]})
                     continue
 
                 unit = best.get("unit") or "unidad"
                 price = float(best.get("price") or 0.0)
 
-                state = cart_add_item(state, {
-                    "sku": best.get("sku"),
-                    "name": best.get("name"),
-                    "unit": unit,
-                    "price": price,
-                    "vat_rate": best.get("vat_rate"),
-                    "qty": qty,
-                })
+                state = cart_add_item(
+                    state,
+                    {
+                        "sku": best.get("sku"),
+                        "name": best.get("name"),
+                        "unit": unit,
+                        "price": price,
+                        "vat_rate": best.get("vat_rate"),
+                        "qty": qty,
+                    },
+                )
 
             if missing:
                 state["pending"] = missing
@@ -2134,8 +2201,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
             if wa_from:
                 upsert_quote_state(company_id, wa_from, state)
 
-            msg = cart_render_quote(state) if (state.get("cart") or []) else \
-                "Veo cantidades, pero no encontré esos productos en el catálogo."
+            msg = cart_render_quote(state) if (state.get("cart") or []) else "Veo cantidades, pero no encontré esos productos en el catálogo."
 
             if missing:
                 msg += "\n\n" + _render_pending_suggestions(missing)
@@ -2174,14 +2240,17 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
             if not state:
                 state = {}
 
-            state = cart_add_item(state, {
-                "sku": best.get("sku"),
-                "name": best.get("name"),
-                "unit": unit,
-                "price": price,
-                "vat_rate": best.get("vat_rate"),
-                "qty": qty,
-            })
+            state = cart_add_item(
+                state,
+                {
+                    "sku": best.get("sku"),
+                    "name": best.get("name"),
+                    "unit": unit,
+                    "price": price,
+                    "vat_rate": best.get("vat_rate"),
+                    "qty": qty,
+                },
+            )
 
             state.pop("pending", None)
 
@@ -2191,9 +2260,9 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
             return (
                 cart_render_quote(state)
                 + "\n\n¿Agregamos algo más?\n"
-                  "🧭 Comandos:\n"
-                  "• 'nueva cotizacion' → empezar de cero\n"
-                  "• 'salir' → cancelar"
+                "🧭 Comandos:\n"
+                "• 'nueva cotizacion' → empezar de cero\n"
+                "• 'salir' → cancelar"
             )
 
     # =========================================================
@@ -2216,14 +2285,13 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
                 "Encontré estos precios:\n"
                 + "\n".join(lines)
                 + "\n\nDime cantidades para cotizar (ej: 10 tablaroca ultralight).\n\n"
-                  "🧭 Comandos:\n"
-                  "• 'nueva cotizacion' → empezar de cero\n"
-                  "• 'salir' → cancelar"
+                "🧭 Comandos:\n"
+                "• 'nueva cotizacion' → empezar de cero\n"
+                "• 'salir' → cancelar"
             )
 
     # =========================================================
     # 3.5) CONTEXTO (picks A1/B2 o aclaraciones de texto en líneas)
-    # FIX: soporta saltos de línea en aclaraciones (split_clarifications debe estar arreglada).
     # =========================================================
     state = get_quote_state(company_id, wa_from) if wa_from else None
     if state and state.get("pending"):
@@ -2252,14 +2320,17 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
                 chosen = cands[opt - 1]
                 qty = int(p.get("qty") or 0)
 
-                state = cart_add_item(state, {
-                    "sku": chosen.get("sku"),
-                    "name": chosen.get("name"),
-                    "unit": chosen.get("unit") or "unidad",
-                    "price": float(chosen.get("price") or 0.0),
-                    "vat_rate": chosen.get("vat_rate"),
-                    "qty": qty,
-                })
+                state = cart_add_item(
+                    state,
+                    {
+                        "sku": chosen.get("sku"),
+                        "name": chosen.get("name"),
+                        "unit": chosen.get("unit") or "unidad",
+                        "price": float(chosen.get("price") or 0.0),
+                        "vat_rate": chosen.get("vat_rate"),
+                        "qty": qty,
+                    },
+                )
 
                 remove_idxs.add(pi)
 
@@ -2284,9 +2355,6 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
             return msg
 
         # --- (B) Aclaración por texto (natural) mapeada 1:1 con pendientes ---
-        # Ejemplo:
-        #   Tablaroca ultralight
-        #   pija 6 x 1
         clarifs_raw = split_clarifications(user_text)
         clarifs = [c for c in clarifs_raw if looks_like_product_phrase(c)]
 
@@ -2313,14 +2381,17 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
                         still.append({"qty": qty, "raw": prod_raw, "candidates": cands[:5]})
                         continue
 
-                    state = cart_add_item(state, {
-                        "sku": best.get("sku"),
-                        "name": best.get("name"),
-                        "unit": best.get("unit") or "unidad",
-                        "price": float(best.get("price") or 0.0),
-                        "vat_rate": best.get("vat_rate"),
-                        "qty": qty,
-                    })
+                    state = cart_add_item(
+                        state,
+                        {
+                            "sku": best.get("sku"),
+                            "name": best.get("name"),
+                            "unit": best.get("unit") or "unidad",
+                            "price": float(best.get("price") or 0.0),
+                            "vat_rate": best.get("vat_rate"),
+                            "qty": qty,
+                        },
+                    )
 
                 if still:
                     state["pending"] = still
@@ -2343,20 +2414,19 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
             finally:
                 conn.close()
 
-        # --- (C) Si hay candidates, re-muestra sugerencias (sin “chatbotear”) ---
+        # --- (C) Si hay candidates, re-muestra sugerencias ---
         if pend and pend[0].get("candidates"):
             return (
                 _render_pending_suggestions(pend)
                 + "\n\n🧭 Comandos:\n"
-                  "• 'nueva cotizacion' → empezar de cero\n"
-                  "• 'salir' → cancelar"
+                "• 'nueva cotizacion' → empezar de cero\n"
+                "• 'salir' → cancelar"
             )
 
         # --- (D) Si no hay nada útil, lista pendientes ---
-        pendientes_txt = "\n".join([
-            f"- {int(p.get('qty') or 0)} x {(p.get('raw') or '').strip()}"
-            for p in pend[:12]
-        ])
+        pendientes_txt = "\n".join(
+            [f"- {int(p.get('qty') or 0)} x {(p.get('raw') or '').strip()}" for p in pend[:12]]
+        )
         return (
             "👍 Cuando tengas el nombre exacto o SKU de los pendientes, mándamelo y lo agrego.\n\n"
             "Pendientes actuales:\n"
@@ -2379,13 +2449,16 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
             "• 'salir' → cancelar"
         )
 
+    # =========================================================
+    # 4.5) HORARIOS / UBICACIÓN (antes del fallback)
+    # =========================================================
     if looks_like_hours_question(user_text):
-    return (
-        "📍 Para horarios y ubicación, dime tu sucursal o tu ciudad.\n"
-        "Si es *Arobe Ciudad Victoria*, normalmente abrimos de L-V 8:00–18:00 y Sáb 8:00–14:00.\n\n"
-        "Si quieres, también te cotizo: 10 tablaroca ultralight, 5 postes 4.10"
-    )
-    
+        return (
+            "📍 Para horarios y ubicación, dime tu sucursal o tu ciudad.\n"
+            "Si es *Arobe Ciudad Victoria*, normalmente abrimos de L-V 8:00–18:00 y Sáb 8:00–14:00.\n\n"
+            "Si quieres, también te cotizo: 10 tablaroca ultralight, 5 postes 4.10"
+        )
+
     # =========================================================
     # 5) OPENAI FALLBACK
     # =========================================================
