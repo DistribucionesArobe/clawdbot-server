@@ -35,7 +35,6 @@ from pydantic import BaseModel
 from openpyxl import load_workbook, Workbook
 
 from fastapi import Form
-from fastapi.responses import Response
 
 # -------------------------
 # Prompts (otras apps)
@@ -2183,14 +2182,17 @@ async def chat(req: ChatRequest, authorization: str = Header(default="")):
     greetings = {"hola", "buenas", "hey", "holi"}
 
     if norm_name(user_text) in greetings:
-    return (
-        "👋 ¡Hola! Puedo cotizarte materiales.\n\n"
-        "Mándame tu pedido así:\n"
-        "👉 10 tablaroca ultralight, 5 postes 4.10\n\n"
-        "🧭 Comandos:\n"
-        "• 'nueva cotizacion' → empezar de cero\n"
-        "• 'salir' → cancelar"
-    )
+        return {
+            "reply": (
+                "👋 ¡Hola! Puedo cotizarte materiales.\n\n"
+                "Mándame tu pedido así:\n"
+                "👉 10 tablaroca ultralight, 5 postes 4.10\n\n"
+                "🧭 Comandos:\n"
+                "• 'nueva cotizacion' → empezar de cero\n"
+                "• 'salir' → cancelar"
+            )
+        }
+
     
     if app_id == "cotizabot":
         system_prompt = COTIZABOT_SYSTEM_PROMPT
