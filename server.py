@@ -226,6 +226,8 @@ def twilio_send_whatsapp(to_user_whatsapp: str, text: str):
 
 def extract_product_query(text: str) -> str:
     t = (text or "").lower().strip()
+    t = re.sub(r"\bpste\b", "poste", t)
+    t = re.sub(r"\bpsts\b", "postes", t)
     t = re.sub(r"[^a-z0-9áéíóúñü\s]", " ", t)
     t = re.sub(r"\s+", " ", t).strip()
     words = [w for w in t.split() if w]
@@ -277,6 +279,14 @@ def looks_like_price_question(text: str) -> bool:
         "lista de precios", "price", "cuesta",
     ]
     return any(x in t for x in triggers)
+
+def looks_like_hours_question(text: str) -> bool:
+    t = norm_name(text)
+    return any(x in t for x in [
+        "a que hora", "a qué hora", "que hora abren", "qué hora abren",
+        "horario", "horarios", "abren hoy", "abren mañana", "abierto", "abiertos",
+        "cierran", "cierre", "ubicacion", "ubicación", "direccion", "dirección",
+    ])
 
 
 # -------------------------
@@ -2032,6 +2042,16 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
             "• 'salir' → cancelar"
         )
 
+    thanks_triggers = {"gracias", "muchas gracias", "mil gracias", "thx", "thanks"}
+    if tnorm in thanks_triggers:
+        return (
+            "¡Con gusto! 🙌\n"
+            "Si quieres otra cotización, mándame: 10 tablaroca ultralight, 5 postes 4.10\n\n"
+            "🧭 Comandos:\n"
+            "• 'nueva cotizacion' → empezar de cero\n"
+            "• 'salir' → cancelar"
+        )
+    
     # =========================================================
     # 0.5) SALUDOS / AYUDA / MENU
     # FIX: si hay estado previo (cart/pending), NO arrastres; empieza limpio.
@@ -2359,6 +2379,13 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
             "• 'salir' → cancelar"
         )
 
+    if looks_like_hours_question(user_text):
+    return (
+        "📍 Para horarios y ubicación, dime tu sucursal o tu ciudad.\n"
+        "Si es *Arobe Ciudad Victoria*, normalmente abrimos de L-V 8:00–18:00 y Sáb 8:00–14:00.\n\n"
+        "Si quieres, también te cotizo: 10 tablaroca ultralight, 5 postes 4.10"
+    )
+    
     # =========================================================
     # 5) OPENAI FALLBACK
     # =========================================================
