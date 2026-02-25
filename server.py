@@ -2049,7 +2049,6 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
             "• 'nueva cotizacion' → empezar de cero\n"
             "• 'salir' → cancelar"
         )
-
     # =========================================================
     # 5) OPENAI FALLBACK
     # =========================================================
