@@ -1803,6 +1803,44 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
         )
 
     # =========================================================
+    # 0.5) SALUDOS / AYUDA / MENU (NO caer en "pendientes")
+    # =========================================================
+    help_triggers = {
+        "hola", "buenas", "buenos dias", "buenas tardes", "buenas noches",
+        "hey", "holi",
+        "gracias", "muchas gracias",
+        "ok", "sale", "listo", "perfecto", "va", "dale",
+        "menu", "menú", "ayuda", "inicio",
+        "cotizacion", "cotización", "nueva",  # a veces escriben esto suelto
+    }
+
+    if tnorm in help_triggers or tnorm.startswith("hola"):
+        # si existe pending viejo, límpialo de basura (ej: "5 x nueva cotizacion")
+        if wa_from:
+            st = get_quote_state(company_id, wa_from) or {}
+            pend = st.get("pending") or []
+            pend2 = []
+            for p in pend:
+                raw = (p.get("raw") or "").strip()
+                qty = int(p.get("qty") or 0)
+                if qty > 0 and looks_like_product_phrase(raw):
+                    pend2.append({"qty": qty, "raw": raw})
+            if pend2:
+                st["pending"] = pend2
+            else:
+                st.pop("pending", None)
+            upsert_quote_state(company_id, wa_from, st)
+
+        return (
+            "👋 ¡Hola! Puedo cotizarte materiales.\n\n"
+            "Mándame tu pedido así:\n"
+            "👉 10 tablaroca ultralight, 5 postes 4.10\n\n"
+            "🧭 Comandos:\n"
+            "• 'nueva cotizacion' → empezar de cero\n"
+            "• 'salir' → cancelar"
+        )
+
+    # =========================================================
     # 1) MULTI-ITEMS (PRIORIDAD MÁXIMA) + CARRITO PERSISTENTE
     # =========================================================
     multi = extract_qty_items_robust(user_text)
@@ -2049,6 +2087,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
             "• 'nueva cotizacion' → empezar de cero\n"
             "• 'salir' → cancelar"
         )
+
     # =========================================================
     # 5) OPENAI FALLBACK
     # =========================================================
@@ -2140,6 +2179,7 @@ async def chat(req: ChatRequest, authorization: str = Header(default="")):
 
     if not openai_client:
         return {"reply": "Falta configurar OPENAI_API_KEY en Render."}
+
     greetings = {"hola", "buenas", "hey", "holi"}
 
     if norm_name(user_text) in greetings:
@@ -2178,6 +2218,7 @@ async def twilio_webhook(
     From: str = Form(...),
     To: str = Form(...),
     Body: str = Form(default=""),
+    MessageSid: str = Form(default=""),
 ):
     From = normalize_wa(From)
     To = normalize_wa(To)
