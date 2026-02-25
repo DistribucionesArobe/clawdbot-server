@@ -103,22 +103,84 @@ def verify_password(password: str, password_hash: str) -> bool:
 
 def looks_like_product_phrase(text: str) -> bool:
     t = norm_name(text)
+    if not t:
+        return False
 
-    # debe tener al menos una palabra útil (>=3 chars)
+    # Normaliza variantes comunes
+    t = t.replace("cotización", "cotizacion")
+    t = re.sub(r"[^a-z0-9áéíóúñü\s]", " ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+
+    # Frases completas que NO son producto (comandos / conversaciones)
+    stop_phrases = {
+        "hola",
+        "buenas",
+        "buenos dias",
+        "buenas tardes",
+        "buenas noches",
+        "gracias",
+        "muchas gracias",
+        "ok",
+        "va",
+        "sale",
+        "listo",
+        "perfecto",
+        "dale",
+        "ayuda",
+        "menu",
+        "inicio",
+        "salir",
+        "cancelar",
+        "cancel",
+        "reiniciar",
+        "reset",
+        "nueva cotizacion",
+        "nueva cotizacion por favor",
+        "nueva cotizacion porfa",
+        "empezar de nuevo",
+        "borrar carrito",
+        "vaciar carrito",
+        "limpiar carrito",
+    }
+
+    # Si el texto completo es un comando/saludo, NO es producto
+    if t in stop_phrases:
+        return False
+
+    # Si contiene un comando fuerte como frase dentro del mensaje, NO lo uses como producto
+    strong_cmds = {
+        "salir",
+        "cancelar",
+        "cancel",
+        "reiniciar",
+        "reset",
+        "nueva cotizacion",
+        "empezar de nuevo",
+        "borrar carrito",
+        "vaciar carrito",
+        "limpiar carrito",
+    }
+    if any(cmd in t for cmd in strong_cmds):
+        return False
+
+    # Tokens útiles
     tokens = [w for w in t.split() if len(w) >= 3]
     if not tokens:
         return False
 
-    # saludos comunes → NO producto
-    blacklist = {
+    # Palabras sueltas típicas de chat (si SOLO trae esto, no es producto)
+    blacklist_tokens = {
         "hola", "buenas", "gracias", "ok", "sale",
-        "perfecto", "listo", "va", "dale",
+        "perfecto", "listo", "vale", "va", "dale",
+        "porfa", "favor", "por", "si", "no",
+        "quiero", "necesito", "dame", "manda", "pasame",
+        "cotiza", "cotizar", "cotizacion", "precio", "precios",
         "salir", "cancelar", "cancel", "reiniciar", "reset",
-        "nueva", "cotizacion", "cotización", "nueva cotizacion", "nueva cotización",
-        "inicio", "menu", "ayuda"
+        "nueva", "inicio", "menu", "ayuda",
     }
-    # si TODOS los tokens son de saludo → falso
-    if all(tok in blacklist for tok in tokens):
+
+    # Si TODOS los tokens son "chat/comando", NO es producto
+    if all(tok in blacklist_tokens for tok in tokens):
         return False
 
     return True
