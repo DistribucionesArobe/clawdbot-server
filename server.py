@@ -112,9 +112,11 @@ def looks_like_product_phrase(text: str) -> bool:
     # saludos comunes → NO producto
     blacklist = {
         "hola", "buenas", "gracias", "ok", "sale",
-        "perfecto", "listo", "va", "dale"
+        "perfecto", "listo", "va", "dale",
+        "salir", "cancelar", "cancel", "reiniciar", "reset",
+        "nueva", "cotizacion", "cotización", "nueva cotizacion", "nueva cotización",
+        "inicio", "menu", "ayuda"
     }
-
     # si TODOS los tokens son de saludo → falso
     if all(tok in blacklist for tok in tokens):
         return False
@@ -1710,10 +1712,33 @@ def extract_qty_items_robust(text: str):
                 items.append((int(qty_s), prod))
 
     return items
-    
+
 def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") -> str:
     user_text = (user_text or "").strip()
     wa_from = (wa_from or "").strip()
+
+    # =========================================================
+    # 0) COMANDOS (reset / salir) - ANTES DE TODO
+    # =========================================================
+    tnorm = norm_name(user_text)
+
+    reset_triggers = {
+        "salir", "cancelar", "cancel", "reset", "reiniciar",
+        "nueva cotizacion", "nueva cotización", "nuevo", "empezar de nuevo",
+        "borrar", "borrar carrito", "vaciar carrito", "limpiar", "limpiar carrito",
+    }
+
+    if any(rt == tnorm or rt in tnorm for rt in reset_triggers):
+        if wa_from:
+            clear_quote_state(company_id, wa_from)
+        return (
+            "✅ Listo. Empezamos de cero.\n\n"
+            "Mándame tu cotización así:\n"
+            "Ej: 10 tablaroca ultralight, 5 postes 4.10\n\n"
+            "🧭 Comandos:\n"
+            "• 'nueva cotizacion' → empezar de cero\n"
+            "• 'salir' → cancelar"
+        )
 
     # =========================================================
     # 1) MULTI-ITEMS (PRIORIDAD MÁXIMA) + CARRITO PERSISTENTE
@@ -1729,6 +1754,10 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
             missing_pairs = []
 
             for qty, prod_raw in multi:
+                # si el "producto" no parece producto (hola/salir/gracias), ignóralo
+                if not looks_like_product_phrase(prod_raw):
+                    continue
+
                 prod_query = extract_product_query(prod_raw)
 
                 best = None
@@ -1771,7 +1800,12 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
                     + "\n".join([f"- {q} x {r}" for (q, r) in missing_pairs[:12]])
                 )
 
-            msg += "\n\n¿Agregamos algo más?"
+            msg += (
+                "\n\n¿Agregamos algo más?\n"
+                "🧭 Comandos útiles:\n"
+                "• 'nueva cotizacion' → empezar de cero\n"
+                "• 'salir' → cancelar"
+            )
             return msg
         finally:
             conn.close()
@@ -1814,7 +1848,14 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
             if wa_from:
                 upsert_quote_state(company_id, wa_from, state)
 
-            return cart_render_quote(state) + "\n\n¿Agregamos algo más?"
+            msg = cart_render_quote(state)
+            msg += (
+                "\n\n¿Agregamos algo más?\n"
+                "🧭 Comandos útiles:\n"
+                "• 'nueva cotizacion' → empezar de cero\n"
+                "• 'salir' → cancelar"
+            )
+            return msg
 
     # =========================================================
     # 3) PRICE QUESTION
@@ -1836,6 +1877,9 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
                 "Encontré estos precios:\n"
                 + "\n".join(lines)
                 + "\n\nDime cantidades para cotizar (ej: 10 tablaroca ultralight)."
+                + "\n\n🧭 Comandos:\n"
+                + "• 'nueva cotizacion' → empezar de cero\n"
+                + "• 'salir' → cancelar"
             )
 
     # =========================================================
@@ -1855,7 +1899,10 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
             return (
                 "👍 Cuando tengas el nombre exacto o SKU de los pendientes, mándamelo y lo agrego.\n\n"
                 "Pendientes actuales:\n"
-                f"{pendientes_txt}"
+                f"{pendientes_txt}\n\n"
+                "🧭 Comandos:\n"
+                "• 'nueva cotizacion' → empezar de cero\n"
+                "• 'salir' → cancelar"
             )
 
         pend = state["pending"]
@@ -1906,7 +1953,12 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
                 msg = cart_render_quote(state) if (state.get("cart") or []) else \
                     "Gracias. Aún no pude encontrar esos productos en el catálogo."
                 msg += "\n\nAún pendientes:\n" + "\n".join([f"- {q} x {r}" for (q, r) in still_missing[:12]])
-                msg += "\n\nMándame el nombre exacto o SKU de esos pendientes."
+                msg += (
+                    "\n\nMándame el nombre exacto o SKU de esos pendientes."
+                    "\n\n🧭 Comandos:\n"
+                    "• 'nueva cotizacion' → empezar de cero\n"
+                    "• 'salir' → cancelar"
+                )
                 return msg
 
             state.pop("pending", None)
@@ -1914,7 +1966,12 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
                 upsert_quote_state(company_id, wa_from, state)
 
             msg = cart_render_quote(state) if any_added else "✅ Listo."
-            msg += "\n\n✅ Listo. ¿Agregamos algo más?"
+            msg += (
+                "\n\n✅ Listo. ¿Agregamos algo más?\n"
+                "🧭 Comandos útiles:\n"
+                "• 'nueva cotizacion' → empezar de cero\n"
+                "• 'salir' → cancelar"
+            )
             return msg
         finally:
             conn.close()
@@ -1926,7 +1983,10 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
         return (
             "Veo cantidades en tu mensaje, pero no pude encontrar esos productos en el catálogo.\n\n"
             "👉 Escríbelos con nombre más exacto o SKU.\n"
-            "Ejemplo: '10 tablaroca ultralight usg' o '1000 pija tablaroca 6x1'."
+            "Ejemplo: '10 tablaroca ultralight usg' o '1000 pija tablaroca 6x1'.\n\n"
+            "🧭 Comandos:\n"
+            "• 'nueva cotizacion' → empezar de cero\n"
+            "• 'salir' → cancelar"
         )
 
     # =========================================================
@@ -2135,7 +2195,18 @@ async def chat(req: ChatRequest, authorization: str = Header(default="")):
     # =========================================================
     if not openai_client:
         return {"reply": "Falta configurar OPENAI_API_KEY en Render."}
+    greetings = {"hola", "buenas", "hey", "holi"}
 
+    if norm_name(user_text) in greetings:
+    return (
+        "👋 ¡Hola! Puedo cotizarte materiales.\n\n"
+        "Mándame tu pedido así:\n"
+        "👉 10 tablaroca ultralight, 5 postes 4.10\n\n"
+        "🧭 Comandos:\n"
+        "• 'nueva cotizacion' → empezar de cero\n"
+        "• 'salir' → cancelar"
+    )
+    
     if app_id == "cotizabot":
         system_prompt = COTIZABOT_SYSTEM_PROMPT
     elif app_id == "dondever":
