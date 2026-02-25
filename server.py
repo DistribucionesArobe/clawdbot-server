@@ -1782,11 +1782,11 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
     # =========================================================
     # 0) COMANDOS (reset / salir) - ANTES DE TODO
     # =========================================================
-    tnorm = norm_name(user_text)
+    tnorm = norm_name(user_text).replace("cotización", "cotizacion")
 
     reset_triggers = {
         "salir", "cancelar", "cancel", "reset", "reiniciar",
-        "nueva cotizacion", "nueva cotización", "nuevo", "empezar de nuevo",
+        "nueva cotizacion", "nuevo", "empezar de nuevo",
         "borrar", "borrar carrito", "vaciar carrito", "limpiar", "limpiar carrito",
     }
 
@@ -1864,7 +1864,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
 
             msg += (
                 "\n\n¿Agregamos algo más?\n"
-                "🧭 Comandos útiles:\n"
+                "🧭 Comandos:\n"
                 "• 'nueva cotizacion' → empezar de cero\n"
                 "• 'salir' → cancelar"
             )
@@ -1910,14 +1910,13 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
             if wa_from:
                 upsert_quote_state(company_id, wa_from, state)
 
-            msg = cart_render_quote(state)
-            msg += (
-                "\n\n¿Agregamos algo más?\n"
-                "🧭 Comandos útiles:\n"
-                "• 'nueva cotizacion' → empezar de cero\n"
-                "• 'salir' → cancelar"
+            return (
+                cart_render_quote(state)
+                + "\n\n¿Agregamos algo más?\n"
+                  "🧭 Comandos:\n"
+                  "• 'nueva cotizacion' → empezar de cero\n"
+                  "• 'salir' → cancelar"
             )
-            return msg
 
     # =========================================================
     # 3) PRICE QUESTION
@@ -1938,10 +1937,10 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
             return (
                 "Encontré estos precios:\n"
                 + "\n".join(lines)
-                + "\n\nDime cantidades para cotizar (ej: 10 tablaroca ultralight)."
-                + "\n\n🧭 Comandos:\n"
-                + "• 'nueva cotizacion' → empezar de cero\n"
-                + "• 'salir' → cancelar"
+                + "\n\nDime cantidades para cotizar (ej: 10 tablaroca ultralight).\n\n"
+                  "🧭 Comandos:\n"
+                  "• 'nueva cotizacion' → empezar de cero\n"
+                  "• 'salir' → cancelar"
             )
 
     # =========================================================
@@ -2016,8 +2015,8 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
                     "Gracias. Aún no pude encontrar esos productos en el catálogo."
                 msg += "\n\nAún pendientes:\n" + "\n".join([f"- {q} x {r}" for (q, r) in still_missing[:12]])
                 msg += (
-                    "\n\nMándame el nombre exacto o SKU de esos pendientes."
-                    "\n\n🧭 Comandos:\n"
+                    "\n\nMándame el nombre exacto o SKU de esos pendientes.\n\n"
+                    "🧭 Comandos:\n"
                     "• 'nueva cotizacion' → empezar de cero\n"
                     "• 'salir' → cancelar"
                 )
@@ -2030,7 +2029,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
             msg = cart_render_quote(state) if any_added else "✅ Listo."
             msg += (
                 "\n\n✅ Listo. ¿Agregamos algo más?\n"
-                "🧭 Comandos útiles:\n"
+                "🧭 Comandos:\n"
                 "• 'nueva cotizacion' → empezar de cero\n"
                 "• 'salir' → cancelar"
             )
