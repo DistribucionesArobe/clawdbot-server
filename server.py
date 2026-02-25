@@ -2073,9 +2073,6 @@ async def chat(req: ChatRequest, authorization: str = Header(default="")):
     if not user_text:
         return {"reply": "Escribe un mensaje para poder ayudarte."}
 
-    # =========================================================
-    # CotizaBot lógica rápida
-    # =========================================================
     if app_id == "cotizabot":
         qty, prod_query = extract_qty_and_product(user_text)
 
@@ -2113,9 +2110,6 @@ async def chat(req: ChatRequest, authorization: str = Header(default="")):
             except Exception:
                 pass
 
-        # -------------------------
-        # Pregunta de precio
-        # -------------------------
         if looks_like_price_question(user_text):
             try:
                 tenant = get_company_from_bearer(authorization)
@@ -2144,115 +2138,6 @@ async def chat(req: ChatRequest, authorization: str = Header(default="")):
             except Exception:
                 pass
 
-    # =========================================================
-    # Fallback OpenAI
-    # =========================================================
-    if not openai_client:
-        return {"reply": "Falta configurar OPENAI_API_KEY en Render."}
-
-    if app_id == "cotizabot":
-        system_prompt = COTIZABOT_SYSTEM_PROMPT
-    elif app_id == "dondever":
-        system_prompt = DONDEVER_SYSTEM_PROMPT
-    elif app_id == "entiendeusa":
-        system_prompt = ENTIENDEUSA_SYSTEM_PROMPT
-    else:
-        system_prompt = "Eres un asistente útil. Responde claro y directo."
-
-    response = openai_client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_text},
-        ],
-        temperature=0.3,
-    )
-
-    reply = response.choices[0].message.content or ""
-    return {"reply": reply}
-
-@app.post("/api/chat")
-async def chat(req: ChatRequest, authorization: str = Header(default="")):
-    app_id = (getattr(req, "app", None) or "cotizabot").lower().strip()
-    user_text = (getattr(req, "message", None) or "").strip()
-
-    if not user_text:
-        return {"reply": "Escribe un mensaje para poder ayudarte."}
-
-    # =========================================================
-    # CotizaBot lógica rápida
-    # =========================================================
-    if app_id == "cotizabot":
-        qty, prod_query = extract_qty_and_product(user_text)
-
-        if qty and prod_query:
-            try:
-                tenant = get_company_from_bearer(authorization)
-                company_id = tenant["company_id"]
-
-                conn = get_conn()
-                try:
-                    items = search_pricebook(conn, company_id, prod_query, limit=1)
-                finally:
-                    conn.close()
-
-                if not items:
-                    return {"reply": f"No encontré '{prod_query}' en tu catálogo."}
-
-                it = items[0]
-                unit = it.get("unit") or "unidad"
-                price = float(it.get("price") or 0)
-
-                subtotal = qty * price
-                iva = subtotal * 0.16
-                total = subtotal + iva
-
-                return {
-                    "reply": (
-                        "Cotización rápida:\n"
-                        f"- {qty} {unit} de {it['name']} x ${price:,.2f} = ${subtotal:,.2f}\n"
-                        f"IVA (16%): ${iva:,.2f}\n"
-                        f"Total: ${total:,.2f}\n\n"
-                        "¿Agregamos otro producto?"
-                    )
-                }
-            except Exception:
-                pass
-
-        # -------------------------
-        # Pregunta de precio
-        # -------------------------
-        if looks_like_price_question(user_text):
-            try:
-                tenant = get_company_from_bearer(authorization)
-                company_id = tenant["company_id"]
-
-                conn = get_conn()
-                try:
-                    items = search_pricebook(conn, company_id, user_text, limit=8)
-                finally:
-                    conn.close()
-
-                if items:
-                    lines = []
-                    for it in items[:8]:
-                        unit = f" / {it['unit']}" if it.get("unit") else ""
-                        price = it["price"]
-                        lines.append(f"- {it['name']}: ${price:,.2f}{unit}")
-
-                    reply = (
-                        "Encontré estos precios en tu catálogo:\n"
-                        + "\n".join(lines)
-                        + "\n\nDime cantidades para armar cotización "
-                          "(ej: 10 tablaroca ultralight)."
-                    )
-                    return {"reply": reply}
-            except Exception:
-                pass
-
-    # =========================================================
-    # Fallback OpenAI
-    # =========================================================
     if not openai_client:
         return {"reply": "Falta configurar OPENAI_API_KEY en Render."}
     greetings = {"hola", "buenas", "hey", "holi"}
@@ -2287,8 +2172,6 @@ async def chat(req: ChatRequest, authorization: str = Header(default="")):
 
     reply = response.choices[0].message.content or ""
     return {"reply": reply}
-
-from xml.sax.saxutils import escape
 
 @app.post("/webhook/twilio")
 async def twilio_webhook(
