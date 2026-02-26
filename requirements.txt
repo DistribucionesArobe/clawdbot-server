@@ -10,3 +10,5 @@ requests==2.32.3
 twilio==9.4.3
 rapidfuzz==3.6.2
 rapidfuzz
+pgvector
+
