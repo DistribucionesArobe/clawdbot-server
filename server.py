@@ -18,6 +18,7 @@ import psycopg2
 from psycopg2 import IntegrityError
 
 from openai import OpenAI
+from semantic_search import smart_search, rebuild_embeddings_for_company, upsert_single_embedding
 
 from fastapi import (
     FastAPI,
@@ -1766,6 +1767,13 @@ def pricebook_upload(
             (rows_total, rows_upserted, upload_id),
         )
 
+        
+        try:
+            rebuild_embeddings_for_company(conn, company_id)
+        except Exception as e:
+            print("EMBEDDINGS REBUILD ERROR:", repr(e))
+        
+        
         return {
             "ok": True,
             "company_id": company_id,
