@@ -1314,6 +1314,15 @@ def company_me(request: Request):
         if conn:
             conn.close()
 
+@app.post("/api/pricebook/rebuild-embeddings")
+def rebuild_embeddings(request: Request):
+    company_id = require_company_id(request)
+    conn = get_conn()
+    try:
+        result = rebuild_embeddings_for_company(conn, company_id)
+        return {"ok": True, **result}
+    finally:
+        conn.close()
 @app.get("/api/health")
 def api_health():
     return {"ok": True}
