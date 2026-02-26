@@ -2212,8 +2212,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
     wa_from = (wa_from or "").strip()
 
     # =========================================================
-    # ✅ (4) APLICACIÓN EXACTA EN FLUJO TWILIO:
-    # TRACK de conversaciones al INICIO (antes de cualquier lógica)
+    # ✅ TRACK de conversaciones al INICIO (antes de cualquier lógica)
     # =========================================================
     try:
         usage_info = track_conversation_if_new(company_id, wa_from)
@@ -2238,7 +2237,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
         if not q:
             return []
 
-        q_clean = extract_product_query(q)
+        q_clean = extract_product_query(q)  # <- ahora debe usar normalización universal
         qn = norm_name(q_clean)
         tokens = [t for t in qn.split() if len(t) >= 3] or [qn]
 
@@ -2438,7 +2437,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
                 if not looks_like_product_phrase(prod_raw):
                     continue
 
-                prod_query = extract_product_query(prod_raw)
+                prod_query = extract_product_query(prod_raw)  # <- normalización universal
 
                 best = None
                 try:
@@ -2475,7 +2474,11 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
             if wa_from:
                 upsert_quote_state(company_id, wa_from, state)
 
-            msg = cart_render_quote(state) if (state.get("cart") or []) else "Veo cantidades, pero no encontré esos productos en el catálogo."
+            msg = (
+                cart_render_quote(state)
+                if (state.get("cart") or [])
+                else "Veo cantidades, pero no encontré esos productos en el catálogo."
+            )
 
             if missing:
                 msg += "\n\n" + _render_pending_suggestions(missing)
@@ -2492,6 +2495,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
 
     # =========================================================
     # 2) SINGLE ITEM + CARRITO
+    # NOTA: aquí ya debe estar tu extract_qty_and_product() con FIX decimal (6.35 no es qty)
     # =========================================================
     qty, prod_query = extract_qty_and_product(user_text)
     if qty and prod_query:
@@ -2629,8 +2633,9 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
             return msg
 
         # --- (B) Aclaración por texto (natural) mapeada 1:1 con pendientes ---
+        # ✅ FIX 1: aceptar aclaraciones aunque sean SOLO specs (6.35, calibre 26)
         clarifs_raw = split_clarifications(user_text)
-        clarifs = [c for c in clarifs_raw if looks_like_product_phrase(c)]
+        clarifs = [c for c in clarifs_raw if c.strip()]  # <- antes filtrabas por looks_like_product_phrase
 
         if clarifs:
             conn = get_conn()
@@ -2641,6 +2646,12 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
                     raw = (p.get("raw") or "").strip()
 
                     prod_raw = clarifs[i] if i < len(clarifs) else raw
+
+                    # ✅ FIX 2: si el usuario mandó solo specs, combínalo con el pendiente original
+                    # (requiere helper global is_specs_only() ya pegado)
+                    if is_specs_only(prod_raw):
+                        prod_raw = f"{raw} {prod_raw}"
+
                     prod_query = extract_product_query(prod_raw)
 
                     best = None
