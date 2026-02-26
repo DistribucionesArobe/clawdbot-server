@@ -2497,7 +2497,14 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
 
                 best = None
                 try:
-                    best = search_pricebook_best(conn, company_id, prod_query, limit=12)
+                    result = smart_search(conn, company_id, prod_raw, qty)
+                    if result["status"] == "found":
+                        best = result["item"]
+                    else:
+                        cands = result["candidates"]
+                        missing.append({"qty": qty, "raw": prod_raw, "candidates": cands})
+                    continue
+    
                 except Exception:
                     best_items = search_pricebook(conn, company_id, prod_query, limit=1)
                     best = best_items[0] if best_items else None
