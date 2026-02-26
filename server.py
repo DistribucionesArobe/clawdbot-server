@@ -76,6 +76,9 @@ API_KEY_PREFIX_LEN = 10
 SESSION_COOKIE_NAME = "session"
 SESSION_TTL_DAYS = int((os.getenv("SESSION_TTL_DAYS") or "14").strip())
 DEFAULT_COMPANY_ID = (os.getenv("DEFAULT_COMPANY_ID") or "").strip()
+WA_LIMIT_COMPLETE = int((os.getenv("WA_LIMIT_COMPLETE") or "1000").strip())
+WA_LIMIT_PRO = int((os.getenv("WA_LIMIT_PRO") or "2000").strip())
+WA_CONVERSATION_WINDOW_HOURS = int((os.getenv("WA_CONVERSATION_WINDOW_HOURS") or "24").strip())
 
 
 # -------------------------
@@ -645,6 +648,141 @@ def get_quote_state(company_id: str, wa_from: str):
     except psycopg2.errors.UndefinedTable:
         return None
 
+    finally:
+        cur.close()
+        conn.close()
+
+def _year_month_utc() -> str:
+    now = datetime.now(timezone.utc)
+    return f"{now.year:04d}-{now.month:02d}"
+
+def get_company_plan_code(company_id: str) -> str:
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT plan_code FROM companies WHERE id=%s LIMIT 1", (company_id,))
+        row = cur.fetchone()
+        return (row[0] or "free").strip() if row else "free"
+    finally:
+        cur.close()
+        conn.close()
+
+def get_plan_limit(plan_code: str) -> int:
+    p = (plan_code or "free").strip().lower()
+    if p == "complete":
+        return WA_LIMIT_COMPLETE
+    if p == "pro":
+        return WA_LIMIT_PRO
+    return 0  # free/sin WA
+
+def get_monthly_usage(company_id: str, year_month: str) -> int:
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT conversations_count FROM wa_usage_monthly WHERE company_id=%s AND year_month=%s LIMIT 1",
+            (company_id, year_month),
+        )
+        row = cur.fetchone()
+        return int(row[0]) if row else 0
+    except psycopg2.errors.UndefinedTable:
+        return 0
+    finally:
+        cur.close()
+        conn.close()
+
+def increment_monthly_usage(company_id: str, year_month: str, delta: int = 1) -> int:
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            INSERT INTO wa_usage_monthly(company_id, year_month, conversations_count, updated_at)
+            VALUES (%s, %s, %s, now())
+            ON CONFLICT (company_id, year_month)
+            DO UPDATE SET conversations_count = wa_usage_monthly.conversations_count + EXCLUDED.conversations_count,
+                          updated_at = now()
+            RETURNING conversations_count
+            """,
+            (company_id, year_month, int(delta)),
+        )
+        row = cur.fetchone()
+        return int(row[0]) if row else 0
+    except psycopg2.errors.UndefinedTable:
+        return 0
+    finally:
+        cur.close()
+        conn.close()
+
+def track_conversation_if_new(company_id: str, wa_from: str) -> dict:
+    """
+    Cuenta 1 conversación si la última conversación con ese wa_from fue hace > 24h.
+    Devuelve: {counted: bool, usage: int, limit: int, plan_code: str, year_month: str}
+    """
+    wa_from = (wa_from or "").strip()
+    if not wa_from:
+        return {"counted": False, "usage": 0, "limit": 0, "plan_code": "free", "year_month": _year_month_utc()}
+
+    plan_code = get_company_plan_code(company_id)
+    limit = get_plan_limit(plan_code)
+    ym = _year_month_utc()
+
+    # Si no hay WA en el plan, no cuentes (y luego puedes bloquear)
+    if limit <= 0:
+        return {"counted": False, "usage": get_monthly_usage(company_id, ym), "limit": limit, "plan_code": plan_code, "year_month": ym}
+
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        # Lee ventana actual
+        cur.execute(
+            """
+            SELECT last_started_at
+            FROM wa_conversation_windows
+            WHERE company_id=%s AND wa_from=%s
+            LIMIT 1
+            """,
+            (company_id, wa_from),
+        )
+        row = cur.fetchone()
+
+        now_utc = datetime.now(timezone.utc)
+        window_hours = WA_CONVERSATION_WINDOW_HOURS
+
+        should_count = False
+        if not row:
+            should_count = True
+        else:
+            last_started_at = row[0]
+            if last_started_at is None:
+                should_count = True
+            else:
+                age = now_utc - last_started_at
+                if age.total_seconds() >= window_hours * 3600:
+                    should_count = True
+
+        if should_count:
+            # upsert ventana a "ahora"
+            cur.execute(
+                """
+                INSERT INTO wa_conversation_windows(company_id, wa_from, last_started_at, updated_at)
+                VALUES (%s, %s, %s, now())
+                ON CONFLICT (company_id, wa_from)
+                DO UPDATE SET last_started_at=EXCLUDED.last_started_at, updated_at=now()
+                """,
+                (company_id, wa_from, now_utc),
+            )
+
+        # OJO: increment mensual en conexión separada (o misma) — aquí lo hago directo
+        # Si prefieres, puedes hacerlo en esta misma transacción.
+        usage = get_monthly_usage(company_id, ym)
+        if should_count:
+            usage = increment_monthly_usage(company_id, ym, 1)
+
+        return {"counted": bool(should_count), "usage": int(usage), "limit": int(limit), "plan_code": plan_code, "year_month": ym}
+
+    except psycopg2.errors.UndefinedTable:
+        return {"counted": False, "usage": 0, "limit": limit, "plan_code": plan_code, "year_month": ym}
     finally:
         cur.close()
         conn.close()
@@ -1946,9 +2084,23 @@ def extract_qty_items_robust(text: str):
                 items.append((int(qty_s), prod))
 
     return items
+    
 def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") -> str:
     user_text = (user_text or "").strip()
     wa_from = (wa_from or "").strip()
+
+    # =========================================================
+    # ✅ (4) APLICACIÓN EXACTA EN FLUJO TWILIO:
+    # TRACK de conversaciones al INICIO (antes de cualquier lógica)
+    # =========================================================
+    try:
+        usage_info = track_conversation_if_new(company_id, wa_from)
+        # Soft limit: NO bloquea (solo log)
+        if usage_info.get("limit", 0) > 0 and usage_info.get("usage", 0) > usage_info.get("limit", 0):
+            print("WA LIMIT EXCEEDED:", usage_info)
+    except Exception as e:
+        # Nunca rompas el bot por el tracking
+        print("WA TRACK ERROR:", repr(e))
 
     # -------------------------
     # Helpers locales (self-contained)
@@ -2474,6 +2626,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
         temperature=0.3,
     )
     return resp.choices[0].message.content or "¿Me repites eso?"
+
 
 @app.post("/api/chat")
 async def chat(req: ChatRequest, authorization: str = Header(default="")):
