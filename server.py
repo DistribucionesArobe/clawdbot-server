@@ -197,6 +197,95 @@ def normalize_wa(addr: str) -> str:
 def norm_name(s: str) -> str:
     return " ".join((s or "").strip().lower().split())
 
+# -------------------------
+# Normalización universal de texto de producto
+# (plural->singular conservador + limpieza + abreviaciones)
+# -------------------------
+
+SPANISH_STOPWORDS = {
+    "de", "del", "la", "el", "un", "una", "unos", "unas",
+    "por", "para", "con", "sin", "y", "o", "me", "dime", "oye",
+    "precio", "precios", "cuanto", "cuánto", "cuesta", "vale", "costo", "cost",
+    "cotiza", "cotizacion", "cotización", "presupuesto", "lista", "saber",
+    "quiero", "necesito", "dame", "manda", "pasame", "pásame",
+}
+
+# Abreviaciones/sinónimos típicos de chat. Amplíalo con el tiempo.
+SYNONYMS = {
+    "pste": "poste",
+    "psts": "postes",
+    "ptr": "poste",
+    "tblrc": "tablaroca",
+    "tablarok": "tablaroca",
+    "durok": "durock",
+    "perf": "perfacinta",
+    "perfa": "perfacinta",
+    # puedes agregar marcas/variantes comunes
+}
+
+def singularize_token(tok: str) -> str:
+    """
+    Singularizador conservador en español:
+    - Solo aplica a tokens >= 5 caracteres
+    - No toca tokens con números (6.35, 2.44, cal26)
+    - Evita romper palabras cortas (usg, cal, kg)
+    """
+    t = (tok or "").strip()
+    if len(t) < 5:
+        return t
+    if re.search(r"\d", t):  # contiene números -> no tocar
+        return t
+
+    # plurales simples:
+    # tornillos -> tornillo
+    # postes -> poste
+    # anclas -> ancla
+    if t.endswith("es"):
+        base = t[:-2]
+        if len(base) >= 3:
+            return base
+    if t.endswith("s"):
+        base = t[:-1]
+        if len(base) >= 3:
+            return base
+    return t
+
+def normalize_product_text(text: str) -> str:
+    """
+    Normaliza texto para búsqueda:
+    - lower
+    - reemplaza sinónimos por palabra canónica
+    - quita símbolos raros (pero deja '.' para medidas 6.35)
+    - tokeniza
+    - remueve stopwords
+    - singulariza tokens (conservador)
+    """
+    t = (text or "").lower().strip()
+
+    # Reemplazos por sinónimos (palabra completa)
+    for k, v in SYNONYMS.items():
+        t = re.sub(rf"\b{re.escape(k)}\b", v, t)
+
+    # Limpieza: conserva números y punto (para 6.35), letras y espacios
+    t = re.sub(r"[^a-z0-9áéíóúñü\.\s]", " ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+
+    out_tokens = []
+    for w in t.split():
+        if not w:
+            continue
+        if w in SPANISH_STOPWORDS:
+            continue
+
+        # No singularizar números/medidas tipo 6.35
+        if re.match(r"^\d+(?:\.\d+)?$", w):
+            out_tokens.append(w)
+            continue
+
+        out_tokens.append(singularize_token(w))
+
+    return " ".join(out_tokens).strip()
+
 def twilio_client():
     sid = (os.getenv("TWILIO_ACCOUNT_SID") or "").strip()
     token = (os.getenv("TWILIO_AUTH_TOKEN") or "").strip()
@@ -226,36 +315,69 @@ def twilio_send_whatsapp(to_user_whatsapp: str, text: str):
         body=text,
     )
 
-
 def extract_product_query(text: str) -> str:
-    t = (text or "").lower().strip()
-    t = re.sub(r"\bpste\b", "poste", t)
-    t = re.sub(r"\bpsts\b", "postes", t)
-    t = re.sub(r"[^a-z0-9áéíóúñü\s]", " ", t)
-    t = re.sub(r"\s+", " ", t).strip()
-    words = [w for w in t.split() if w]
-    cleaned = [
-        w
-        for w in words
-        if w
-        not in {
-            "precio", "precios", "cuánto", "cuanto", "cuesta", "vale", "costo", "cost",
-            "cotiza", "cotización", "cotizacion", "presupuesto", "lista", "de", "del",
-            "la", "el", "un", "una", "por", "favor", "me", "dime", "oye", "quiero",
-            "saber",
-        }
-    ]
-    return " ".join(cleaned).strip() or t
+    """
+    Antes limpiabas manualmente y quitabas palabras.
+    Ahora usamos normalización universal (plural/singular + stopwords + sinónimos).
+    """
+    t = normalize_product_text(text)
+
+    # Si queda vacío, regresa el original limpio mínimo
+    if not t:
+        raw = (text or "").lower().strip()
+        raw = re.sub(r"[^a-z0-9áéíóúñü\.\s]", " ", raw)
+        raw = re.sub(r"\s+", " ", raw).strip()
+        return raw
+
+    return t
 
 
 def extract_qty_and_product(text: str):
+    """
+    Extrae qty + producto solo si qty es ENTERO.
+    Fix universal: NO interpretar decimales tipo 6.35 como qty=6.
+    """
     t = (text or "").strip().lower()
-    m = re.match(r"^\s*(\d+)\s+(.+?)\s*$", t)
+
+    # qty entero al inicio, pero NO permitir decimales: (?!\.) evita "6.35"
+    m = re.match(r"^\s*(\d+)(?!\.)\s+(.+?)\s*$", t)
     if not m:
         return None, None
+
     qty = int(m.group(1))
     product = m.group(2).strip()
     return qty, product
+
+def extract_qty_and_product(text: str):
+    ...
+    return qty, product
+
+
+# ===============================
+# ✅ PEGAR AQUÍ
+# Mini helper de aclaraciones
+# ===============================
+
+def is_specs_only(text: str) -> bool:
+    """
+    Detecta cuando el usuario manda solo especificaciones
+    (ej: '6.35 calibre 26') sin nombre claro de producto.
+    """
+    t = norm_name(text)
+    if not t:
+        return False
+
+    has_measure = bool(re.search(r"\b\d+(?:\.\d+)?\b", t))
+    has_spec_word = any(
+        w in t for w in [
+            "cal", "calibre", "mm", "cm", "mts", "m",
+            "pulg", "pulgada", "x"
+        ]
+    )
+
+    looks_product = looks_like_product_phrase(t)
+
+    return (has_measure or has_spec_word) and not looks_product
 
 def split_clarifications(text: str):
     t = (text or "").strip()
