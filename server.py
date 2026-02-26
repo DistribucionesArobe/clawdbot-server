@@ -1963,6 +1963,12 @@ def pricebook_item_create(request: Request, body: PricebookItemCreateBody):
         new_id = cur.fetchone()[0]
 
         # frontend espera {ok:true}. Dejo id extra por debug, si no lo quieres quítalo.
+        
+        try:
+            upsert_single_embedding(conn, company_id, new_id, name, sku or "", unit or "")
+        except Exception as e:
+            print("SINGLE EMBEDDING ERROR:", repr(e))
+        
         return {"ok": True, "id": str(new_id)}
 
     except IntegrityError as e:
