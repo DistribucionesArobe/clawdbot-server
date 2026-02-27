@@ -349,15 +349,6 @@ def extract_qty_and_product(text: str):
     product = m.group(2).strip()
     return qty, product
 
-def extract_qty_and_product(text: str):
-    ...
-    return qty, product
-
-
-# ===============================
-# ✅ PEGAR AQUÍ
-# Mini helper de aclaraciones
-# ===============================
 
 def is_specs_only(text: str) -> bool:
     """
