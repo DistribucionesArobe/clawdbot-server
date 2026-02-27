@@ -656,27 +656,20 @@ def cart_render_quote(state: dict) -> str:
         return ""
 
     lines = []
-    subtotal = 0.0
-    # Si tienes vat_rate por producto distinto, aquí lo podrías manejar por item.
-    # Para mantener tu formato, uso 0.16 global.
+    total = 0.0
     for it in cart:
         qty = int(it.get("qty") or 0)
         price = float(it.get("price") or 0.0)
-        unit = it.get("unit") or "unidad"
+        vat_rate = float(it.get("vat_rate") or 0.16)
         name = it.get("name") or ""
-        imp = qty * price
-        subtotal += imp
-        lines.append(f"- {qty} {unit} de {name} x ${price:,.2f} = ${imp:,.2f}")
-
-    iva = subtotal * 0.16
-    total = subtotal + iva
+        subtotal = qty * price * (1 + vat_rate)
+        total += subtotal
+        lines.append(f"• {qty} x {name} — ${subtotal:,.2f}")
 
     return (
-        "Cotización rápida:\n"
+        "Cotización:\n"
         + "\n".join(lines)
-        + f"\n\nSubtotal: ${subtotal:,.2f}"
-        + f"\nIVA (16%): ${iva:,.2f}"
-        + f"\nTotal: ${total:,.2f}"
+        + f"\n\n*Total: ${total:,.2f}* (IVA incluido)"
     )
 
 def api_key_prefix(token: str) -> str:
