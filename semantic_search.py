@@ -27,9 +27,6 @@ def build_product_text(name: str, sku: str = "", unit: str = "") -> str:
 def build_query_text(user_input: str) -> str:
     t = (user_input or "").lower().strip()
     noise = r"\b(cotiza|cotizame|dame|quiero|necesito|por favor|porfa|pls|precio|precios)\b"
-    t = re.sub(noise, " ", t)
-    t = re.sub(r"\s+", " ", t).strip()
-    return t
 
 
 def get_embedding(text: str) -> list:
@@ -187,7 +184,7 @@ def semantic_search_best(conn, company_id: str, user_query: str,
 
 
 def semantic_search_candidates(conn, company_id: str, user_query: str,
-                                threshold: float = 0.60, limit: int = 5) -> list:
+                                threshold: float = 0.45, limit: int = 5) -> list:
     query_text   = build_query_text(user_query)
     query_vector = get_embedding(query_text)
     vector_str   = "[" + ",".join(str(x) for x in query_vector) + "]"
