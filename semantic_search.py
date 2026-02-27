@@ -210,11 +210,16 @@ def semantic_search_candidates(conn, company_id: str, user_query: str,
 
 def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict:
     try:
+        # Para queries cortos (1 palabra), bajamos threshold de candidatos
+        words = user_query.strip().split()
+        cand_threshold = 0.35 if len(words) <= 2 else 0.45
+
         best = semantic_search_best(conn, company_id, user_query)
         if best:
             return {"status": "found", "item": best, "candidates": []}
 
-        candidates = semantic_search_candidates(conn, company_id, user_query, limit=5)
+        candidates = semantic_search_candidates(conn, company_id, user_query,
+                                                threshold=cand_threshold, limit=5)
         if candidates:
             return {"status": "ambiguous", "item": None, "candidates": candidates}
 
