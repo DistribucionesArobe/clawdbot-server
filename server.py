@@ -2864,6 +2864,8 @@ async def chat(req: ChatRequest, authorization: str = Header(default="")):
     reply = response.choices[0].message.content or ""
     return {"reply": reply}
 
+_processed_sids: set = set()
+
 @app.post("/webhook/twilio")
 async def twilio_webhook(
     From: str = Form(...),
@@ -2875,16 +2877,24 @@ async def twilio_webhook(
     To = normalize_wa(To)
     Body = (Body or "").strip()
 
-    # Twilio espera TwiML válido para cerrar el webhook
     TWIML_OK = Response(
         content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
         media_type="text/xml",
     )
 
+    # Deduplicación — ignora si ya procesamos este MessageSid
+    if MessageSid:
+        cache_key = f"msid:{MessageSid}"
+        if cache_key in _processed_sids:
+            print(f"DUPLICATE WEBHOOK ignored: {MessageSid}")
+            return TWIML_OK
+        _processed_sids.add(cache_key)
+        if len(_processed_sids) > 1000:
+            _processed_sids.clear()
+
     try:
         print("TWILIO IN:", {"from": From, "to": To, "body": Body})
 
-        # Mensajes sin texto (imagenes, audio, etc.)
         if not Body:
             twilio_send_whatsapp(
                 to_user_whatsapp=From,
@@ -2921,3 +2931,4 @@ async def twilio_webhook(
         except Exception:
             pass
         return TWIML_OK
+
