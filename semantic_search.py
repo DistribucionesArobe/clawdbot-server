@@ -1,4 +1,4 @@
-       """
+"""
 semantic_search.py — Búsqueda semántica para CotizaBot v2
 """
 
