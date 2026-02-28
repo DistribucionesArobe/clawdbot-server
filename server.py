@@ -2285,11 +2285,8 @@ def search_pricebook(conn, company_id: str, q: str, limit: int = 8):
     finally:
         cur.close()
 
+
 def extract_qty_items_robust(text: str):
-    """
-    Extrae (qty, producto) de frases tipo:
-    'cotiza 10 tablarocas, 5 postes 4.10, 5 redimix 10 perfacinta y 1000 pijas...'
-    """
     t = (text or "").lower()
     t = t.replace("+", " ")
     t = re.sub(r"[•;]", " ", t)
@@ -2297,6 +2294,8 @@ def extract_qty_items_robust(text: str):
 
     # quita palabras ruido
     t = re.sub(r"\b(cotiza|cotización|cotizacion|precio|precios|por favor|porfa|pls)\b", " ", t)
+    # protege fracciones como 1/4, 1/2, 5/8
+    t = re.sub(r"(\d+)\s*/\s*(\d+)", r"\1_\2", t)
     t = re.sub(r"\s+", " ", t).strip()
 
     # separa por comas primero
@@ -2308,11 +2307,10 @@ def extract_qty_items_robust(text: str):
         subparts = [s.strip() for s in re.split(r"\s+y\s+", part) if s.strip()]
 
         for s in subparts:
-            # extrae TODOS los pares (qty, texto hasta antes del siguiente qty) dentro del chunk
-            pattern = r"(\d+)(?!/)\s+(.+?)(?=\s+\d+(?!/)\s+|$)"
+            pattern = r"(\d+)\s+(.+?)(?=\s+\d+\s+|$)"
             matches = re.findall(pattern, s)
             for qty_s, prod in matches:
-                prod = prod.strip()
+                prod = prod.replace("_", "/").strip()
                 if not prod:
                     continue
                 items.append((int(qty_s), prod))
