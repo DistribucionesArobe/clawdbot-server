@@ -116,7 +116,7 @@ def upsert_single_embedding(conn, company_id: str, item_id: int,
 
 
 def semantic_search_best(conn, company_id: str, user_query: str,
-                          threshold: float = 0.72, limit: int = 5) -> Optional[dict]:
+                          threshold: float = 0.78, limit: int = 5) -> Optional[dict]:
     query_text = build_query_text(user_query)
     query_vector = get_embedding(query_text)
     vector_str = "[" + ",".join(str(x) for x in query_vector) + "]"
