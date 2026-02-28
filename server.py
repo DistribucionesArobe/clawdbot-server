@@ -2029,6 +2029,70 @@ def pricebook_item_delete(request: Request, item_id: str):
         if conn:
             conn.close()
 
+@app.patch("/api/pricebook/items/{item_id}")
+def pricebook_item_update(request: Request, item_id: str, body: PricebookItemCreateBody):
+    _ = get_user_from_session(request)
+    company_id = require_company_id(request)
+
+    name = (body.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name requerido")
+
+    sku = (body.sku or "").strip() or None
+    unit = (body.unit or "").strip() or None
+    price = body.price
+    vat_rate = body.vat_rate
+    name_norm = norm_name(name)
+
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            UPDATE pricebook_items
+            SET name=%s, name_norm=%s, sku=%s, unit=%s, price=%s, vat_rate=%s, updated_at=now()
+            WHERE id=%s AND company_id=%s
+            RETURNING id
+            """,
+            (name, name_norm, sku, unit, price, vat_rate, item_id, company_id),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Producto no encontrado")
+        try:
+            upsert_single_embedding(conn, company_id, item_id, name, sku or "", unit or "")
+        except Exception as e:
+            print("EMBEDDING UPDATE ERROR:", repr(e))
+        return {"ok": True}
+    finally:
+        cur.close()
+        conn.close()
+
+
+@app.post("/api/pricebook/deduplicate")
+def pricebook_deduplicate(request: Request):
+    company_id = require_company_id(request)
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            DELETE FROM pricebook_items
+            WHERE id NOT IN (
+                SELECT MIN(id::text)::uuid
+                FROM pricebook_items
+                WHERE company_id=%s
+                GROUP BY name_norm
+            )
+            AND company_id=%s
+            """,
+            (company_id, company_id),
+        )
+        deleted = cur.rowcount
+        return {"ok": True, "deleted": deleted}
+    finally:
+        cur.close()
+        conn.close()
 
 @app.post("/api/companies")
 def create_company(body: CompanyCreateBody):
