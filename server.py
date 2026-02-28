@@ -2309,7 +2309,7 @@ def extract_qty_items_robust(text: str):
 
         for s in subparts:
             # extrae TODOS los pares (qty, texto hasta antes del siguiente qty) dentro del chunk
-            pattern = r"(\d+)\s+(.+?)(?=\s+\d+\s+|$)"
+            pattern = r"(\d+)(?!/)\s+(.+?)(?=\s+\d+(?!/)\s+|$)"
             matches = re.findall(pattern, s)
             for qty_s, prod in matches:
                 prod = prod.strip()
