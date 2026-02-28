@@ -660,9 +660,8 @@ def cart_render_quote(state: dict) -> str:
     for it in cart:
         qty = int(it.get("qty") or 0)
         price = float(it.get("price") or 0.0)
-        vat_rate = float(it.get("vat_rate") or 0.16)
         name = it.get("name") or ""
-        subtotal = qty * price * (1 + vat_rate)
+        subtotal = qty * price
         total += subtotal
         lines.append(f"• {qty} x {name} — ${subtotal:,.2f}")
 
