@@ -2320,7 +2320,7 @@ def extract_qty_items_robust(text: str):
     return items
     
 def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") -> str:
-    user_text = (user_text or "").strip()
+    user_text = (user_text or "").strip().replace('"', '').replace('"', '').replace('"', '')
     wa_from = (wa_from or "").strip()
 
     try:
