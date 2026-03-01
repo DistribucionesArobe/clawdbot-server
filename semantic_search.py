@@ -107,8 +107,8 @@ def rebuild_embeddings_for_company(conn, company_id: str) -> dict:
 
 
 def upsert_single_embedding(conn, company_id: str, item_id: int,
-                             name: str, sku: str = "", unit: str = ""):
-    text = build_product_text(name, sku, unit)
+                             name: str, sku: str = "", unit: str = "", synonyms: str = ""):
+    text = build_product_text(name, sku, unit, synonyms)
     vector = get_embedding(text)
     vector_str = "[" + ",".join(str(x) for x in vector) + "]"
     cur = conn.cursor()
@@ -119,7 +119,6 @@ def upsert_single_embedding(conn, company_id: str, item_id: int,
         )
     finally:
         cur.close()
-
 
 def semantic_search_best(conn, company_id: str, user_query: str,
                           threshold: float = 0.78, limit: int = 5) -> Optional[dict]:
