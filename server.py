@@ -1886,7 +1886,7 @@ class PricebookItemCreateBody(BaseModel):
     price: Optional[float] = None
     vat_rate: Optional[float] = 0.16
     source: Optional[str] = "manual"
-
+    synonyms: Optional[str] = None
 
 
 @app.post("/api/pricebook/items")
@@ -2042,6 +2042,7 @@ def pricebook_item_update(request: Request, item_id: str, body: PricebookItemCre
     unit = (body.unit or "").strip() or None
     price = body.price
     vat_rate = body.vat_rate
+    synonyms = (body.synonyms or "").strip() or None
     name_norm = norm_name(name)
 
     conn = get_conn()
@@ -2050,25 +2051,25 @@ def pricebook_item_update(request: Request, item_id: str, body: PricebookItemCre
         cur.execute(
             """
             UPDATE pricebook_items
-            SET name=%s, name_norm=%s, sku=%s, unit=%s, price=%s, vat_rate=%s, updated_at=now()
+            SET name=%s, name_norm=%s, sku=%s, unit=%s, price=%s, vat_rate=%s,
+                synonyms=%s, updated_at=now()
             WHERE id=%s AND company_id=%s
             RETURNING id
             """,
-            (name, name_norm, sku, unit, price, vat_rate, item_id, company_id),
+            (name, name_norm, sku, unit, price, vat_rate, synonyms, item_id, company_id),
         )
         row = cur.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Producto no encontrado")
         try:
-            upsert_single_embedding(conn, company_id, item_id, name, sku or "", unit or "")
+            upsert_single_embedding(conn, company_id, item_id, name, sku or "", unit or "", synonyms or "")
         except Exception as e:
             print("EMBEDDING UPDATE ERROR:", repr(e))
         return {"ok": True}
     finally:
         cur.close()
         conn.close()
-
-
+        
 @app.post("/api/pricebook/deduplicate")
 def pricebook_deduplicate(request: Request):
     company_id = require_company_id(request)
