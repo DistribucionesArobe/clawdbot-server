@@ -2070,6 +2070,57 @@ def pricebook_item_update(request: Request, item_id: str, body: PricebookItemCre
         cur.close()
         conn.close()
         
+@app.get("/api/pricebook/items/{item_id}/synonyms-suggestions")
+def synonyms_suggestions(request: Request, item_id: str):
+    _ = get_user_from_session(request)
+    company_id = require_company_id(request)
+
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT name, synonyms FROM pricebook_items WHERE id=%s AND company_id=%s",
+            (item_id, company_id),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Producto no encontrado")
+
+        name = (row[0] or "").strip()
+        existing = (row[1] or "")
+
+        # Genera sugerencias con GPT
+        suggestions = []
+        if openai_client and name:
+            try:
+                resp = openai_client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "Eres un experto en ferreterías de México. Dado un producto, devuelve palabras alternativas coloquiales que usarían clientes o ferreteros para pedirlo. Responde SOLO con las palabras separadas por coma, sin explicación, sin puntos, en minúsculas."
+                        },
+                        {
+                            "role": "user",
+                            "content": f"Producto: {name}\nDame 4 sinónimos o nombres alternativos coloquiales."
+                        }
+                    ],
+                    temperature=0.3,
+                    max_tokens=60,
+                )
+                raw = resp.choices[0].message.content or ""
+                suggestions = [s.strip().lower() for s in raw.split(",") if s.strip()]
+            except Exception as e:
+                print("SYNONYMS GPT ERROR:", repr(e))
+
+        existing_list = [s.strip().lower() for s in existing.split(",") if s.strip()]
+        suggestions = [s for s in suggestions if s not in existing_list]
+
+        return {"ok": True, "suggestions": suggestions, "existing": existing_list}
+    finally:
+        cur.close()
+        conn.close()
+
 @app.post("/api/pricebook/deduplicate")
 def pricebook_deduplicate(request: Request):
     company_id = require_company_id(request)
