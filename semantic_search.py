@@ -13,12 +13,18 @@ openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 EMBED_MODEL = "text-embedding-3-small"
 
 
-def build_product_text(name: str, sku: str = "", unit: str = "") -> str:
+def build_product_text(name: str, sku: str = "", unit: str = "", synonyms: str = "") -> str:
     parts = [(name or "").strip()]
     if sku:
         parts.append(f"SKU: {sku.strip()}")
     if unit:
         parts.append(unit.strip())
+    if synonyms:
+        # Agrega cada sinónimo como término extra
+        for s in synonyms.split(","):
+            s = s.strip()
+            if s:
+                parts.append(s)
     return " | ".join(p for p in parts if p)
 
 
@@ -69,7 +75,7 @@ def rebuild_embeddings_for_company(conn, company_id: str) -> dict:
     cur = conn.cursor()
     try:
         cur.execute(
-            "SELECT id, name, sku, unit FROM pricebook_items WHERE company_id = %s ORDER BY id",
+            "SELECT id, name, sku, unit, synonyms FROM pricebook_items WHERE company_id = %s ORDER BY id",
             (company_id,),
         )
         rows = cur.fetchall()
@@ -77,7 +83,7 @@ def rebuild_embeddings_for_company(conn, company_id: str) -> dict:
             return {"updated": 0, "skipped": 0, "errors": 0}
 
         ids = [r[0] for r in rows]
-        texts = [build_product_text(r[1], r[2] or "", r[3] or "") for r in rows]
+        texts = [build_product_text(r[1], r[2] or "", r[3] or "", r[4] or "") for r in rows]
         vectors = get_embeddings_batch(texts)
 
         updated = 0
