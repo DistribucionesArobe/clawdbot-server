@@ -223,7 +223,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict:
     try:
         # Para queries cortos (1 palabra), bajamos threshold de candidatos
         words = user_query.strip().split()
-        cand_threshold = 0.35 if len(words) <= 2 else 0.45
+        cand_threshold = 0.25 if len(words) == 1 else 0.35 if len(words) == 2 else 0.45
 
         best = semantic_search_best(conn, company_id, user_query)
         if best:
