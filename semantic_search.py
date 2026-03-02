@@ -160,6 +160,12 @@ def semantic_search_best(conn, company_id: str, user_query: str,
     print(f"SEMANTIC TOP: query='{user_query}' best='{best['name']}' score={best['similarity']:.3f}")
 
     if best["similarity"] < threshold:
+        # Si el score es alto relativo al segundo resultado, igual lo tomamos
+        if len(results) >= 2:
+            gap = best["similarity"] - results[1]["similarity"]
+            if best["similarity"] >= 0.50 and gap >= 0.10:
+                print(f"SEMANTIC: below threshold but strong gap {gap:.3f}, accepting")
+                return best
         print(f"SEMANTIC: below threshold {threshold}, returning None")
         return None
 
