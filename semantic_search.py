@@ -125,7 +125,6 @@ def semantic_search_best(conn, company_id: str, user_query: str,
     query_text = build_query_text(user_query)
     query_vector = get_embedding(query_text)
     vector_str = "[" + ",".join(str(x) for x in query_vector) + "]"
-
     cur = conn.cursor()
     try:
         cur.execute(
@@ -142,10 +141,8 @@ def semantic_search_best(conn, company_id: str, user_query: str,
         rows = cur.fetchall()
     finally:
         cur.close()
-
     if not rows:
         return None
-
     results = [
         {
             "sku": r[0], "name": r[1], "unit": r[2],
@@ -155,32 +152,19 @@ def semantic_search_best(conn, company_id: str, user_query: str,
         }
         for r in rows
     ]
-
     best = results[0]
     print(f"SEMANTIC TOP: query='{user_query}' best='{best['name']}' score={best['similarity']:.3f}")
-
     if best["similarity"] < threshold:
-        # Si el score es alto relativo al segundo resultado, igual lo tomamos
-        if len(results) >= 2:
-            gap = best["similarity"] - results[1]["similarity"]
-            if best["similarity"] >= 0.50 and gap >= 0.10:
-                print(f"SEMANTIC: below threshold but strong gap {gap:.3f}, accepting")
-                return best
         print(f"SEMANTIC: below threshold {threshold}, returning None")
         return None
-
     if len(results) < 2:
         return best
-
     second = results[1]
     gap = best["similarity"] - second["similarity"]
     print(f"SEMANTIC: gap={gap:.3f} second='{second['name']}' score={second['similarity']:.3f}")
-
     if gap >= 0.06:
         return best
-
     return None
-
 
 def semantic_search_candidates(conn, company_id: str, user_query: str,
                                 threshold: float = 0.45, limit: int = 5) -> list:
