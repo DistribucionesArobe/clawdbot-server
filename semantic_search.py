@@ -218,10 +218,60 @@ def semantic_search_candidates(conn, company_id: str, user_query: str,
     print(f"SEMANTIC CANDIDATES: query='{user_query}' found={len(candidates)}")
     return candidates
 
+def fuzzy_search_best(conn, company_id: str, user_query: str, threshold: int = 80) -> Optional[dict]:
+    from rapidfuzz import fuzz
+    
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT sku, name, unit, price, vat_rate
+            FROM pricebook_items
+            WHERE company_id = %s AND embedding IS NOT NULL
+            """,
+            (company_id,),
+        )
+        rows = cur.fetchall()
+    finally:
+        cur.close()
+
+    if not rows:
+        return None
+
+    q = user_query.lower().strip()
+    best_score = 0
+    best_item = None
+
+    for r in rows:
+        name = (r[1] or "").lower()
+        score = max(
+            fuzz.token_set_ratio(q, name),
+            fuzz.partial_ratio(q, name),
+        )
+        if score > best_score:
+            best_score = score
+            best_item = r
+
+    if best_score < threshold or not best_item:
+        return None
+
+    print(f"FUZZY TOP: query='{user_query}' best='{best_item[1]}' score={best_score}")
+    return {
+        "sku": best_item[0],
+        "name": best_item[1],
+        "unit": best_item[2],
+        "price": float(best_item[3]) if best_item[3] is not None else None,
+        "vat_rate": float(best_item[4]) if best_item[4] is not None else None,
+    }
 
 def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict:
     try:
-        # Para queries cortos (1 palabra), bajamos threshold de candidatos
+        # 1) Fuzzy primero — rápido y preciso para matches exactos
+        fuzzy = fuzzy_search_best(conn, company_id, user_query)
+        if fuzzy:
+            return {"status": "found", "item": fuzzy, "candidates": []}
+
+        # 2) Semántico — para sinónimos y queries ambiguos
         words = user_query.strip().split()
         cand_threshold = 0.25 if len(words) == 1 else 0.35 if len(words) == 2 else 0.45
 
