@@ -2849,6 +2849,17 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
             "Si quieres cotizar: mándame ej: 10 tablaroca ultralight, 5 postes 4.10"
         )
 
+    # 4.75) Si parece producto sin cantidad
+    if looks_like_product_phrase(user_text) and not re.search(r"\b\d+\b", user_text):
+        return (
+            "¿Cuántas piezas necesitas?\n"
+            "Ejemplo: '10 postes 6.35' o '50 tablaroca ultralight'\n\n"
+            "🧭 Comandos:\n"
+            "• 'nueva cotizacion' → empezar de cero\n"
+            "• 'salir' → cancelar"
+        )
+
+    
     # =========================================================
     # 5) OPENAI FALLBACK
     # =========================================================
