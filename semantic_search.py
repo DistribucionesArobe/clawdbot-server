@@ -270,14 +270,10 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict:
                 SELECT sku, name, unit, price, vat_rate
                 FROM pricebook_items
                 WHERE company_id = %s
-                  AND (
-                    synonyms ILIKE %s
-                    OR synonyms ILIKE %s
-                    OR synonyms ILIKE %s
-                  )
+                  AND synonyms ILIKE %s
                 LIMIT 5
                 """,
-                (company_id, q, f"{q},%", f"%,{q}"),
+                (company_id, f"%{q}%"),
             )
             syn_rows = cur0.fetchall()
         finally:
