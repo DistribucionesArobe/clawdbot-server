@@ -250,22 +250,54 @@ def fuzzy_search_best(conn, company_id: str, user_query: str, threshold: int = 9
 
 def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict:
     try:
-        # 1) Fuzzy primero — rápido y preciso para matches exactos
-        fuzzy = fuzzy_search_best(conn, company_id, user_query)
-        if fuzzy:
-            return {"status": "found", "item": fuzzy, "candidates": []}
+        # 1) Fuzzy exacto — solo agrega directo si hay UN único match muy preciso
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                "SELECT sku, name, unit, price, vat_rate FROM pricebook_items WHERE company_id = %s AND embedding IS NOT NULL",
+                (company_id,),
+            )
+            rows = cur.fetchall()
+        finally:
+            cur.close()
 
-        # 2) Semántico — para sinónimos y queries ambiguos
+        from rapidfuzz import fuzz
+        q = user_query.lower().strip()
+        
+        scored = []
+        for r in rows:
+            name = (r[1] or "").lower()
+            score = max(
+                fuzz.token_set_ratio(q, name),
+                fuzz.partial_ratio(q, name),
+            )
+            if score >= 95:
+                scored.append((score, {
+                    "sku": r[0], "name": r[1], "unit": r[2],
+                    "price": float(r[3]) if r[3] is not None else None,
+                    "vat_rate": float(r[4]) if r[4] is not None else None,
+                }))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+
+        if len(scored) == 1:
+            # Un único match preciso → agrega directo
+            print(f"FUZZY UNIQUE: query='{user_query}' match='{scored[0][1]['name']}' score={scored[0][0]}")
+            return {"status": "found", "item": scored[0][1], "candidates": []}
+
+        if len(scored) > 1:
+            # Múltiples matches → muestra opciones
+            print(f"FUZZY AMBIGUOUS: query='{user_query}' found={len(scored)}")
+            return {"status": "ambiguous", "item": None, "candidates": [s[1] for s in scored[:5]]}
+
+        # 2) Sin match fuzzy → semántico, siempre muestra opciones
         words = user_query.strip().split()
         cand_threshold = 0.25 if len(words) == 1 else 0.35 if len(words) == 2 else 0.45
-
-        best = semantic_search_best(conn, company_id, user_query)
-        if best:
-            return {"status": "found", "item": best, "candidates": []}
 
         candidates = semantic_search_candidates(conn, company_id, user_query,
                                                 threshold=cand_threshold, limit=5)
         if candidates:
+            print(f"SEMANTIC CANDIDATES: query='{user_query}' found={len(candidates)}")
             return {"status": "ambiguous", "item": None, "candidates": candidates}
 
         return {"status": "not_found", "item": None, "candidates": []}
