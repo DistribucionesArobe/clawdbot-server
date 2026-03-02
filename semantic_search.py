@@ -230,7 +230,6 @@ def fuzzy_search_best(conn, company_id: str, user_query: str, threshold: int = 9
 
     for r in rows:
         name = (r[1] or "").lower()
-        # FIX: incluir sinónimos en la comparación
         syns = [s.strip().lower() for s in (r[5] or "").split(",") if s.strip()]
         all_terms = [name] + syns
         score = max(
@@ -258,9 +257,98 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict:
     try:
         from rapidfuzz import fuzz
 
-        cur = conn.cursor()
+        q = user_query.lower().strip()
+
+        # =========================================================
+        # PASO 0: Búsqueda directa por sinónimo exacto en DB
+        # Resuelve: "permabase" → "Durock USG"
+        # =========================================================
+        cur0 = conn.cursor()
         try:
-            cur.execute(
+            cur0.execute(
+                """
+                SELECT sku, name, unit, price, vat_rate
+                FROM pricebook_items
+                WHERE company_id = %s
+                  AND (
+                    synonyms ILIKE %s
+                    OR synonyms ILIKE %s
+                    OR synonyms ILIKE %s
+                  )
+                LIMIT 5
+                """,
+                (company_id, q, f"{q},%", f"%,{q}"),
+            )
+            syn_rows = cur0.fetchall()
+        finally:
+            cur0.close()
+
+        if len(syn_rows) == 1:
+            r = syn_rows[0]
+            print(f"SYNONYM DIRECT HIT: query='{user_query}' match='{r[1]}'")
+            return {"status": "found", "item": {
+                "sku": r[0], "name": r[1], "unit": r[2],
+                "price": float(r[3]) if r[3] is not None else None,
+                "vat_rate": float(r[4]) if r[4] is not None else None,
+            }, "candidates": []}
+        elif len(syn_rows) > 1:
+            print(f"SYNONYM AMBIGUOUS: query='{user_query}' found={len(syn_rows)}")
+            return {"status": "ambiguous", "item": None, "candidates": [
+                {"sku": r[0], "name": r[1], "unit": r[2],
+                 "price": float(r[3]) if r[3] is not None else None,
+                 "vat_rate": float(r[4]) if r[4] is not None else None}
+                for r in syn_rows
+            ]}
+
+        # =========================================================
+        # PASO 1: Búsqueda directa por nombre ILIKE
+        # Resuelve: "pijas" → productos con "pija" en el nombre
+        # También intenta singular si no hay resultados
+        # =========================================================
+        def _name_search(term):
+            c = conn.cursor()
+            try:
+                c.execute(
+                    """
+                    SELECT sku, name, unit, price, vat_rate
+                    FROM pricebook_items
+                    WHERE company_id = %s AND name ILIKE %s
+                    LIMIT 10
+                    """,
+                    (company_id, f"%{term}%"),
+                )
+                return c.fetchall()
+            finally:
+                c.close()
+
+        pool_rows = _name_search(q)
+        if not pool_rows and q.endswith("s") and len(q) > 3:
+            pool_rows = _name_search(q[:-1])  # intenta singular
+
+        if pool_rows:
+            if len(pool_rows) == 1:
+                r = pool_rows[0]
+                print(f"NAME DIRECT HIT: query='{user_query}' match='{r[1]}'")
+                return {"status": "found", "item": {
+                    "sku": r[0], "name": r[1], "unit": r[2],
+                    "price": float(r[3]) if r[3] is not None else None,
+                    "vat_rate": float(r[4]) if r[4] is not None else None,
+                }, "candidates": []}
+            else:
+                print(f"NAME AMBIGUOUS: query='{user_query}' found={len(pool_rows)}")
+                return {"status": "ambiguous", "item": None, "candidates": [
+                    {"sku": r[0], "name": r[1], "unit": r[2],
+                     "price": float(r[3]) if r[3] is not None else None,
+                     "vat_rate": float(r[4]) if r[4] is not None else None}
+                    for r in pool_rows[:5]
+                ]}
+
+        # =========================================================
+        # PASO 2: Fuzzy con sinónimos (threshold 80, con desempate)
+        # =========================================================
+        cur2 = conn.cursor()
+        try:
+            cur2.execute(
                 """
                 SELECT sku, name, unit, price, vat_rate, synonyms
                 FROM pricebook_items
@@ -268,23 +356,20 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict:
                 """,
                 (company_id,),
             )
-            rows = cur.fetchall()
+            rows = cur2.fetchall()
         finally:
-            cur.close()
-
-        q = user_query.lower().strip()
+            cur2.close()
 
         scored = []
         for r in rows:
             name = (r[1] or "").lower()
-            # FIX: incluir sinónimos en la comparación fuzzy
             syns = [s.strip().lower() for s in (r[5] or "").split(",") if s.strip()]
             all_terms = [name] + syns
             score = max(
                 max(fuzz.token_set_ratio(q, t), fuzz.partial_ratio(q, t))
                 for t in all_terms
             )
-            if score >= 95:
+            if score >= 80:
                 scored.append((score, {
                     "sku": r[0], "name": r[1], "unit": r[2],
                     "price": float(r[3]) if r[3] is not None else None,
@@ -298,12 +383,20 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict:
             return {"status": "found", "item": scored[0][1], "candidates": []}
 
         if len(scored) > 1:
+            top_score = scored[0][0]
+            second_score = scored[1][0]
+            # Si hay un ganador claro (>= 95 y gap >= 10), agrega directo
+            if top_score >= 95 and (top_score - second_score) >= 10:
+                print(f"FUZZY CLEAR WIN: query='{user_query}' match='{scored[0][1]['name']}' score={top_score}")
+                return {"status": "found", "item": scored[0][1], "candidates": []}
             print(f"FUZZY AMBIGUOUS: query='{user_query}' found={len(scored)}")
             return {"status": "ambiguous", "item": None, "candidates": [s[1] for s in scored[:5]]}
 
-        # Sin match fuzzy → semántico
+        # =========================================================
+        # PASO 3: Semántico (threshold más bajo para queries cortas)
+        # =========================================================
         words = user_query.strip().split()
-        cand_threshold = 0.25 if len(words) == 1 else 0.35 if len(words) == 2 else 0.45
+        cand_threshold = 0.20 if len(words) == 1 else 0.30 if len(words) == 2 else 0.40
 
         candidates = semantic_search_candidates(conn, company_id, user_query,
                                                 threshold=cand_threshold, limit=5)
