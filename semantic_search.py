@@ -20,7 +20,6 @@ def build_product_text(name: str, sku: str = "", unit: str = "", synonyms: str =
     if unit:
         parts.append(unit.strip())
     if synonyms:
-        # Agrega cada sinónimo como término extra
         for s in synonyms.split(","):
             s = s.strip()
             if s:
@@ -120,6 +119,7 @@ def upsert_single_embedding(conn, company_id: str, item_id: int,
     finally:
         cur.close()
 
+
 def semantic_search_best(conn, company_id: str, user_query: str,
                           threshold: float = 0.78, limit: int = 5) -> Optional[dict]:
     query_text = build_query_text(user_query)
@@ -166,6 +166,7 @@ def semantic_search_best(conn, company_id: str, user_query: str,
         return best
     return None
 
+
 def semantic_search_candidates(conn, company_id: str, user_query: str,
                                 threshold: float = 0.45, limit: int = 5) -> list:
     query_text = build_query_text(user_query)
@@ -202,14 +203,15 @@ def semantic_search_candidates(conn, company_id: str, user_query: str,
     print(f"SEMANTIC CANDIDATES: query='{user_query}' found={len(candidates)}")
     return candidates
 
+
 def fuzzy_search_best(conn, company_id: str, user_query: str, threshold: int = 95) -> Optional[dict]:
     from rapidfuzz import fuzz
-    
+
     cur = conn.cursor()
     try:
         cur.execute(
             """
-            SELECT sku, name, unit, price, vat_rate
+            SELECT sku, name, unit, price, vat_rate, synonyms
             FROM pricebook_items
             WHERE company_id = %s AND embedding IS NOT NULL
             """,
@@ -228,9 +230,12 @@ def fuzzy_search_best(conn, company_id: str, user_query: str, threshold: int = 9
 
     for r in rows:
         name = (r[1] or "").lower()
+        # FIX: incluir sinónimos en la comparación
+        syns = [s.strip().lower() for s in (r[5] or "").split(",") if s.strip()]
+        all_terms = [name] + syns
         score = max(
-            fuzz.token_set_ratio(q, name),
-            fuzz.partial_ratio(q, name),
+            max(fuzz.token_set_ratio(q, t), fuzz.partial_ratio(q, t))
+            for t in all_terms
         )
         if score > best_score:
             best_score = score
@@ -248,28 +253,36 @@ def fuzzy_search_best(conn, company_id: str, user_query: str, threshold: int = 9
         "vat_rate": float(best_item[4]) if best_item[4] is not None else None,
     }
 
+
 def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict:
     try:
-        # 1) Fuzzy exacto — solo agrega directo si hay UN único match muy preciso
+        from rapidfuzz import fuzz
+
         cur = conn.cursor()
         try:
             cur.execute(
-                "SELECT sku, name, unit, price, vat_rate FROM pricebook_items WHERE company_id = %s AND embedding IS NOT NULL",
+                """
+                SELECT sku, name, unit, price, vat_rate, synonyms
+                FROM pricebook_items
+                WHERE company_id = %s AND embedding IS NOT NULL
+                """,
                 (company_id,),
             )
             rows = cur.fetchall()
         finally:
             cur.close()
 
-        from rapidfuzz import fuzz
         q = user_query.lower().strip()
-        
+
         scored = []
         for r in rows:
             name = (r[1] or "").lower()
+            # FIX: incluir sinónimos en la comparación fuzzy
+            syns = [s.strip().lower() for s in (r[5] or "").split(",") if s.strip()]
+            all_terms = [name] + syns
             score = max(
-                fuzz.token_set_ratio(q, name),
-                fuzz.partial_ratio(q, name),
+                max(fuzz.token_set_ratio(q, t), fuzz.partial_ratio(q, t))
+                for t in all_terms
             )
             if score >= 95:
                 scored.append((score, {
@@ -281,16 +294,14 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict:
         scored.sort(key=lambda x: x[0], reverse=True)
 
         if len(scored) == 1:
-            # Un único match preciso → agrega directo
             print(f"FUZZY UNIQUE: query='{user_query}' match='{scored[0][1]['name']}' score={scored[0][0]}")
             return {"status": "found", "item": scored[0][1], "candidates": []}
 
         if len(scored) > 1:
-            # Múltiples matches → muestra opciones
             print(f"FUZZY AMBIGUOUS: query='{user_query}' found={len(scored)}")
             return {"status": "ambiguous", "item": None, "candidates": [s[1] for s in scored[:5]]}
 
-        # 2) Sin match fuzzy → semántico, siempre muestra opciones
+        # Sin match fuzzy → semántico
         words = user_query.strip().split()
         cand_threshold = 0.25 if len(words) == 1 else 0.35 if len(words) == 2 else 0.45
 
