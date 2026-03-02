@@ -218,7 +218,7 @@ def semantic_search_candidates(conn, company_id: str, user_query: str,
     print(f"SEMANTIC CANDIDATES: query='{user_query}' found={len(candidates)}")
     return candidates
 
-def fuzzy_search_best(conn, company_id: str, user_query: str, threshold: int = 80) -> Optional[dict]:
+def fuzzy_search_best(conn, company_id: str, user_query: str, threshold: int = 90) -> Optional[dict]:
     from rapidfuzz import fuzz
     
     cur = conn.cursor()
