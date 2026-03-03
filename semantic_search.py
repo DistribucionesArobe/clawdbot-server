@@ -253,11 +253,41 @@ def fuzzy_search_best(conn, company_id: str, user_query: str, threshold: int = 9
     }
 
 
-def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict:
+
+def resolve_global_synonym(conn, q: str) -> str:
+    """
+    Busca q en global_synonyms y devuelve termino_busqueda.
+    Ejemplo: 'drywall' → 'tablaroca', 'perico' → 'llave ajustable'
+    """
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT termino_busqueda FROM global_synonyms WHERE sinonimo = %s LIMIT 1",
+            (q.lower().strip(),),
+        )
+        row = cur.fetchone()
+        if row:
+            print(f"GLOBAL SYNONYM: '{q}' → '{row[0]}'")
+            return row[0]
+        return q
+    except Exception:
+        return q
+    finally:
+        cur.close()
+
+
+def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict:  # noqa
     try:
         from rapidfuzz import fuzz
 
         q = user_query.lower().strip()
+
+        # =========================================================
+        # PASO -1: Resolver sinónimo global (drywall→tablaroca, perico→llave ajustable)
+        # =========================================================
+        q_resolved = resolve_global_synonym(conn, q)
+        if q_resolved != q:
+            return smart_search(conn, company_id, q_resolved, qty)
 
         # =========================================================
         # PASO 0: Búsqueda directa por sinónimo exacto en DB
