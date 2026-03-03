@@ -2348,36 +2348,36 @@ def search_pricebook(conn, company_id: str, q: str, limit: int = 8):
 
 
 def extract_qty_items_robust(text: str):
-    t = (text or "").lower()
-    t = t.replace("+", " ")
-    t = re.sub(r"[•;]", " ", t)
-    t = re.sub(r"\s+", " ", t).strip()
-
-    # quita palabras ruido
-    t = re.sub(r"\b(cotiza|cotización|cotizacion|precio|precios|por favor|porfa|pls)\b", " ", t)
-    # protege fracciones como 1/4, 1/2, 5/8
-    t = re.sub(r"(\d+)\s*/\s*(\d+)", r"\1_\2", t)
-    t = re.sub(r"\s+", " ", t).strip()
-
-    # separa por comas primero
-    parts = [p.strip() for p in t.split(",") if p.strip()]
-    items = []
-
-    for part in parts:
-        # dentro de cada parte, puede venir " ... y 10 ..."
-        subparts = [s.strip() for s in re.split(r"\s+y\s+", part) if s.strip()]
-
-        for s in subparts:
-            pattern = r"(\d+)\s+(.+?)(?=\s+\d+\s+|$)"
-            matches = re.findall(pattern, s)
-            for qty_s, prod in matches:
-                prod = prod.replace("_", "/").strip()
-                if not prod:
-                    continue
-                items.append((int(qty_s), prod))
-
-    return items
+    t = (text or "").strip()
+    t = re.sub(r"[•;]", "\n", t)
     
+    # Quita ruido de palabras
+    t = re.sub(r"\b(cotiza|cotización|cotizacion|precio|precios|por favor|porfa|pls)\b", " ", t, flags=re.IGNORECASE)
+    
+    # Protege fracciones 1/4, 5/8
+    t = re.sub(r"(\d+)\s*/\s*(\d+)", r"\1_\2", t)
+    
+    items = []
+    
+    # 1) Procesa LÍNEA POR LÍNEA primero
+    lines = [l.strip() for l in re.split(r"[\n\r]+", t) if l.strip()]
+    
+    for line in lines:
+        # Dentro de cada línea, separa por comas
+        parts = [p.strip() for p in line.split(",") if p.strip()]
+        
+        for part in parts:
+            # Cada parte: "36 postes 9.20 cal 20"
+            # El PRIMER número es la cantidad, el RESTO es el producto
+            m = re.match(r"^\s*(\d+)\s+(.+)$", part.strip())
+            if m:
+                qty = int(m.group(1))
+                prod = m.group(2).replace("_", "/").strip()
+                if prod and qty > 0:
+                    items.append((qty, prod))
+    
+    return items
+
 def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") -> str:
     user_text = (user_text or "").strip().replace('"', '').replace('"', '').replace('"', '')
     wa_from = (wa_from or "").strip()
