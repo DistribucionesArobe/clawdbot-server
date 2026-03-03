@@ -283,7 +283,6 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict: 
         q = user_query.lower().strip()
 
         # Limpiar stopwords de construcción para mejorar búsqueda
-        # "pija para tablaroca" → "pija tablaroca", "tornillo de madera" → "tornillo madera"
         _stopwords = {"para", "de", "del", "la", "el", "un", "una", "con", "sin", "los", "las"}
         q_tokens = [t for t in q.split() if t not in _stopwords]
         q = " ".join(q_tokens).strip() or q
@@ -297,7 +296,6 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict: 
 
         # =========================================================
         # PASO 0: Búsqueda directa por sinónimo exacto en DB
-        # Resuelve: "permabase" → "Durock USG"
         # =========================================================
         cur0 = conn.cursor()
         try:
@@ -333,9 +331,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict: 
             ]}
 
         # =========================================================
-        # PASO 1: Búsqueda directa por nombre ILIKE
-        # Resuelve: "pijas" → productos con "pija" en el nombre
-        # También intenta singular si no hay resultados
+        # PASO 1: Búsqueda directa por nombre ILIKE + ranking fuzzy
         # =========================================================
         def _name_search(term):
             c = conn.cursor()
@@ -355,7 +351,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict: 
 
         pool_rows = _name_search(q)
         if not pool_rows and q.endswith("s") and len(q) > 3:
-            pool_rows = _name_search(q[:-1])  # intenta singular
+            pool_rows = _name_search(q[:-1])
 
         if pool_rows:
             if len(pool_rows) == 1:
@@ -367,12 +363,33 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict: 
                     "vat_rate": float(r[4]) if r[4] is not None else None,
                 }, "candidates": []}
             else:
+                # Ranking fuzzy para resolver ambigüedad
+                scored = []
+                for r in pool_rows:
+                    name = (r[1] or "").lower()
+                    score = max(fuzz.token_set_ratio(q, name), fuzz.partial_ratio(q, name))
+                    scored.append((score, r))
+                scored.sort(key=lambda x: x[0], reverse=True)
+
+                top_score = scored[0][0]
+                second_score = scored[1][0] if len(scored) > 1 else 0
+                gap = top_score - second_score
+
+                if top_score >= 85 and gap >= 8:
+                    r = scored[0][1]
+                    print(f"NAME RANKED HIT: query='{user_query}' match='{r[1]}' score={top_score} gap={gap}")
+                    return {"status": "found", "item": {
+                        "sku": r[0], "name": r[1], "unit": r[2],
+                        "price": float(r[3]) if r[3] is not None else None,
+                        "vat_rate": float(r[4]) if r[4] is not None else None,
+                    }, "candidates": []}
+
                 print(f"NAME AMBIGUOUS: query='{user_query}' found={len(pool_rows)}")
                 return {"status": "ambiguous", "item": None, "candidates": [
                     {"sku": r[0], "name": r[1], "unit": r[2],
                      "price": float(r[3]) if r[3] is not None else None,
                      "vat_rate": float(r[4]) if r[4] is not None else None}
-                    for r in pool_rows[:5]
+                    for _, r in scored[:5]
                 ]}
 
         # =========================================================
@@ -417,7 +434,6 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict: 
         if len(scored) > 1:
             top_score = scored[0][0]
             second_score = scored[1][0]
-            # Si hay un ganador claro (>= 95 y gap >= 10), agrega directo
             if top_score >= 95 and (top_score - second_score) >= 10:
                 print(f"FUZZY CLEAR WIN: query='{user_query}' match='{scored[0][1]['name']}' score={top_score}")
                 return {"status": "found", "item": scored[0][1], "candidates": []}
@@ -425,7 +441,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict: 
             return {"status": "ambiguous", "item": None, "candidates": [s[1] for s in scored[:5]]}
 
         # =========================================================
-        # PASO 3: Semántico (threshold más bajo para queries cortas)
+        # PASO 3: Semántico
         # =========================================================
         words = user_query.strip().split()
         cand_threshold = 0.20 if len(words) == 1 else 0.30 if len(words) == 2 else 0.40
