@@ -279,59 +279,17 @@ def resolve_global_synonym(conn, q: str) -> str:
 def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict:  # noqa
     try:
         from rapidfuzz import fuzz
+        import re as _re
 
         q = user_query.lower().strip()
 
-        # Limpiar stopwords de construcción para mejorar búsqueda
+        # Limpiar stopwords
         _stopwords = {"para", "de", "del", "la", "el", "un", "una", "con", "sin", "los", "las"}
         q_tokens = [t for t in q.split() if t not in _stopwords]
         q = " ".join(q_tokens).strip() or q
 
         # =========================================================
-        # PASO -1: Resolver sinónimo global (drywall→tablaroca, perico→llave ajustable)
-        # =========================================================
-        q_resolved = resolve_global_synonym(conn, q)
-        if q_resolved != q:
-            return smart_search(conn, company_id, q_resolved, qty)
-
-        # =========================================================
-        # PASO 0: Búsqueda directa por sinónimo exacto en DB
-        # =========================================================
-        cur0 = conn.cursor()
-        try:
-            cur0.execute(
-                """
-                SELECT sku, name, unit, price, vat_rate
-                FROM pricebook_items
-                WHERE company_id = %s
-                  AND synonyms ILIKE %s
-                LIMIT 5
-                """,
-                (company_id, f"%{q}%"),
-            )
-            syn_rows = cur0.fetchall()
-        finally:
-            cur0.close()
-
-        if len(syn_rows) == 1:
-            r = syn_rows[0]
-            print(f"SYNONYM DIRECT HIT: query='{user_query}' match='{r[1]}'")
-            return {"status": "found", "item": {
-                "sku": r[0], "name": r[1], "unit": r[2],
-                "price": float(r[3]) if r[3] is not None else None,
-                "vat_rate": float(r[4]) if r[4] is not None else None,
-            }, "candidates": []}
-        elif len(syn_rows) > 1:
-            print(f"SYNONYM AMBIGUOUS: query='{user_query}' found={len(syn_rows)}")
-            return {"status": "ambiguous", "item": None, "candidates": [
-                {"sku": r[0], "name": r[1], "unit": r[2],
-                 "price": float(r[3]) if r[3] is not None else None,
-                 "vat_rate": float(r[4]) if r[4] is not None else None}
-                for r in syn_rows
-            ]}
-
-        # =========================================================
-        # PASO 1: Búsqueda directa por nombre ILIKE + ranking fuzzy
+        # HELPERS
         # =========================================================
         def _name_search(term):
             c = conn.cursor()
@@ -349,51 +307,107 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict: 
             finally:
                 c.close()
 
+        def _extract_specs(text):
+            t = text.lower()
+            cal = None
+            medida = None
+            m_cal = _re.search(r"\bcal(?:ibre)?\s*(\d+)\b", t)
+            if m_cal:
+                cal = m_cal.group(1)
+            m_med = _re.search(r"\b(\d+\.\d+)\b", t)
+            if m_med:
+                medida = m_med.group(1)
+            return medida, cal
+
+        def _spec_bonus(item_name, medida, cal):
+            n = item_name.lower()
+            bonus = 0
+            if medida and medida in n:
+                bonus += 30
+            if cal and (_re.search(rf"\bcal\s*{cal}\b", n)):
+                bonus += 50
+            return bonus
+
+        def _make_item(r):
+            return {
+                "sku": r[0], "name": r[1], "unit": r[2],
+                "price": float(r[3]) if r[3] is not None else None,
+                "vat_rate": float(r[4]) if r[4] is not None else None,
+            }
+
+        q_medida, q_cal = _extract_specs(q)
+
+        # =========================================================
+        # PASO -1: Sinónimo global
+        # =========================================================
+        q_resolved = resolve_global_synonym(conn, q)
+        if q_resolved != q:
+            return smart_search(conn, company_id, q_resolved, qty)
+
+        # =========================================================
+        # PASO 0: Sinónimo exacto en DB
+        # =========================================================
+        cur0 = conn.cursor()
+        try:
+            cur0.execute(
+                """
+                SELECT sku, name, unit, price, vat_rate
+                FROM pricebook_items
+                WHERE company_id = %s AND synonyms ILIKE %s
+                LIMIT 5
+                """,
+                (company_id, f"%{q}%"),
+            )
+            syn_rows = cur0.fetchall()
+        finally:
+            cur0.close()
+
+        if len(syn_rows) == 1:
+            print(f"SYNONYM DIRECT HIT: query='{user_query}' match='{syn_rows[0][1]}'")
+            return {"status": "found", "item": _make_item(syn_rows[0]), "candidates": []}
+        elif len(syn_rows) > 1:
+            print(f"SYNONYM AMBIGUOUS: query='{user_query}' found={len(syn_rows)}")
+            return {"status": "ambiguous", "item": None, "candidates": [_make_item(r) for r in syn_rows]}
+
+        # =========================================================
+        # PASO 1: ILIKE + ranking con bonus de specs (medida + calibre)
+        # =========================================================
         pool_rows = _name_search(q)
         if not pool_rows and q.endswith("s") and len(q) > 3:
             pool_rows = _name_search(q[:-1])
+        # Si la query tiene medida, buscar también por medida sola
+        if not pool_rows and q_medida:
+            pool_rows = _name_search(q_medida)
 
         if pool_rows:
-            if len(pool_rows) == 1:
-                r = pool_rows[0]
-                print(f"NAME DIRECT HIT: query='{user_query}' match='{r[1]}'")
-                return {"status": "found", "item": {
-                    "sku": r[0], "name": r[1], "unit": r[2],
-                    "price": float(r[3]) if r[3] is not None else None,
-                    "vat_rate": float(r[4]) if r[4] is not None else None,
-                }, "candidates": []}
-            else:
-                # Ranking fuzzy para resolver ambigüedad
-                scored = []
-                for r in pool_rows:
-                    name = (r[1] or "").lower()
-                    score = max(fuzz.token_set_ratio(q, name), fuzz.partial_ratio(q, name))
-                    scored.append((score, r))
-                scored.sort(key=lambda x: x[0], reverse=True)
+            scored = []
+            for r in pool_rows:
+                name = (r[1] or "").lower()
+                base = max(fuzz.token_set_ratio(q, name), fuzz.partial_ratio(q, name))
+                bonus = _spec_bonus(r[1], q_medida, q_cal)
+                scored.append((base + bonus, r))
+            scored.sort(key=lambda x: x[0], reverse=True)
 
-                top_score = scored[0][0]
-                second_score = scored[1][0] if len(scored) > 1 else 0
-                gap = top_score - second_score
+            top = scored[0][0]
+            second = scored[1][0] if len(scored) > 1 else 0
+            gap = top - second
 
-                if top_score >= 85 and gap >= 8:
-                    r = scored[0][1]
-                    print(f"NAME RANKED HIT: query='{user_query}' match='{r[1]}' score={top_score} gap={gap}")
-                    return {"status": "found", "item": {
-                        "sku": r[0], "name": r[1], "unit": r[2],
-                        "price": float(r[3]) if r[3] is not None else None,
-                        "vat_rate": float(r[4]) if r[4] is not None else None,
-                    }, "candidates": []}
+            print(f"ILIKE RANK: query='{user_query}' top='{scored[0][1][1]}' score={top} gap={gap}")
 
-                print(f"NAME AMBIGUOUS: query='{user_query}' found={len(pool_rows)}")
-                return {"status": "ambiguous", "item": None, "candidates": [
-                    {"sku": r[0], "name": r[1], "unit": r[2],
-                     "price": float(r[3]) if r[3] is not None else None,
-                     "vat_rate": float(r[4]) if r[4] is not None else None}
-                    for _, r in scored[:5]
-                ]}
+            # Con calibre, el gap mínimo es más bajo porque el bonus ya discrimina
+            min_score = 80 if (q_medida or q_cal) else 85
+            min_gap = 15 if (q_medida or q_cal) else 8
+
+            if top >= min_score and gap >= min_gap:
+                r = scored[0][1]
+                print(f"ILIKE RESOLVED: query='{user_query}' match='{r[1]}'")
+                return {"status": "found", "item": _make_item(r), "candidates": []}
+
+            return {"status": "ambiguous", "item": None,
+                    "candidates": [_make_item(r) for _, r in scored[:5]]}
 
         # =========================================================
-        # PASO 2: Fuzzy con sinónimos (threshold 80, con desempate)
+        # PASO 2: Fuzzy con sinónimos
         # =========================================================
         cur2 = conn.cursor()
         try:
@@ -414,12 +428,14 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict: 
             name = (r[1] or "").lower()
             syns = [s.strip().lower() for s in (r[5] or "").split(",") if s.strip()]
             all_terms = [name] + syns
-            score = max(
+            base = max(
                 max(fuzz.token_set_ratio(q, t), fuzz.partial_ratio(q, t))
                 for t in all_terms
             )
-            if score >= 80:
-                scored.append((score, {
+            bonus = _spec_bonus(r[1], q_medida, q_cal)
+            total = base + bonus
+            if total >= 80:
+                scored.append((total, {
                     "sku": r[0], "name": r[1], "unit": r[2],
                     "price": float(r[3]) if r[3] is not None else None,
                     "vat_rate": float(r[4]) if r[4] is not None else None,
@@ -434,7 +450,9 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict: 
         if len(scored) > 1:
             top_score = scored[0][0]
             second_score = scored[1][0]
-            if top_score >= 95 and (top_score - second_score) >= 10:
+            gap = top_score - second_score
+            min_gap = 15 if (q_medida or q_cal) else 10
+            if top_score >= 95 and gap >= min_gap:
                 print(f"FUZZY CLEAR WIN: query='{user_query}' match='{scored[0][1]['name']}' score={top_score}")
                 return {"status": "found", "item": scored[0][1], "candidates": []}
             print(f"FUZZY AMBIGUOUS: query='{user_query}' found={len(scored)}")
