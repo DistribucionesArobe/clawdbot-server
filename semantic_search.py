@@ -282,6 +282,12 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict: 
 
         q = user_query.lower().strip()
 
+        # Limpiar stopwords de construcción para mejorar búsqueda
+        # "pija para tablaroca" → "pija tablaroca", "tornillo de madera" → "tornillo madera"
+        _stopwords = {"para", "de", "del", "la", "el", "un", "una", "con", "sin", "los", "las"}
+        q_tokens = [t for t in q.split() if t not in _stopwords]
+        q = " ".join(q_tokens).strip() or q
+
         # =========================================================
         # PASO -1: Resolver sinónimo global (drywall→tablaroca, perico→llave ajustable)
         # =========================================================
