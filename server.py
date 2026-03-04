@@ -1150,7 +1150,6 @@ def root():
 @app.post("/webhook/whatsapp")
 async def whatsapp_webhook(request: Request):
     payload = await request.json()
-
     try:
         phone_number_id = payload["entry"][0]["changes"][0]["value"]["metadata"]["phone_number_id"]
     except Exception:
@@ -1169,7 +1168,6 @@ async def whatsapp_webhook(request: Request):
     from_phone = msg.get("from")
     msg_type = msg.get("type", "text")
 
-    # Extraer texto de texto normal O de respuesta interactiva
     text = ""
     if msg_type == "text":
         text = (msg.get("text") or {}).get("body") or ""
@@ -1186,9 +1184,11 @@ async def whatsapp_webhook(request: Request):
 
     print("WA IN:", {"from": from_phone, "type": msg_type, "text": text})
 
-    reply = build_reply_for_company(company["company_id"], text, wa_from=from_phone)
+    reply = build_reply_for_company(
+        company["company_id"], text, wa_from=from_phone,
+        is_interactive=(msg_type == "interactive")
+    )
 
-    # Despachar text o list según lo que retorne build_reply
     if isinstance(reply, dict) and reply.get("type") == "list":
         send_whatsapp_list(
             wa_api_key=company["wa_api_key"],
@@ -2424,10 +2424,13 @@ def extract_qty_items_robust(text: str):
     
     return items
 
-def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") -> str:
-    user_text = (user_text or "").strip().replace('\u201c', '').replace('\u201d', '').replace('"', '')
+def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", is_interactive: bool = False) -> str:
+    if is_interactive:
+        user_text = (user_text or "").strip()
+    else:
+        user_text = (user_text or "").strip().replace('\u201c', '').replace('\u201d', '').replace('"', '')
     wa_from = (wa_from or "").strip()
-
+    
     try:
         usage_info = track_conversation_if_new(company_id, wa_from)
         if usage_info.get("limit", 0) > 0 and usage_info.get("usage", 0) > usage_info.get("limit", 0):
