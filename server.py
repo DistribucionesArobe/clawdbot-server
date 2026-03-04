@@ -930,15 +930,18 @@ def clear_quote_state(company_id: str, wa_from: str):
         cur.close()
         conn.close()
 
+
 def get_company_by_phone_number_id(phone_number_id: str):
     conn = get_conn()
     cur = conn.cursor()
     try:
         cur.execute(
             """
-            SELECT id, wa_api_key, wa_phone_number_id
-            FROM companies
-            WHERE wa_phone_number_id=%s
+            SELECT c.id, c.wa_api_key, c.wa_phone_number_id
+            FROM channels ch
+            JOIN companies c ON c.id = ch.company_id
+            WHERE ch.meta_phone_number_id = %s
+              AND ch.is_active = true
             LIMIT 1
             """,
             (phone_number_id,),
@@ -951,9 +954,6 @@ def get_company_by_phone_number_id(phone_number_id: str):
         cur.close()
         conn.close()
 
-# -------------------------
-# WhatsApp send
-# -------------------------
 def send_whatsapp_text(wa_api_key: str, phone_number_id: str, to: str, text: str):
     url = f"https://graph.facebook.com/v19.0/{phone_number_id}/messages"
     headers = {
