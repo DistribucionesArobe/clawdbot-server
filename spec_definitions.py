@@ -53,9 +53,9 @@ def already_has_specs(product_raw: str, steps: list) -> bool:
 
 
 def build_spec_query(raw: str, resolved: dict) -> str:
-    """
-    Combina nombre + specs resueltos para la búsqueda final.
-    Ej: raw="varilla", resolved={"diametro": '1/2"'} → 'varilla 1/2"'
-    """
-    parts = [raw.strip()] + list(resolved.values())
+    parts = [raw.strip()]
+    for v in resolved.values():
+        # Quitar comillas para que el search matchee bien
+        clean = v.replace('"', '').replace("'", '').strip()
+        parts.append(clean)
     return " ".join(parts)
