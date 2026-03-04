@@ -554,35 +554,30 @@ def search_pricebook_candidates(conn, company_id: str, q: str, limit: int = 5):
     q = (q or "").strip()
     if not q:
         return []
-
     q_clean = extract_product_query(q)
     qn = norm_name(q_clean)
     tokens = [t for t in qn.split() if len(t) >= 3] or [qn]
-
     where_parts = []
     params = [company_id]
-    # OR para recall alto
     for tok in tokens[:6]:
         where_parts.append("name_norm LIKE %s")
         params.append(f"%{tok}%")
     where_sql = " OR ".join(where_parts)
-
     cur = conn.cursor()
     try:
         cur.execute(
             f"""
-            SELECT sku, name, unit, price, vat_rate
+            SELECT sku, name, unit, price, vat_rate, synonyms
             FROM pricebook_items
             WHERE company_id=%s
-              AND ({where_sql} OR sku ILIKE %s OR name ILIKE %s)
+              AND ({where_sql} OR sku ILIKE %s OR name ILIKE %s OR synonyms ILIKE %s)
             LIMIT 30
             """,
-            (*params, f"%{q_clean}%", f"%{q_clean}%"),
+            (*params, f"%{q_clean}%", f"%{q_clean}%", f"%{q_clean}%"),
         )
         rows = cur.fetchall()
-
         items = []
-        for sku, name, unit, price, vat_rate in rows:
+        for sku, name, unit, price, vat_rate, synonyms in rows:
             it = {
                 "sku": sku,
                 "name": name,
@@ -592,14 +587,14 @@ def search_pricebook_candidates(conn, company_id: str, q: str, limit: int = 5):
             }
             sn = norm_name(name or "")
             sku_n = norm_name(sku or "")
+            syn_n = norm_name(synonyms or "")
             it["_score"] = max(
                 fuzz.token_set_ratio(qn, sn),
-                fuzz.token_set_ratio(qn, sku_n) if sku else 0
+                fuzz.token_set_ratio(qn, sku_n) if sku else 0,
+                fuzz.token_set_ratio(qn, syn_n) if synonyms else 0,
             )
             items.append(it)
-
         items.sort(key=lambda x: x.get("_score", 0), reverse=True)
-
         out = []
         for it in items[:max(1, int(limit or 5))]:
             it.pop("_score", None)
@@ -607,7 +602,6 @@ def search_pricebook_candidates(conn, company_id: str, q: str, limit: int = 5):
         return out
     finally:
         cur.close()
-
 
 def render_pending_suggestions(pending: list) -> str:
     """
