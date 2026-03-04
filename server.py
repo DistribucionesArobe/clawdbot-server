@@ -2373,7 +2373,7 @@ def extract_qty_items_robust(text: str):
     return items
 
 def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") -> str:
-    user_text = (user_text or "").strip().replace('"', '').replace('"', '').replace('"', '')
+    user_text = (user_text or "").strip().replace('\u201c', '').replace('\u201d', '').replace('"', '')
     wa_from = (wa_from or "").strip()
 
     try:
@@ -2386,58 +2386,58 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
     import string as _string
 
     def _search_pricebook_candidates(conn, company_id: str, q: str, limit: int = 5):
-    q = (q or "").strip()
-    if not q:
-        return []
-    q_clean = extract_product_query(q)
-    qn = norm_name(q_clean)
-    tokens = [t for t in qn.split() if len(t) >= 3] or [qn]
-    where_parts = []
-    params = [company_id]
-    for tok in tokens[:6]:
-        where_parts.append("name_norm LIKE %s")
-        params.append(f"%{tok}%")
-    where_sql = " OR ".join(where_parts)
-    cur = conn.cursor()
-    try:
-        cur.execute(
-            f"""
-            SELECT sku, name, unit, price, vat_rate, synonyms
-            FROM pricebook_items
-            WHERE company_id=%s
-              AND ({where_sql} OR sku ILIKE %s OR name ILIKE %s OR synonyms ILIKE %s)
-            LIMIT 30
-            """,
-            (*params, f"%{q_clean}%", f"%{q_clean}%", f"%{q_clean}%"),
-        )
-        rows = cur.fetchall()
-        items = []
-        for sku, name, unit, price, vat_rate, synonyms in rows:
-            it = {
-                "sku": sku,
-                "name": name,
-                "unit": unit,
-                "price": float(price) if price is not None else None,
-                "vat_rate": float(vat_rate) if vat_rate is not None else None,
-            }
-            sn = norm_name(name or "")
-            sku_n = norm_name(sku or "")
-            syn_n = norm_name(synonyms or "")
-            it["_score"] = max(
-                fuzz.token_set_ratio(qn, sn),
-                fuzz.token_set_ratio(qn, sku_n) if sku else 0,
-                fuzz.token_set_ratio(qn, syn_n) if synonyms else 0,
+        q = (q or "").strip()
+        if not q:
+            return []
+        q_clean = extract_product_query(q)
+        qn = norm_name(q_clean)
+        tokens = [t for t in qn.split() if len(t) >= 3] or [qn]
+        where_parts = []
+        params = [company_id]
+        for tok in tokens[:6]:
+            where_parts.append("name_norm LIKE %s")
+            params.append(f"%{tok}%")
+        where_sql = " OR ".join(where_parts)
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                f"""
+                SELECT sku, name, unit, price, vat_rate, synonyms
+                FROM pricebook_items
+                WHERE company_id=%s
+                  AND ({where_sql} OR sku ILIKE %s OR name ILIKE %s OR synonyms ILIKE %s)
+                LIMIT 30
+                """,
+                (*params, f"%{q_clean}%", f"%{q_clean}%", f"%{q_clean}%"),
             )
-            items.append(it)
-        items.sort(key=lambda x: x.get("_score", 0), reverse=True)
-        out = []
-        for it in items[: max(1, int(limit or 5))]:
-            it.pop("_score", None)
-            out.append(it)
-        return out
-    finally:
-        cur.close()
-    
+            rows = cur.fetchall()
+            items = []
+            for sku, name, unit, price, vat_rate, synonyms in rows:
+                it = {
+                    "sku": sku,
+                    "name": name,
+                    "unit": unit,
+                    "price": float(price) if price is not None else None,
+                    "vat_rate": float(vat_rate) if vat_rate is not None else None,
+                }
+                sn = norm_name(name or "")
+                sku_n = norm_name(sku or "")
+                syn_n = norm_name(synonyms or "")
+                it["_score"] = max(
+                    fuzz.token_set_ratio(qn, sn),
+                    fuzz.token_set_ratio(qn, sku_n) if sku else 0,
+                    fuzz.token_set_ratio(qn, syn_n) if synonyms else 0,
+                )
+                items.append(it)
+            items.sort(key=lambda x: x.get("_score", 0), reverse=True)
+            out = []
+            for it in items[: max(1, int(limit or 5))]:
+                it.pop("_score", None)
+                out.append(it)
+            return out
+        finally:
+            cur.close()
+
     def _render_pending_suggestions(pending: list) -> str:
         if not pending:
             return ""
@@ -2495,7 +2495,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
         return (
             "✅ Listo. Empezamos de cero.\n\n"
             "Mándame tu cotización así:\n"
-            "Ej: 10 tablaroca ultralight, 5 postes 4.10\n\n"
+            "Ej: 10 cemento, 5 varilla 3/8\n\n"
             "🧭 Comandos:\n"
             "• 'nueva cotizacion' → empezar de cero\n"
             "• 'salir' → cancelar"
@@ -2508,7 +2508,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
     if tnorm in thanks_triggers:
         return (
             "¡Con gusto! 🙌\n"
-            "Si quieres otra cotización, mándame: 10 tablaroca ultralight, 5 postes 4.10\n\n"
+            "Si quieres otra cotización, mándame: 10 cemento, 5 varilla 3/8\n\n"
             "🧭 Comandos:\n"
             "• 'nueva cotizacion' → empezar de cero\n"
             "• 'salir' → cancelar"
@@ -2525,15 +2525,15 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
                 return (
                     "👋 ¡Hola! Empezamos una cotización nueva.\n\n"
                     "Mándame tu pedido así:\n"
-                    "👉 10 tablaroca ultralight, 5 postes 4.10\n\n"
+                    "👉 10 cemento, 5 varilla 3/8\n\n"
                     "🧭 Comandos:\n"
                     "• 'nueva cotizacion' → empezar de cero\n"
                     "• 'salir' → cancelar"
                 )
         return (
-            "👋 ¡Hola! Puedo cotizarte materiales.\n\n"
+            "👋 ¡Hola! Puedo cotizarte materiales de construcción y ferretería.\n\n"
             "Mándame tu pedido así:\n"
-            "👉 10 tablaroca ultralight, 5 postes 4.10\n\n"
+            "👉 10 cemento, 5 varilla 3/8, 2 martillos\n\n"
             "🧭 Comandos:\n"
             "• 'nueva cotizacion' → empezar de cero\n"
             "• 'salir' → cancelar"
@@ -2682,7 +2682,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
             return (
                 "Encontré estos precios:\n"
                 + "\n".join(lines)
-                + "\n\nDime cantidades para cotizar (ej: 10 tablaroca ultralight).\n\n"
+                + "\n\nDime cantidades para cotizar (ej: 10 cemento, 5 varilla 3/8).\n\n"
                 "🧭 Comandos:\n"
                 "• 'nueva cotizacion' → empezar de cero\n"
                 "• 'salir' → cancelar"
@@ -2839,7 +2839,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
         return (
             "Veo cantidades pero no encontré esos productos.\n\n"
             "👉 Escríbelos más exacto o con SKU.\n"
-            "Ejemplo: '10 tablaroca ultralight usg' o '5 postes 4.10 cal26'.\n\n"
+            "Ejemplo: '10 cemento' o '5 varilla 3/8'.\n\n"
             "🧭 Comandos:\n"
             "• 'nueva cotizacion' → empezar de cero\n"
             "• 'salir' → cancelar"
@@ -2851,20 +2851,19 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
     if looks_like_hours_question(user_text):
         return (
             "📍 Para horarios y ubicación, dime tu sucursal o ciudad.\n\n"
-            "Si quieres cotizar: mándame ej: 10 tablaroca ultralight, 5 postes 4.10"
+            "Si quieres cotizar: mándame ej: 10 cemento, 5 varilla 3/8"
         )
 
     # 4.75) Si parece producto sin cantidad
     if looks_like_product_phrase(user_text) and not re.search(r"\b\d+\b", user_text):
         return (
             "¿Cuántas piezas necesitas?\n"
-            "Ejemplo: '10 postes 6.35' o '50 tablaroca ultralight'\n\n"
+            "Ejemplo: '10 sacos cemento' o '5 varilla 3/8'\n\n"
             "🧭 Comandos:\n"
             "• 'nueva cotizacion' → empezar de cero\n"
             "• 'salir' → cancelar"
         )
 
-    
     # =========================================================
     # 5) OPENAI FALLBACK
     # =========================================================
