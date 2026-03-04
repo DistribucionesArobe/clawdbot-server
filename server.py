@@ -1158,10 +1158,10 @@ async def whatsapp_webhook(request: Request):
     return {"ok": True}
 
 @app.post("/api/admin/rebuild-embeddings-public")
-def rebuild_embeddings_public():
+def rebuild_embeddings_public(company_id: str = "aa743e3f-1496-491d-99eb-02fcc5a839d5"):
     conn = get_conn()
     try:
-        result = rebuild_embeddings_for_company(conn, "aa743e3f-1496-491d-99eb-02fcc5a839d5")
+        result = rebuild_embeddings_for_company(conn, company_id)
         return {"ok": True, **result}
     finally:
         conn.close()
