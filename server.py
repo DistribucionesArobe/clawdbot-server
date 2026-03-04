@@ -948,6 +948,32 @@ def get_company_by_phone_number_id(phone_number_id: str):
         cur.close()
         conn.close()
 
+def send_whatsapp_list(wa_api_key: str, phone_number_id: str, to: str,
+                       body_text: str, options: list, button_label: str = "Ver opciones"):
+    """List message interactivo. options: lista de strings, máx 10."""
+    rows = [
+        {"id": f"spec_{i}", "title": opt}
+        for i, opt in enumerate(options[:10])
+    ]
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "interactive",
+        "interactive": {
+            "type": "list",
+            "body": {"text": body_text},
+            "action": {
+                "button": button_label,
+                "sections": [{"title": "Opciones", "rows": rows}],
+            },
+        },
+    }
+    url = f"https://graph.facebook.com/v19.0/{phone_number_id}/messages"
+    headers = {"Authorization": f"Bearer {wa_api_key}", "Content-Type": "application/json"}
+    r = requests.post(url, headers=headers, json=payload, timeout=20)
+    if r.status_code >= 300:
+        raise RuntimeError(f"WA list failed {r.status_code}: {r.text[:400]}")
+
 def send_whatsapp_text(wa_api_key: str, phone_number_id: str, to: str, text: str):
     url = f"https://graph.facebook.com/v19.0/{phone_number_id}/messages"
     headers = {
@@ -1120,11 +1146,11 @@ def root():
 # -------------------------
 # WhatsApp webhook receive
 # -------------------------
+
 @app.post("/webhook/whatsapp")
 async def whatsapp_webhook(request: Request):
     payload = await request.json()
 
-    # 1) extraer phone_number_id
     try:
         phone_number_id = payload["entry"][0]["changes"][0]["value"]["metadata"]["phone_number_id"]
     except Exception:
@@ -1132,7 +1158,6 @@ async def whatsapp_webhook(request: Request):
 
     company = get_company_by_phone_number_id(phone_number_id)
     if not company:
-        print("No company mapped for phone_number_id:", phone_number_id)
         return {"ok": True}
 
     value = payload["entry"][0]["changes"][0]["value"]
@@ -1142,18 +1167,45 @@ async def whatsapp_webhook(request: Request):
 
     msg = messages[0]
     from_phone = msg.get("from")
-    text = (msg.get("text") or {}).get("body") or ""
+    msg_type = msg.get("type", "text")
 
-    print("WA IN:", {"company_id": company["company_id"], "from": from_phone, "text": text})
+    # Extraer texto de texto normal O de respuesta interactiva
+    text = ""
+    if msg_type == "text":
+        text = (msg.get("text") or {}).get("body") or ""
+    elif msg_type == "interactive":
+        interactive = msg.get("interactive") or {}
+        itype = interactive.get("type")
+        if itype == "list_reply":
+            text = (interactive.get("list_reply") or {}).get("title") or ""
+        elif itype == "button_reply":
+            text = (interactive.get("button_reply") or {}).get("title") or ""
+
+    if not text:
+        return {"ok": True}
+
+    print("WA IN:", {"from": from_phone, "type": msg_type, "text": text})
 
     reply = build_reply_for_company(company["company_id"], text, wa_from=from_phone)
-    
-    send_whatsapp_text(
-        wa_api_key=company["wa_api_key"],
-        phone_number_id=company["wa_phone_number_id"],
-        to=from_phone,
-        text=reply,
-    )
+
+    # Despachar text o list según lo que retorne build_reply
+    if isinstance(reply, dict) and reply.get("type") == "list":
+        send_whatsapp_list(
+            wa_api_key=company["wa_api_key"],
+            phone_number_id=company["wa_phone_number_id"],
+            to=from_phone,
+            body_text=reply["body"],
+            options=reply["options"],
+            button_label=reply.get("button_label", "Ver opciones"),
+        )
+    else:
+        text_body = reply["body"] if isinstance(reply, dict) else reply
+        send_whatsapp_text(
+            wa_api_key=company["wa_api_key"],
+            phone_number_id=company["wa_phone_number_id"],
+            to=from_phone,
+            text=text_body,
+        )
 
     return {"ok": True}
 
@@ -2384,6 +2436,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
         print("WA TRACK ERROR:", repr(e))
 
     import string as _string
+    from spec_definitions import get_spec_steps, already_has_specs, build_spec_query
 
     def _search_pricebook_candidates(conn, company_id: str, q: str, limit: int = 5):
         q = (q or "").strip()
@@ -2540,6 +2593,104 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
         )
 
     # =========================================================
+    # 0.75) RESOLVER SPECS PENDIENTES
+    # =========================================================
+    _state_specs = get_quote_state(company_id, wa_from) if wa_from else {}
+    _state_specs = _state_specs or {}
+
+    if _state_specs.get("pending_specs"):
+        ps = _state_specs["pending_specs"]
+        current = ps[0]
+        steps = current["steps"]
+        step_idx = current["step_idx"]
+        current_step = steps[step_idx]
+
+        # ¿El texto coincide con alguna opción del paso actual?
+        t_low = user_text.strip().lower()
+        chosen = next(
+            (opt for opt in current_step["options"] if t_low == opt.lower() or opt.lower() in t_low),
+            None
+        )
+
+        if chosen:
+            current["resolved"][current_step["key"]] = chosen
+            current["step_idx"] += 1
+
+            if current["step_idx"] >= len(steps):
+                # ✅ Todos los steps resueltos → buscar con specs completos
+                full_query = build_spec_query(current["raw"], current["resolved"])
+                conn = get_conn()
+                try:
+                    result = smart_search(conn, company_id, full_query, current["qty"])
+                finally:
+                    conn.close()
+
+                ps.pop(0)
+                if ps:
+                    _state_specs["pending_specs"] = ps
+                else:
+                    _state_specs.pop("pending_specs", None)
+
+                if result["status"] == "found":
+                    _state_specs = cart_add_item(_state_specs, {
+                        "sku": result["item"].get("sku"),
+                        "name": result["item"].get("name"),
+                        "unit": result["item"].get("unit") or "unidad",
+                        "price": float(result["item"].get("price") or 0.0),
+                        "vat_rate": result["item"].get("vat_rate"),
+                        "qty": current["qty"],
+                    })
+                else:
+                    # No encontrado con esos specs → pending normal para que elija
+                    pend = _state_specs.get("pending") or []
+                    pend.append({
+                        "qty": current["qty"],
+                        "raw": full_query,
+                        "candidates": result.get("candidates") or [],
+                    })
+                    _state_specs["pending"] = pend
+
+                if wa_from:
+                    upsert_quote_state(company_id, wa_from, _state_specs)
+
+                # ¿Quedan más productos esperando specs?
+                if _state_specs.get("pending_specs"):
+                    next_p = _state_specs["pending_specs"][0]
+                    next_step = next_p["steps"][next_p["step_idx"]]
+                    return {
+                        "type": "list",
+                        "body": f"✅ Anotado. Ahora el {next_p['raw']} — {next_step['question']}",
+                        "options": next_step["options"],
+                        "button_label": "Ver opciones",
+                    }
+
+                msg = cart_render_quote(_state_specs) if _state_specs.get("cart") else "✅ Listo."
+                if _state_specs.get("pending"):
+                    msg += "\n\n" + _render_pending_suggestions(_state_specs["pending"])
+                msg += "\n\n¿Agregamos algo más?\n🧭 'nueva cotizacion' → empezar de cero"
+                return msg
+
+            else:
+                # Más pasos para este mismo producto
+                if wa_from:
+                    upsert_quote_state(company_id, wa_from, _state_specs)
+                next_step = steps[current["step_idx"]]
+                return {
+                    "type": "list",
+                    "body": f"✅ {chosen} ✓  {next_step['question']}",
+                    "options": next_step["options"],
+                    "button_label": "Ver opciones",
+                }
+        else:
+            # No reconoció la opción → re-mostrar
+            return {
+                "type": "list",
+                "body": f"Por favor elige una opción 👇\n{current_step['question']}",
+                "options": current_step["options"],
+                "button_label": "Ver opciones",
+            }
+
+    # =========================================================
     # 1) MULTI-ITEMS + CARRITO
     # =========================================================
     multi = extract_qty_items_robust(user_text)
@@ -2556,6 +2707,21 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
                 if not looks_like_product_phrase(prod_raw):
                     continue
 
+                # ── Detectar si necesita specs antes de buscar ──
+                steps = get_spec_steps(prod_raw)
+                if steps and not already_has_specs(prod_raw, steps):
+                    specs_pending = state.get("pending_specs") or []
+                    specs_pending.append({
+                        "raw": prod_raw,
+                        "qty": qty,
+                        "steps": steps,
+                        "step_idx": 0,
+                        "resolved": {},
+                    })
+                    state["pending_specs"] = specs_pending
+                    continue  # no buscar todavía
+
+                # ── Búsqueda normal ──
                 try:
                     result = smart_search(conn, company_id, prod_raw, qty)
                 except Exception as e:
@@ -2563,15 +2729,14 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
                     result = {"status": "not_found", "item": None, "candidates": []}
 
                 if result["status"] == "found":
-                    best = result["item"]
                     state = cart_add_item(
                         state,
                         {
-                            "sku": best.get("sku"),
-                            "name": best.get("name"),
-                            "unit": best.get("unit") or "unidad",
-                            "price": float(best.get("price") or 0.0),
-                            "vat_rate": best.get("vat_rate"),
+                            "sku": result["item"].get("sku"),
+                            "name": result["item"].get("name"),
+                            "unit": result["item"].get("unit") or "unidad",
+                            "price": float(result["item"].get("price") or 0.0),
+                            "vat_rate": result["item"].get("vat_rate"),
                             "qty": qty,
                         },
                     )
@@ -2589,6 +2754,26 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
 
             if wa_from:
                 upsert_quote_state(company_id, wa_from, state)
+
+            # ── Si hay specs pendientes, preguntar el primero ──
+            if state.get("pending_specs"):
+                first = state["pending_specs"][0]
+                first_step = first["steps"][first["step_idx"]]
+                prefix = ""
+                if state.get("cart"):
+                    prefix = cart_render_quote(state) + "\n\n"
+                n_specs = len(state["pending_specs"])
+                intro = (
+                    f"Encontré {n_specs} producto(s) que necesitan especificaciones.\n\n"
+                    if n_specs > 1
+                    else ""
+                )
+                return {
+                    "type": "list",
+                    "body": prefix + intro + first_step["question"],
+                    "options": first_step["options"],
+                    "button_label": "Ver opciones",
+                }
 
             msg = (
                 cart_render_quote(state)
@@ -2614,6 +2799,28 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
     # =========================================================
     qty, prod_query = extract_qty_and_product(user_text)
     if qty and prod_query:
+        # ── Detectar specs para single item también ──
+        steps = get_spec_steps(prod_query)
+        if steps and not already_has_specs(prod_query, steps):
+            state = get_quote_state(company_id, wa_from) if wa_from else {}
+            state = state or {}
+            state["pending_specs"] = [{
+                "raw": prod_query,
+                "qty": qty,
+                "steps": steps,
+                "step_idx": 0,
+                "resolved": {},
+            }]
+            if wa_from:
+                upsert_quote_state(company_id, wa_from, state)
+            first_step = steps[0]
+            return {
+                "type": "list",
+                "body": first_step["question"],
+                "options": first_step["options"],
+                "button_label": "Ver opciones",
+            }
+
         conn = get_conn()
         try:
             try:
@@ -2623,18 +2830,17 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
                 result = {"status": "not_found", "item": None, "candidates": []}
 
             if result["status"] == "found":
-                best = result["item"]
                 state = get_quote_state(company_id, wa_from) if wa_from else None
                 if not state:
                     state = {}
                 state = cart_add_item(
                     state,
                     {
-                        "sku": best.get("sku"),
-                        "name": best.get("name"),
-                        "unit": best.get("unit") or "unidad",
-                        "price": float(best.get("price") or 0.0),
-                        "vat_rate": best.get("vat_rate"),
+                        "sku": result["item"].get("sku"),
+                        "name": result["item"].get("name"),
+                        "unit": result["item"].get("unit") or "unidad",
+                        "price": float(result["item"].get("price") or 0.0),
+                        "vat_rate": result["item"].get("vat_rate"),
                         "qty": qty,
                     },
                 )
@@ -2771,15 +2977,14 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
                         result = {"status": "not_found", "item": None, "candidates": []}
 
                     if result["status"] == "found":
-                        best = result["item"]
                         state = cart_add_item(
                             state,
                             {
-                                "sku": best.get("sku"),
-                                "name": best.get("name"),
-                                "unit": best.get("unit") or "unidad",
-                                "price": float(best.get("price") or 0.0),
-                                "vat_rate": best.get("vat_rate"),
+                                "sku": result["item"].get("sku"),
+                                "name": result["item"].get("name"),
+                                "unit": result["item"].get("unit") or "unidad",
+                                "price": float(result["item"].get("price") or 0.0),
+                                "vat_rate": result["item"].get("vat_rate"),
                                 "qty": qty,
                             },
                         )
@@ -2854,7 +3059,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
             "Si quieres cotizar: mándame ej: 10 cemento, 5 varilla 3/8"
         )
 
-    # 4.75) Si parece producto sin cantidad
+    # 4.75) Parece producto sin cantidad
     if looks_like_product_phrase(user_text) and not re.search(r"\b\d+\b", user_text):
         return (
             "¿Cuántas piezas necesitas?\n"
@@ -2863,22 +3068,6 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "") 
             "• 'nueva cotizacion' → empezar de cero\n"
             "• 'salir' → cancelar"
         )
-
-    # =========================================================
-    # 5) OPENAI FALLBACK
-    # =========================================================
-    if not openai_client:
-        return "Estoy en mantenimiento. Intenta más tarde."
-
-    resp = openai_client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": COTIZABOT_SYSTEM_PROMPT},
-            {"role": "user", "content": user_text},
-        ],
-        temperature=0.3,
-    )
-    return resp.choices[0].message.content or "¿Me repites eso?"
 
 @app.post("/api/chat")
 async def chat(req: ChatRequest, authorization: str = Header(default="")):
