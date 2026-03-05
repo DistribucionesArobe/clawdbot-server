@@ -225,32 +225,29 @@ SYNONYMS = {
 }
 
 def singularize_token(tok: str) -> str:
-    """
-    Singularizador conservador en español:
-    - Solo aplica a tokens >= 5 caracteres
-    - No toca tokens con números (6.35, 2.44, cal26)
-    - Evita romper palabras cortas (usg, cal, kg)
-    """
     t = (tok or "").strip()
     if len(t) < 5:
         return t
-    if re.search(r"\d", t):  # contiene números -> no tocar
+    if re.search(r"\d", t):
         return t
 
-    # plurales simples:
-    # tornillos -> tornillo
-    # postes -> poste
-    # anclas -> ancla
+    # varillas -> varilla, tornillas -> tornilla
+    if t.endswith("llas"):
+        return t[:-1]  # varillas -> varilla
+    if t.endswith("illas"):
+        return t[:-1]
+    # postes -> poste, cables -> cable
     if t.endswith("es"):
         base = t[:-2]
         if len(base) >= 3:
             return base
+    # martillos -> martillo, focos -> foco
     if t.endswith("s"):
         base = t[:-1]
         if len(base) >= 3:
             return base
     return t
-
+    
 def normalize_product_text(text: str) -> str:
     """
     Normaliza texto para búsqueda:
@@ -3166,7 +3163,8 @@ def extract_qty_items_robust(text: str):
     t = re.sub(r"[•;]", "\n", t)
     
     # Quita verbos de solicitud al inicio
-    t = re.sub(r"^\s*(ocupo|necesito|quiero|dame|manda|pasame|pásame)\s+", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"^\s*(ocupo|necesito|quiero|quisiera|dame|deme|manda|mandame|mandeme|pasame|pásame|paseme|necesitamos|queremos|ocupamos|me puede dar|me pueden dar|me das|me mandas|favor de|necesito cotizar|quiero cotizar)\s+", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"^\s*(me\s+)?(puede[ns]?|podría[ns]?|podrías)\s+(cotizar|dar|mandar|pasar)\s+", "", t, flags=re.IGNORECASE)
     
     # Quita ruido de palabras
     t = re.sub(r"\b(cotiza|cotización|cotizacion|precio|precios|por favor|porfa|pls)\b", " ", t, flags=re.IGNORECASE)
