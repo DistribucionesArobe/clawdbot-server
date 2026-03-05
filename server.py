@@ -606,32 +606,25 @@ def render_pending_suggestions(pending: list) -> str:
     """
     if not pending:
         return ""
-
     letters = string.ascii_uppercase
-    lines = ["No pude identificar algunos productos. Elige del catálogo:"]
-
+    lines = ["¿Cuál de estas opciones buscas? 👇\n\nSi no encuentras lo que necesitas, escribe *asesor*."]
     for i, p in enumerate(pending[:6]):
         tag = letters[i]
         qty = int(p.get("qty") or 0)
         raw = (p.get("raw") or "").strip()
         cands = p.get("candidates") or []
-
         lines.append(f"\n❓ ({tag}) {qty} x {raw}")
-
         if not cands:
-            lines.append("   (sin sugerencias) Mándalo más exacto o con SKU.")
+            lines.append("   (sin sugerencias) Mándalo más exacto o escribe *asesor*.")
             continue
-
         for j, it in enumerate(cands[:5], start=1):
             unit = it.get("unit") or "unidad"
             price = float(it.get("price") or 0.0)
             sku = (it.get("sku") or "").strip()
             sku_txt = f" (SKU {sku})" if sku else ""
             lines.append(f"   {tag}{j}) {it['name']}{sku_txt} — ${price:,.2f} / {unit}")
-
-    lines.append("\n✅ Responde con: A1, B2, C1 (ejemplo).")
+    lines.append("\n✅ Responde con: A1, B2, C1 o escribe *asesor*.")
     return "\n".join(lines)
-
 
 def parse_pending_picks(text: str):
     """
@@ -1392,11 +1385,11 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             if sections:
                 return {
                     "type": "list_sections",
-                    "body": "No pude identificar algunos productos. Elige del catálogo:",
+                    "body": "¿Cuál de estas opciones buscas? 👇\n\nSi no encuentras lo que necesitas, escribe *asesor*.",
                     "sections": sections,
                     "button_label": "Ver opciones",
                 }
-        lines = ["No pude identificar algunos productos. Elige del catálogo:"]
+        lines = ["¿Cuál de estas opciones buscas? 👇\n\nSi no encuentras lo que necesitas, escribe *asesor*."]
         for i, p in enumerate(pending[:6]):
             tag = letters[i]
             qty = int(p.get("qty") or 0)
@@ -1404,7 +1397,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             cands = p.get("candidates") or []
             lines.append(f"\n❓ ({tag}) {qty} x {raw}")
             if not cands:
-                lines.append("   (sin sugerencias) Mándalo más exacto o con SKU.")
+                lines.append("   (sin sugerencias) Mándalo más exacto o escribe *asesor*.")
                 continue
             for j, it in enumerate(cands[:5], start=1):
                 unit = it.get("unit") or "unidad"
@@ -1412,8 +1405,9 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 sku = (it.get("sku") or "").strip()
                 sku_txt = f" (SKU {sku})" if sku else ""
                 lines.append(f"   {tag}{j}) {it['name']}{sku_txt} — ${price:,.2f} / {unit}")
-        lines.append("\n✅ Responde con: A1, B2, C1 (ejemplo).")
+        lines.append("\n✅ Responde con: A1, B2, C1 o escribe *asesor*.")
         return "\n".join(lines)
+    
 
     def _parse_pending_picks(text: str):
         t = (text or "").upper().replace(" ", "")
