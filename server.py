@@ -2148,19 +2148,16 @@ class CompanySettingsBody(BaseModel):
 @app.post("/api/company/settings")
 def company_settings_update(request: Request, body: CompanySettingsBody):
     company_id = require_company_id(request)
-
     hours = (body.hours_text or "").strip() or None
     addr  = (body.address_text or "").strip() or None
     maps  = (body.google_maps_url or "").strip() or None
-
-    # ✅ cobros
     mp_url = (body.mercadopago_url or "").strip() or None
     bank_name = (body.bank_name or "").strip() or None
     bank_acc_name = (body.bank_account_name or "").strip() or None
     bank_clabe = (body.bank_clabe or "").strip().replace(" ", "") or None
     bank_acc_num = (body.bank_account_number or "").strip().replace(" ", "") or None
+    owner_phone = (body.owner_phone or "").strip().replace(" ", "") or None
 
-    # ✅ validación suave CLABE
     if bank_clabe and (not bank_clabe.isdigit() or len(bank_clabe) != 18):
         raise HTTPException(status_code=400, detail="CLABE inválida (debe ser 18 dígitos)")
 
@@ -2180,26 +2177,22 @@ def company_settings_update(request: Request, body: CompanySettingsBody):
                 bank_account_name=%s,
                 bank_clabe=%s,
                 bank_account_number=%s,
+                owner_phone=%s,
                 updated_at=now()
             WHERE id=%s
             RETURNING id
             """,
-            (hours, addr, maps, mp_url, bank_name, bank_acc_name, bank_clabe, bank_acc_num, company_id),
+            (hours, addr, maps, mp_url, bank_name, bank_acc_name, bank_clabe, bank_acc_num, owner_phone, company_id),
         )
         row = cur.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Company no encontrada")
         return {"ok": True}
-    finally:
-        if cur:
-            cur.close()
-        if conn:
-            conn.close()
+    finally
 
 @app.get("/api/company/settings")
 def company_settings_get(request: Request):
     company_id = require_company_id(request)
-
     conn = None
     cur = None
     try:
@@ -2208,7 +2201,8 @@ def company_settings_get(request: Request):
         cur.execute(
             """
             SELECT hours_text, address_text, google_maps_url,
-                   mercadopago_url, bank_name, bank_account_name, bank_clabe, bank_account_number
+                   mercadopago_url, bank_name, bank_account_name, bank_clabe, bank_account_number,
+                   owner_phone
             FROM companies
             WHERE id=%s
             LIMIT 1
@@ -2218,7 +2212,6 @@ def company_settings_get(request: Request):
         row = cur.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Company no encontrada")
-
         return {
             "ok": True,
             "settings": {
@@ -2230,6 +2223,7 @@ def company_settings_get(request: Request):
                 "bank_account_name": row[5],
                 "bank_clabe": row[6],
                 "bank_account_number": row[7],
+                "owner_phone": row[8],
             },
         }
     finally:
