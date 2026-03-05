@@ -2137,6 +2137,13 @@ class CompanySettingsBody(BaseModel):
     hours_text: Optional[str] = None
     address_text: Optional[str] = None
     google_maps_url: Optional[str] = None
+    mercadopago_url: Optional[str] = None
+    bank_name: Optional[str] = None
+    bank_account_name: Optional[str] = None
+    bank_clabe: Optional[str] = None
+    bank_account_number: Optional[str] = None
+    owner_phone: Optional[str] = None
+
 
 @app.post("/api/company/settings")
 def company_settings_update(request: Request, body: CompanySettingsBody):
