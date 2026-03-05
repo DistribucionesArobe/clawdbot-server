@@ -2547,13 +2547,14 @@ def pricebook_upload(
                 sku = sku_val if sku_val else None
 
             name_norm = norm_name(name)
+            auto_syn = auto_synonyms(name)
 
             cur.execute(
                 """
                 INSERT INTO pricebook_items
-                    (company_id, sku, name, name_norm, unit, price, vat_rate, source, updated_at)
+                    (company_id, sku, name, name_norm, unit, price, vat_rate, synonyms, source, updated_at)
                 VALUES
-                    (%s, %s, %s, %s, %s, %s, %s, 'excel', now())
+                    (%s, %s, %s, %s, %s, %s, %s, %s, 'excel', now())
                 ON CONFLICT (company_id, name_norm)
                 DO UPDATE SET
                     sku = EXCLUDED.sku,
@@ -2561,10 +2562,11 @@ def pricebook_upload(
                     unit = EXCLUDED.unit,
                     price = EXCLUDED.price,
                     vat_rate = EXCLUDED.vat_rate,
+                    synonyms = COALESCE(NULLIF(pricebook_items.synonyms, ''), EXCLUDED.synonyms),
                     source = 'excel',
                     updated_at = now()
                 """,
-                (company_id, sku, name, name_norm, unit, price, vat_rate),
+                (company_id, sku, name, name_norm, unit, price, vat_rate, auto_syn),
             )
 
             rows_upserted += 1
@@ -2582,13 +2584,11 @@ def pricebook_upload(
             (rows_total, rows_upserted, upload_id),
         )
 
-        
         try:
             rebuild_embeddings_for_company(conn, company_id)
         except Exception as e:
             print("EMBEDDINGS REBUILD ERROR:", repr(e))
-        
-        
+
         return {
             "ok": True,
             "company_id": company_id,
