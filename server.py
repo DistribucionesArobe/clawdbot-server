@@ -1212,6 +1212,23 @@ async def whatsapp_webhook(request: Request):
             options=reply.get("options") or [],
             button_label=reply.get("button_label", "Ver opciones"),
         )
+   
+    elif isinstance(reply, dict) and reply.get("type") == "text_then_list_sections":
+        send_whatsapp_text(
+            wa_api_key=company["wa_api_key"],
+            phone_number_id=company["wa_phone_number_id"],
+            to=from_phone,
+            text=reply["text"],
+        )
+        send_whatsapp_list_sections(
+            wa_api_key=company["wa_api_key"],
+            phone_number_id=company["wa_phone_number_id"],
+            to=from_phone,
+            body_text=reply["body"],
+            sections=reply["sections"],
+            button_label=reply.get("button_label", "Ver opciones"),
+        )
+    
     elif isinstance(reply, dict) and reply.get("type") == "list_sections":
         send_whatsapp_list_sections(
             wa_api_key=company["wa_api_key"],
@@ -1398,25 +1415,34 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             return True
         return False
 
-    def _build_reply_with_pending(state: dict):
-        msg = cart_render_quote(state) if (state.get("cart") or []) else ""
-        pending = state.get("pending") or []
-        if pending:
-            pending_render = _render_pending_suggestions(pending)
-            if isinstance(pending_render, dict):
-                if msg:
-                    pending_render["body"] = msg + "\n\n" + pending_render["body"]
-                return pending_render
-            else:
-                msg = (msg + "\n\n" + pending_render) if msg else pending_render
-        msg += (
-            "\n\n¿Agregamos algo más?\n"
-            "🧭 Comandos:\n"
-            "• 'nueva cotizacion' → empezar de cero\n"
-            "• 'salir' → cancelar"
-        )
-        return msg
 
+    def _build_reply_with_pending(state: dict):
+    msg = cart_render_quote(state) if (state.get("cart") or []) else ""
+    pending = state.get("pending") or []
+    if pending:
+        pending_render = _render_pending_suggestions(pending)
+        if isinstance(pending_render, dict):
+            if msg:
+                # Mandar carrito como texto separado ANTES del list
+                # Retornamos un tipo especial "text_then_list"
+                return {
+                    "type": "text_then_list_sections",
+                    "text": msg + "\n\n¿Agregamos algo más?\n🧭 'nueva cotizacion' → empezar de cero",
+                    "body": pending_render["body"],
+                    "sections": pending_render["sections"],
+                    "button_label": pending_render.get("button_label", "Ver opciones"),
+                }
+            return pending_render
+        else:
+            msg = (msg + "\n\n" + pending_render) if msg else pending_render
+    msg += (
+        "\n\n¿Agregamos algo más?\n"
+        "🧭 Comandos:\n"
+        "• 'nueva cotizacion' → empezar de cero\n"
+        "• 'salir' → cancelar"
+    )
+    return msg
+    
     # =========================================================
     # 0) COMANDOS (reset / salir)
     # =========================================================
