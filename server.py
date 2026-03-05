@@ -1990,22 +1990,82 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             "• 'nueva cotizacion' → empezar de cero\n"
             "• 'salir' → cancelar"
         )
-
+    
     # =========================================================
-    # 5) OPENAI FALLBACK
+    # 5) OPENAI FALLBACK — extracción inteligente
     # =========================================================
     if not openai_client:
         return "Estoy en mantenimiento. Intenta más tarde."
 
-    resp = openai_client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": COTIZABOT_SYSTEM_PROMPT},
-            {"role": "user", "content": user_text},
-        ],
-        temperature=0.3,
-    )
-    return resp.choices[0].message.content or "¿Me repites eso?"
+    try:
+        resp = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Eres un asistente de ferretería. El usuario manda un pedido en español, "
+                        "posiblemente con errores ortográficos o lenguaje informal. "
+                        "Extrae los productos y cantidades. "
+                        "Responde SOLO con JSON así: "
+                        '[{"qty": 10, "product": "blocks"}, {"qty": 5, "product": "varilla 3/8"}] '
+                        "Si no hay productos claros, responde: []"
+                    )
+                },
+                {"role": "user", "content": user_text},
+            ],
+            temperature=0.1,
+            max_tokens=200,
+        )
+        raw = resp.choices[0].message.content or "[]"
+        raw = raw.replace("```json", "").replace("```", "").strip()
+        items_gpt = json.loads(raw)
+
+        if items_gpt:
+            conn = get_conn()
+            try:
+                state = get_quote_state(company_id, wa_from) if wa_from else {}
+                state = state or {}
+                missing = []
+
+                for it in items_gpt:
+                    qty = int(it.get("qty") or 0)
+                    prod = (it.get("product") or "").strip()
+                    if not qty or not prod:
+                        continue
+                    result = smart_search(conn, company_id, prod, qty)
+                    if result["status"] == "found":
+                        state = cart_add_item(state, {
+                            "sku": result["item"].get("sku"),
+                            "name": result["item"].get("name"),
+                            "unit": result["item"].get("unit") or "unidad",
+                            "price": float(result["item"].get("price") or 0.0),
+                            "vat_rate": result["item"].get("vat_rate"),
+                            "qty": qty,
+                        })
+                    else:
+                        missing.append({
+                            "qty": qty,
+                            "raw": prod,
+                            "candidates": result.get("candidates") or [],
+                        })
+
+                if missing:
+                    state["pending"] = missing
+                else:
+                    state.pop("pending", None)
+
+                if wa_from:
+                    upsert_quote_state(company_id, wa_from, state)
+
+                return _build_reply_with_pending(state)
+            finally:
+                conn.close()
+
+    except Exception as e:
+        print("GPT FALLBACK ERROR:", repr(e))
+
+    return "¿Me repites eso? No entendí bien tu pedido 🤔"
 
 
 @app.post("/api/admin/rebuild-embeddings-public")
