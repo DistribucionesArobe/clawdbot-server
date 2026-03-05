@@ -1150,11 +1150,17 @@ def root():
 @app.post("/webhook/whatsapp")
 async def whatsapp_webhook(request: Request):
     payload = await request.json()
+
+    # 1) Identificar phone_number_id (Meta)
     try:
-        phone_number_id = payload["entry"][0]["changes"][0]["value"]["metadata"]["phone_number_id"]
+        phone_number_id = (
+            payload["entry"][0]["changes"][0]["value"]["metadata"]["phone_number_id"]
+        )
     except Exception:
+        # Meta manda otras notificaciones (statuses, etc)
         return {"ok": True}
 
+    # 2) Resolver empresa/tenant por ese phone_number_id
     company = get_company_by_phone_number_id(phone_number_id)
     if not company:
         return {"ok": True}
@@ -1164,42 +1170,60 @@ async def whatsapp_webhook(request: Request):
     if not messages:
         return {"ok": True}
 
+    # 3) Leer el primer mensaje
     msg = messages[0]
     from_phone = msg.get("from")
     msg_type = msg.get("type", "text")
 
+    # 4) Extraer texto (texto normal o interactive)
     text = ""
     if msg_type == "text":
         text = (msg.get("text") or {}).get("body") or ""
     elif msg_type == "interactive":
         interactive = msg.get("interactive") or {}
         itype = interactive.get("type")
+
         if itype == "list_reply":
             text = (interactive.get("list_reply") or {}).get("title") or ""
         elif itype == "button_reply":
             text = (interactive.get("button_reply") or {}).get("title") or ""
 
-    if not text:
+    text = (text or "").strip()
+    if not text or not from_phone:
         return {"ok": True}
 
     print("WA IN:", {"from": from_phone, "type": msg_type, "text": text})
 
+    # 5) Construir respuesta (tu lógica)
     reply = build_reply_for_company(
-        company["company_id"], text, wa_from=from_phone,
-        is_interactive=(msg_type == "interactive")
+        company["company_id"],
+        text,
+        wa_from=from_phone,
+        is_interactive=(msg_type == "interactive"),
     )
 
+    # 6) Enviar respuesta: list / list_sections / texto
     if isinstance(reply, dict) and reply.get("type") == "list":
         send_whatsapp_list(
             wa_api_key=company["wa_api_key"],
             phone_number_id=company["wa_phone_number_id"],
             to=from_phone,
-            body_text=reply["body"],
-            options=reply["options"],
+            body_text=reply.get("body") or "",
+            options=reply.get("options") or [],
+            button_label=reply.get("button_label", "Ver opciones"),
+        )
+    elif isinstance(reply, dict) and reply.get("type") == "list_sections":
+        send_whatsapp_list_sections(
+            wa_api_key=company["wa_api_key"],
+            phone_number_id=company["wa_phone_number_id"],
+            to=from_phone,
+            body_text=reply.get("body") or "",
+            sections=reply.get("sections") or [],
             button_label=reply.get("button_label", "Ver opciones"),
         )
     else:
-        text_body = reply["body"] if isinstance(reply, dict) else reply
+        text_body = reply.get("body") if isinstance(reply, dict) else reply
+        text_body = (text_body or "").strip() or "¿Me repites eso?"
         send_whatsapp_text(
             wa_api_key=company["wa_api_key"],
             phone_number_id=company["wa_phone_number_id"],
@@ -1208,6 +1232,7 @@ async def whatsapp_webhook(request: Request):
         )
 
     return {"ok": True}
+
 
 @app.post("/api/admin/rebuild-embeddings-public")
 def rebuild_embeddings_public(company_id: str = "aa743e3f-1496-491d-99eb-02fcc5a839d5"):
@@ -2424,32 +2449,6 @@ def extract_qty_items_robust(text: str):
     
     return items
 
-if isinstance(reply, dict) and reply.get("type") == "list":
-        send_whatsapp_list(
-            wa_api_key=company["wa_api_key"],
-            phone_number_id=company["wa_phone_number_id"],
-            to=from_phone,
-            body_text=reply["body"],
-            options=reply["options"],
-            button_label=reply.get("button_label", "Ver opciones"),
-        )
-    elif isinstance(reply, dict) and reply.get("type") == "list_sections":
-        send_whatsapp_list_sections(
-            wa_api_key=company["wa_api_key"],
-            phone_number_id=company["wa_phone_number_id"],
-            to=from_phone,
-            body_text=reply["body"],
-            sections=reply["sections"],
-            button_label=reply.get("button_label", "Ver opciones"),
-        )
-    else:
-        text_body = reply["body"] if isinstance(reply, dict) else reply
-        send_whatsapp_text(
-            wa_api_key=company["wa_api_key"],
-            phone_number_id=company["wa_phone_number_id"],
-            to=from_phone,
-            text=text_body,
-        )
 
 @app.post("/api/chat")
 async def chat(req: ChatRequest, authorization: str = Header(default="")):
