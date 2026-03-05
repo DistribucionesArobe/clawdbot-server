@@ -2188,8 +2188,12 @@ def company_settings_update(request: Request, body: CompanySettingsBody):
         if not row:
             raise HTTPException(status_code=404, detail="Company no encontrada")
         return {"ok": True}
-    finally
-
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
+    
 @app.get("/api/company/settings")
 def company_settings_get(request: Request):
     company_id = require_company_id(request)
