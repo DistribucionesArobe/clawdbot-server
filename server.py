@@ -1925,12 +1925,10 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             "• 'salir' → cancelar"
         )
 
-
     # =========================================================
     # 4) GUARD — mensaje con números pero sin producto
     # =========================================================
     if re.search(r"\b\d+\b", user_text):
-        # Intentar búsqueda semántica como fallback
         qty, prod_query = extract_qty_and_product(user_text)
         if qty and prod_query:
             conn = get_conn()
@@ -1963,14 +1961,8 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                     upsert_quote_state(company_id, wa_from, state)
                 return _build_reply_with_pending(state)
 
-        return (
-            "No encontré ese producto en el catálogo 🤔\n\n"
-            "👉 Intenta con el nombre exacto o SKU.\n"
-            "Ejemplo: '10 cemento Portland' o '5 varilla 3/8'\n\n"
-            "🧭 Comandos:\n"
-            "• 'nueva cotizacion' → empezar de cero\n"
-            "• 'salir' → cancelar"
-        )
+        # Si llegamos aquí, dejar caer al bloque 5 (GPT fallback)
+        # NO retornar error todavía
     
     # =========================================================
     # 4.5) HORARIOS / UBICACIÓN
