@@ -3165,6 +3165,9 @@ def extract_qty_items_robust(text: str):
     t = (text or "").strip()
     t = re.sub(r"[•;]", "\n", t)
     
+    # Quita verbos de solicitud al inicio
+    t = re.sub(r"^\s*(ocupo|necesito|quiero|dame|manda|pasame|pásame)\s+", "", t, flags=re.IGNORECASE)
+    
     # Quita ruido de palabras
     t = re.sub(r"\b(cotiza|cotización|cotizacion|precio|precios|por favor|porfa|pls)\b", " ", t, flags=re.IGNORECASE)
     
@@ -3173,16 +3176,12 @@ def extract_qty_items_robust(text: str):
     
     items = []
     
-    # 1) Procesa LÍNEA POR LÍNEA primero
     lines = [l.strip() for l in re.split(r"[\n\r]+", t) if l.strip()]
     
     for line in lines:
-        # Dentro de cada línea, separa por comas
         parts = [p.strip() for p in line.split(",") if p.strip()]
         
         for part in parts:
-            # Cada parte: "36 postes 9.20 cal 20"
-            # El PRIMER número es la cantidad, el RESTO es el producto
             m = re.match(r"^\s*(\d+)\s+(.+)$", part.strip())
             if m:
                 qty = int(m.group(1))
@@ -3191,7 +3190,6 @@ def extract_qty_items_robust(text: str):
                     items.append((qty, prod))
     
     return items
-
 
 @app.post("/api/chat")
 async def chat(req: ChatRequest, authorization: str = Header(default="")):
