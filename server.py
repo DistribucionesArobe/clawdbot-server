@@ -1925,19 +1925,53 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             "• 'salir' → cancelar"
         )
 
+
     # =========================================================
     # 4) GUARD — mensaje con números pero sin producto
     # =========================================================
     if re.search(r"\b\d+\b", user_text):
+        # Intentar búsqueda semántica como fallback
+        qty, prod_query = extract_qty_and_product(user_text)
+        if qty and prod_query:
+            conn = get_conn()
+            try:
+                result = smart_search(conn, company_id, prod_query, qty)
+            finally:
+                conn.close()
+
+            if result["status"] == "found":
+                state = get_quote_state(company_id, wa_from) if wa_from else {}
+                state = state or {}
+                state = cart_add_item(state, {
+                    "sku": result["item"].get("sku"),
+                    "name": result["item"].get("name"),
+                    "unit": result["item"].get("unit") or "unidad",
+                    "price": float(result["item"].get("price") or 0.0),
+                    "vat_rate": result["item"].get("vat_rate"),
+                    "qty": qty,
+                })
+                state.pop("pending", None)
+                if wa_from:
+                    upsert_quote_state(company_id, wa_from, state)
+                return _build_reply_with_pending(state)
+
+            elif result["status"] == "ambiguous":
+                state = get_quote_state(company_id, wa_from) if wa_from else {}
+                state = state or {}
+                state["pending"] = [{"qty": qty, "raw": prod_query, "candidates": result["candidates"]}]
+                if wa_from:
+                    upsert_quote_state(company_id, wa_from, state)
+                return _build_reply_with_pending(state)
+
         return (
-            "Veo cantidades pero no encontré esos productos.\n\n"
-            "👉 Escríbelos más exacto o con SKU.\n"
-            "Ejemplo: '10 cemento' o '5 varilla 3/8'.\n\n"
+            "No encontré ese producto en el catálogo 🤔\n\n"
+            "👉 Intenta con el nombre exacto o SKU.\n"
+            "Ejemplo: '10 cemento Portland' o '5 varilla 3/8'\n\n"
             "🧭 Comandos:\n"
             "• 'nueva cotizacion' → empezar de cero\n"
             "• 'salir' → cancelar"
         )
-
+    
     # =========================================================
     # 4.5) HORARIOS / UBICACIÓN
     # =========================================================
