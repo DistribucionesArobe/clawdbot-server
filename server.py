@@ -1184,10 +1184,13 @@ async def whatsapp_webhook(request: Request):
         itype = interactive.get("type")
 
         if itype == "list_reply":
-            text = (interactive.get("list_reply") or {}).get("title") or ""
+            list_reply = interactive.get("list_reply") or {}
+            lr_id = (list_reply.get("id") or "").strip()
+            lr_title = (list_reply.get("title") or "").strip()
+            text = lr_id if lr_id.upper().startswith("PICK_") else lr_title
         elif itype == "button_reply":
             text = (interactive.get("button_reply") or {}).get("title") or ""
-
+    
     text = (text or "").strip()
     if not text or not from_phone:
         return {"ok": True}
