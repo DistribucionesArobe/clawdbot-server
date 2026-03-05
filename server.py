@@ -987,6 +987,23 @@ def send_whatsapp_text(wa_api_key: str, phone_number_id: str, to: str, text: str
     if r.status_code >= 300:
         raise RuntimeError(f"WhatsApp send failed {r.status_code}: {r.text[:400]}")
 
+def notify_owner_escalation(wa_api_key: str, phone_number_id: str, owner_phone: str, 
+                             client_phone: str, reason: str, state: dict):
+    cart = (state or {}).get("cart") or []
+    cart_txt = ""
+    if cart:
+        lines = [f"• {it['qty']}x {it['name']} — ${float(it.get('price',0))*int(it.get('qty',0)):,.2f}" for it in cart]
+        cart_txt = "\n" + "\n".join(lines)
+    
+    msg = (
+        f"⚠️ *Cliente necesita un asesor*\n"
+        f"📱 {client_phone}\n"
+        f"❓ Motivo: {reason}\n"
+        f"🛒 Carrito actual:{cart_txt if cart_txt else ' (vacío)'}\n\n"
+        f"Responde directo a ese número."
+    )
+    send_whatsapp_text(wa_api_key, phone_number_id, owner_phone, msg)
+
 # -------------------------
 # Sessions
 # -------------------------
@@ -1478,6 +1495,49 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             "• 'salir' → cancelar"
         )
 
+    # =========================================================
+    # 0.3) ESCALADO A ASESOR
+    # =========================================================
+    escalation_triggers = {
+        "asesor", "asesor humano", "humano", "persona", "agente",
+        "hablar con alguien", "hablar con una persona", "quiero hablar",
+        "necesito ayuda", "ayuda humana",
+    }
+    if any(rt == tnorm or rt in tnorm for rt in escalation_triggers):
+        state = get_quote_state(company_id, wa_from) if wa_from else {}
+        state = state or {}
+        
+        # Buscar owner_phone
+        try:
+            conn = get_conn()
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT owner_phone, wa_api_key, wa_phone_number_id FROM companies WHERE id=%s",
+                (company_id,)
+            )
+            row = cur.fetchone()
+            cur.close()
+            conn.close()
+            
+            if row and row[0]:
+                notify_owner_escalation(
+                    wa_api_key=row[1],
+                    phone_number_id=row[2],
+                    owner_phone=row[0],
+                    client_phone=wa_from,
+                    reason="Cliente solicitó hablar con un asesor",
+                    state=state,
+                )
+        except Exception as e:
+            print("ESCALATION ERROR:", repr(e))
+        
+        return (
+            "Un asesor te contactará pronto 🙏\n\n"
+            "Mientras tanto puedes seguir agregando productos "
+            "o esperar a que te contacten."
+        )
+
+    
     # =========================================================
     # 0.5) SALUDOS
     # =========================================================
