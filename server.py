@@ -2694,6 +2694,61 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             }
 
     # =========================================================
+    # 0.8) PICKS RÁPIDOS — A1, B2, A1 y A2, etc.
+    # =========================================================
+    _quick_picks = _parse_pending_picks(user_text)
+    _state_picks = get_quote_state(company_id, wa_from) if wa_from else {}
+    _state_picks = _state_picks or {}
+    if _quick_picks and _state_picks.get("pending"):
+        # Redirigir al bloque 3.5 directamente
+        state = _state_picks
+        pend = state.get("pending") or []
+        picks = _quick_picks
+        letters = _string.ascii_uppercase
+        letter_to_idx = {ch: i for i, ch in enumerate(letters)}
+        remove_idxs = set()
+
+        for letter, opt in picks:
+            pi = letter_to_idx.get(letter)
+            if pi is None or pi < 0 or pi >= len(pend):
+                continue
+            p = pend[pi]
+            cands = p.get("candidates") or []
+            if not cands or opt < 1 or opt > len(cands):
+                continue
+            chosen = cands[opt - 1]
+            qty = int(p.get("qty") or 0)
+            state = cart_add_item(state, {
+                "sku": chosen.get("sku"),
+                "name": chosen.get("name"),
+                "unit": chosen.get("unit") or "unidad",
+                "price": float(chosen.get("price") or 0.0),
+                "vat_rate": chosen.get("vat_rate"),
+                "qty": qty,
+            })
+            remove_idxs.add(pi)
+
+        new_pending = [p for i, p in enumerate(pend) if i not in remove_idxs]
+        if new_pending:
+            state["pending"] = new_pending
+        else:
+            state.pop("pending", None)
+
+        if wa_from:
+            upsert_quote_state(company_id, wa_from, state)
+
+        msg = cart_render_quote(state) if (state.get("cart") or []) else "✅ Listo."
+        if state.get("pending"):
+            msg += "\n\n" + _render_pending_suggestions(state["pending"])
+        msg += (
+            "\n\n¿Agregamos algo más?\n"
+            "🧭 Comandos:\n"
+            "• 'nueva cotizacion' → empezar de cero\n"
+            "• 'salir' → cancelar"
+        )
+        return msg
+    
+    # =========================================================
     # 1) MULTI-ITEMS + CARRITO
     # =========================================================
     multi = extract_qty_items_robust(user_text)
