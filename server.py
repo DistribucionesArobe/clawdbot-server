@@ -1233,6 +1233,722 @@ async def whatsapp_webhook(request: Request):
 
     return {"ok": True}
 
+def send_whatsapp_list_sections(wa_api_key: str, phone_number_id: str, to: str,
+                                 body_text: str, sections: list, button_label: str = "Ver opciones"):
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "interactive",
+        "interactive": {
+            "type": "list",
+            "body": {"text": body_text},
+            "action": {
+                "button": button_label,
+                "sections": sections,
+            },
+        },
+    }
+    url = f"https://graph.facebook.com/v19.0/{phone_number_id}/messages"
+    headers = {"Authorization": f"Bearer {wa_api_key}", "Content-Type": "application/json"}
+    r = requests.post(url, headers=headers, json=payload, timeout=20)
+    if r.status_code >= 300:
+        raise RuntimeError(f"WA list sections failed {r.status_code}: {r.text[:400]}")
+
+
+def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", is_interactive: bool = False) -> str:
+    if is_interactive:
+        user_text = (user_text or "").strip()
+    else:
+        user_text = (user_text or "").strip().replace('\u201c', '').replace('\u201d', '').replace('"', '')
+    wa_from = (wa_from or "").strip()
+
+    try:
+        usage_info = track_conversation_if_new(company_id, wa_from)
+        if usage_info.get("limit", 0) > 0 and usage_info.get("usage", 0) > usage_info.get("limit", 0):
+            print("WA LIMIT EXCEEDED:", usage_info)
+    except Exception as e:
+        print("WA TRACK ERROR:", repr(e))
+
+    import string as _string
+    from spec_definitions import get_spec_steps, already_has_specs, build_spec_query
+
+    def _search_pricebook_candidates(conn, company_id: str, q: str, limit: int = 5):
+        q = (q or "").strip()
+        if not q:
+            return []
+        q_clean = extract_product_query(q)
+        qn = norm_name(q_clean)
+        tokens = [t for t in qn.split() if len(t) >= 3] or [qn]
+        where_parts = []
+        params = [company_id]
+        for tok in tokens[:6]:
+            where_parts.append("name_norm LIKE %s")
+            params.append(f"%{tok}%")
+        where_sql = " OR ".join(where_parts)
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                f"""
+                SELECT sku, name, unit, price, vat_rate, synonyms
+                FROM pricebook_items
+                WHERE company_id=%s
+                  AND ({where_sql} OR sku ILIKE %s OR name ILIKE %s OR synonyms ILIKE %s)
+                LIMIT 30
+                """,
+                (*params, f"%{q_clean}%", f"%{q_clean}%", f"%{q_clean}%"),
+            )
+            rows = cur.fetchall()
+            items = []
+            for sku, name, unit, price, vat_rate, synonyms in rows:
+                it = {
+                    "sku": sku,
+                    "name": name,
+                    "unit": unit,
+                    "price": float(price) if price is not None else None,
+                    "vat_rate": float(vat_rate) if vat_rate is not None else None,
+                }
+                sn = norm_name(name or "")
+                sku_n = norm_name(sku or "")
+                syn_n = norm_name(synonyms or "")
+                it["_score"] = max(
+                    fuzz.token_set_ratio(qn, sn),
+                    fuzz.token_set_ratio(qn, sku_n) if sku else 0,
+                    fuzz.token_set_ratio(qn, syn_n) if synonyms else 0,
+                )
+                items.append(it)
+            items.sort(key=lambda x: x.get("_score", 0), reverse=True)
+            out = []
+            for it in items[: max(1, int(limit or 5))]:
+                it.pop("_score", None)
+                out.append(it)
+            return out
+        finally:
+            cur.close()
+
+    def _render_pending_suggestions(pending: list):
+        if not pending:
+            return ""
+        letters = _string.ascii_uppercase
+        total_rows = sum(min(len(p.get("candidates") or []), 5) for p in pending[:6])
+        if total_rows > 0 and total_rows <= 10:
+            sections = []
+            for i, p in enumerate(pending[:6]):
+                tag = letters[i]
+                qty = int(p.get("qty") or 0)
+                raw = (p.get("raw") or "").strip()
+                cands = p.get("candidates") or []
+                if not cands:
+                    continue
+                rows = []
+                for j, it in enumerate(cands[:5], start=1):
+                    price = float(it.get("price") or 0.0)
+                    sku = (it.get("sku") or "").strip()
+                    sku_txt = f" ({sku})" if sku else ""
+                    title = f"{it['name']}{sku_txt}"[:24]
+                    description = f"${price:,.2f} / {it.get('unit') or 'unidad'}"
+                    rows.append({
+                        "id": f"pick_{tag}{j}",
+                        "title": title,
+                        "description": description,
+                    })
+                sections.append({
+                    "title": f"({tag}) {qty}x {raw}"[:24],
+                    "rows": rows,
+                })
+            if sections:
+                return {
+                    "type": "list_sections",
+                    "body": "No pude identificar algunos productos. Elige del catálogo:",
+                    "sections": sections,
+                    "button_label": "Ver opciones",
+                }
+        lines = ["No pude identificar algunos productos. Elige del catálogo:"]
+        for i, p in enumerate(pending[:6]):
+            tag = letters[i]
+            qty = int(p.get("qty") or 0)
+            raw = (p.get("raw") or "").strip()
+            cands = p.get("candidates") or []
+            lines.append(f"\n❓ ({tag}) {qty} x {raw}")
+            if not cands:
+                lines.append("   (sin sugerencias) Mándalo más exacto o con SKU.")
+                continue
+            for j, it in enumerate(cands[:5], start=1):
+                unit = it.get("unit") or "unidad"
+                price = float(it.get("price") or 0.0)
+                sku = (it.get("sku") or "").strip()
+                sku_txt = f" (SKU {sku})" if sku else ""
+                lines.append(f"   {tag}{j}) {it['name']}{sku_txt} — ${price:,.2f} / {unit}")
+        lines.append("\n✅ Responde con: A1, B2, C1 (ejemplo).")
+        return "\n".join(lines)
+
+    def _parse_pending_picks(text: str):
+        t = (text or "").upper().replace(" ", "")
+        t = t.replace("PICK_", "")
+        return [(m[0], int(m[1])) for m in re.findall(r"\b([A-Z])(\d+)\b", t)]
+
+    def _is_greeting_like(tnorm: str) -> bool:
+        t = (tnorm or "").strip()
+        if not t:
+            return False
+        if t in {"hola", "buenas", "hey", "holi", "menu", "menú", "ayuda", "inicio"}:
+            return True
+        if t.startswith("hola"):
+            return True
+        if t.startswith("buenos") or t.startswith("buenas"):
+            return True
+        return False
+
+    def _build_reply_with_pending(state: dict):
+        msg = cart_render_quote(state) if (state.get("cart") or []) else ""
+        pending = state.get("pending") or []
+        if pending:
+            pending_render = _render_pending_suggestions(pending)
+            if isinstance(pending_render, dict):
+                if msg:
+                    pending_render["body"] = msg + "\n\n" + pending_render["body"]
+                return pending_render
+            else:
+                msg = (msg + "\n\n" + pending_render) if msg else pending_render
+        msg += (
+            "\n\n¿Agregamos algo más?\n"
+            "🧭 Comandos:\n"
+            "• 'nueva cotizacion' → empezar de cero\n"
+            "• 'salir' → cancelar"
+        )
+        return msg
+
+    # =========================================================
+    # 0) COMANDOS (reset / salir)
+    # =========================================================
+    tnorm = norm_name(user_text).replace("cotización", "cotizacion")
+
+    reset_triggers = {
+        "salir", "cancelar", "cancel", "reset", "reiniciar",
+        "nueva cotizacion", "nuevo", "empezar de nuevo",
+        "borrar", "borrar carrito", "vaciar carrito",
+        "limpiar", "limpiar carrito",
+    }
+
+    if any(rt == tnorm or rt in tnorm for rt in reset_triggers):
+        if wa_from:
+            clear_quote_state(company_id, wa_from)
+        return (
+            "✅ Listo. Empezamos de cero.\n\n"
+            "Mándame tu cotización así:\n"
+            "Ej: 10 cemento, 5 varilla 3/8\n\n"
+            "🧭 Comandos:\n"
+            "• 'nueva cotizacion' → empezar de cero\n"
+            "• 'salir' → cancelar"
+        )
+
+    # =========================================================
+    # 0.25) GRACIAS
+    # =========================================================
+    thanks_triggers = {"gracias", "muchas gracias", "mil gracias", "thx", "thanks"}
+    if tnorm in thanks_triggers:
+        return (
+            "¡Con gusto! 🙌\n"
+            "Si quieres otra cotización, mándame: 10 cemento, 5 varilla 3/8\n\n"
+            "🧭 Comandos:\n"
+            "• 'nueva cotizacion' → empezar de cero\n"
+            "• 'salir' → cancelar"
+        )
+
+    # =========================================================
+    # 0.5) SALUDOS
+    # =========================================================
+    if _is_greeting_like(tnorm):
+        if wa_from:
+            st = get_quote_state(company_id, wa_from) or {}
+            if (st.get("cart") or []) or (st.get("pending") or []):
+                clear_quote_state(company_id, wa_from)
+                return (
+                    "👋 ¡Hola! Empezamos una cotización nueva.\n\n"
+                    "Mándame tu pedido así:\n"
+                    "👉 10 cemento, 5 varilla 3/8\n\n"
+                    "🧭 Comandos:\n"
+                    "• 'nueva cotizacion' → empezar de cero\n"
+                    "• 'salir' → cancelar"
+                )
+        return (
+            "👋 ¡Hola! Puedo cotizarte materiales de construcción y ferretería.\n\n"
+            "Mándame tu pedido así:\n"
+            "👉 10 cemento, 5 varilla 3/8, 2 martillos\n\n"
+            "🧭 Comandos:\n"
+            "• 'nueva cotizacion' → empezar de cero\n"
+            "• 'salir' → cancelar"
+        )
+
+    # =========================================================
+    # 0.75) RESOLVER SPECS PENDIENTES
+    # =========================================================
+    _state_specs = get_quote_state(company_id, wa_from) if wa_from else {}
+    _state_specs = _state_specs or {}
+
+    if _state_specs.get("pending_specs"):
+        ps = _state_specs["pending_specs"]
+        current = ps[0]
+        steps = current["steps"]
+        step_idx = current["step_idx"]
+        current_step = steps[step_idx]
+
+        t_low = user_text.strip().lower()
+        chosen = next(
+            (opt for opt in current_step["options"] if t_low == opt.lower() or opt.lower() in t_low),
+            None
+        )
+
+        if chosen:
+            current["resolved"][current_step["key"]] = chosen
+            current["step_idx"] += 1
+
+            if current["step_idx"] >= len(steps):
+                full_query = build_spec_query(current["raw"], current["resolved"])
+                conn = get_conn()
+                try:
+                    result = smart_search(conn, company_id, full_query, current["qty"])
+                finally:
+                    conn.close()
+
+                ps.pop(0)
+                if ps:
+                    _state_specs["pending_specs"] = ps
+                else:
+                    _state_specs.pop("pending_specs", None)
+
+                if result["status"] == "found":
+                    _state_specs = cart_add_item(_state_specs, {
+                        "sku": result["item"].get("sku"),
+                        "name": result["item"].get("name"),
+                        "unit": result["item"].get("unit") or "unidad",
+                        "price": float(result["item"].get("price") or 0.0),
+                        "vat_rate": result["item"].get("vat_rate"),
+                        "qty": current["qty"],
+                    })
+                else:
+                    pend = _state_specs.get("pending") or []
+                    pend.append({
+                        "qty": current["qty"],
+                        "raw": full_query,
+                        "candidates": result.get("candidates") or [],
+                    })
+                    _state_specs["pending"] = pend
+
+                if wa_from:
+                    upsert_quote_state(company_id, wa_from, _state_specs)
+
+                if _state_specs.get("pending_specs"):
+                    next_p = _state_specs["pending_specs"][0]
+                    next_step = next_p["steps"][next_p["step_idx"]]
+                    return {
+                        "type": "list",
+                        "body": f"✅ Anotado. Ahora el {next_p['raw']} — {next_step['question']}",
+                        "options": next_step["options"],
+                        "button_label": "Ver opciones",
+                    }
+
+                return _build_reply_with_pending(_state_specs)
+
+            else:
+                if wa_from:
+                    upsert_quote_state(company_id, wa_from, _state_specs)
+                next_step = steps[current["step_idx"]]
+                return {
+                    "type": "list",
+                    "body": f"✅ {chosen} ✓  {next_step['question']}",
+                    "options": next_step["options"],
+                    "button_label": "Ver opciones",
+                }
+        else:
+            return {
+                "type": "list",
+                "body": f"Por favor elige una opción 👇\n{current_step['question']}",
+                "options": current_step["options"],
+                "button_label": "Ver opciones",
+            }
+
+    # =========================================================
+    # 0.8) PICKS RÁPIDOS — A1, B2, pick_A1 de list_reply
+    # =========================================================
+    _quick_picks = _parse_pending_picks(user_text)
+    _state_picks = get_quote_state(company_id, wa_from) if wa_from else {}
+    _state_picks = _state_picks or {}
+
+    if _quick_picks and _state_picks.get("pending"):
+        state = _state_picks
+        pend = state.get("pending") or []
+        letters = _string.ascii_uppercase
+        letter_to_idx = {ch: i for i, ch in enumerate(letters)}
+        remove_idxs = set()
+
+        for letter, opt in _quick_picks:
+            pi = letter_to_idx.get(letter)
+            if pi is None or pi < 0 or pi >= len(pend):
+                continue
+            p = pend[pi]
+            cands = p.get("candidates") or []
+            if not cands or opt < 1 or opt > len(cands):
+                continue
+            chosen = cands[opt - 1]
+            qty = int(p.get("qty") or 0)
+            state = cart_add_item(state, {
+                "sku": chosen.get("sku"),
+                "name": chosen.get("name"),
+                "unit": chosen.get("unit") or "unidad",
+                "price": float(chosen.get("price") or 0.0),
+                "vat_rate": chosen.get("vat_rate"),
+                "qty": qty,
+            })
+            remove_idxs.add(pi)
+
+        new_pending = [p for i, p in enumerate(pend) if i not in remove_idxs]
+        if new_pending:
+            state["pending"] = new_pending
+        else:
+            state.pop("pending", None)
+
+        if wa_from:
+            upsert_quote_state(company_id, wa_from, state)
+
+        return _build_reply_with_pending(state)
+
+    # =========================================================
+    # 1) MULTI-ITEMS + CARRITO
+    # =========================================================
+    multi = extract_qty_items_robust(user_text)
+    if multi:
+        conn = get_conn()
+        try:
+            state = get_quote_state(company_id, wa_from) if wa_from else None
+            if not state:
+                state = {}
+            state.pop("pending_specs", None)
+
+            missing = []
+
+            for qty, prod_raw in multi:
+                if not looks_like_product_phrase(prod_raw):
+                    continue
+
+                steps = get_spec_steps(prod_raw)
+                if steps and not already_has_specs(prod_raw, steps):
+                    specs_pending = state.get("pending_specs") or []
+                    specs_pending.append({
+                        "raw": prod_raw,
+                        "qty": qty,
+                        "steps": steps,
+                        "step_idx": 0,
+                        "resolved": {},
+                    })
+                    state["pending_specs"] = specs_pending
+                    continue
+
+                try:
+                    result = smart_search(conn, company_id, prod_raw, qty)
+                except Exception as e:
+                    print("SMART SEARCH ERROR:", repr(e))
+                    result = {"status": "not_found", "item": None, "candidates": []}
+
+                if result["status"] == "found":
+                    state = cart_add_item(state, {
+                        "sku": result["item"].get("sku"),
+                        "name": result["item"].get("name"),
+                        "unit": result["item"].get("unit") or "unidad",
+                        "price": float(result["item"].get("price") or 0.0),
+                        "vat_rate": result["item"].get("vat_rate"),
+                        "qty": qty,
+                    })
+                else:
+                    missing.append({
+                        "qty": qty,
+                        "raw": prod_raw,
+                        "candidates": result["candidates"],
+                    })
+
+            if missing:
+                state["pending"] = missing
+            else:
+                state.pop("pending", None)
+
+            if wa_from:
+                upsert_quote_state(company_id, wa_from, state)
+
+            if state.get("pending_specs"):
+                first = state["pending_specs"][0]
+                first_step = first["steps"][first["step_idx"]]
+                prefix = ""
+                if state.get("cart"):
+                    prefix = cart_render_quote(state) + "\n\n"
+                n_specs = len(state["pending_specs"])
+                intro = (
+                    f"Encontré {n_specs} producto(s) que necesitan especificaciones.\n\n"
+                    if n_specs > 1 else ""
+                )
+                return {
+                    "type": "list",
+                    "body": prefix + intro + first_step["question"],
+                    "options": first_step["options"],
+                    "button_label": "Ver opciones",
+                }
+
+            if not state.get("cart") and not missing:
+                return "No encontré esos productos en el catálogo."
+
+            return _build_reply_with_pending(state)
+
+        finally:
+            conn.close()
+
+    # =========================================================
+    # 2) SINGLE ITEM + CARRITO
+    # =========================================================
+    qty, prod_query = extract_qty_and_product(user_text)
+    if qty and prod_query:
+        steps = get_spec_steps(prod_query)
+        if steps and not already_has_specs(prod_query, steps):
+            state = get_quote_state(company_id, wa_from) if wa_from else {}
+            state = state or {}
+            state["pending_specs"] = [{
+                "raw": prod_query,
+                "qty": qty,
+                "steps": steps,
+                "step_idx": 0,
+                "resolved": {},
+            }]
+            if wa_from:
+                upsert_quote_state(company_id, wa_from, state)
+            return {
+                "type": "list",
+                "body": steps[0]["question"],
+                "options": steps[0]["options"],
+                "button_label": "Ver opciones",
+            }
+
+        conn = get_conn()
+        try:
+            try:
+                result = smart_search(conn, company_id, prod_query, qty)
+            except Exception as e:
+                print("SMART SEARCH ERROR:", repr(e))
+                result = {"status": "not_found", "item": None, "candidates": []}
+
+            if result["status"] == "found":
+                state = get_quote_state(company_id, wa_from) if wa_from else {}
+                state = state or {}
+                state = cart_add_item(state, {
+                    "sku": result["item"].get("sku"),
+                    "name": result["item"].get("name"),
+                    "unit": result["item"].get("unit") or "unidad",
+                    "price": float(result["item"].get("price") or 0.0),
+                    "vat_rate": result["item"].get("vat_rate"),
+                    "qty": qty,
+                })
+                state.pop("pending", None)
+                if wa_from:
+                    upsert_quote_state(company_id, wa_from, state)
+                return _build_reply_with_pending(state)
+
+            elif result["status"] == "ambiguous":
+                pending = [{"qty": qty, "raw": prod_query, "candidates": result["candidates"]}]
+                state = get_quote_state(company_id, wa_from) if wa_from else {}
+                state = state or {}
+                state["pending"] = pending
+                if wa_from:
+                    upsert_quote_state(company_id, wa_from, state)
+                return _build_reply_with_pending(state)
+
+        finally:
+            conn.close()
+
+    # =========================================================
+    # 3) PREGUNTA DE PRECIO
+    # =========================================================
+    if looks_like_price_question(user_text):
+        conn = get_conn()
+        try:
+            items = search_pricebook(conn, company_id, user_text, limit=8)
+        finally:
+            conn.close()
+        if items:
+            lines = []
+            for it in items[:8]:
+                unit = f" / {it['unit']}" if it.get("unit") else ""
+                lines.append(f"- {it['name']}: ${float(it['price']):,.2f}{unit}")
+            return (
+                "Encontré estos precios:\n"
+                + "\n".join(lines)
+                + "\n\nDime cantidades para cotizar (ej: 10 cemento, 5 varilla 3/8).\n\n"
+                "🧭 Comandos:\n"
+                "• 'nueva cotizacion' → empezar de cero\n"
+                "• 'salir' → cancelar"
+            )
+
+    # =========================================================
+    # 3.5) CONTEXTO — picks A1/B2 o aclaraciones
+    # =========================================================
+    state = get_quote_state(company_id, wa_from) if wa_from else None
+    if state and state.get("pending"):
+        pend = state.get("pending") or []
+
+        picks = _parse_pending_picks(user_text)
+        if picks:
+            letters = _string.ascii_uppercase
+            letter_to_idx = {ch: i for i, ch in enumerate(letters)}
+            remove_idxs = set()
+
+            for letter, opt in picks:
+                pi = letter_to_idx.get(letter)
+                if pi is None or pi < 0 or pi >= len(pend):
+                    continue
+                p = pend[pi]
+                cands = p.get("candidates") or []
+                if not cands or opt < 1 or opt > len(cands):
+                    continue
+                chosen = cands[opt - 1]
+                qty = int(p.get("qty") or 0)
+                state = cart_add_item(state, {
+                    "sku": chosen.get("sku"),
+                    "name": chosen.get("name"),
+                    "unit": chosen.get("unit") or "unidad",
+                    "price": float(chosen.get("price") or 0.0),
+                    "vat_rate": chosen.get("vat_rate"),
+                    "qty": qty,
+                })
+                remove_idxs.add(pi)
+
+            new_pending = [p for i, p in enumerate(pend) if i not in remove_idxs]
+            if new_pending:
+                state["pending"] = new_pending
+            else:
+                state.pop("pending", None)
+
+            try:
+                if wa_from:
+                    upsert_quote_state(company_id, wa_from, state)
+            except Exception as e:
+                print("UPSERT STATE ERROR:", repr(e))
+                return "Error guardando cotización. Intenta de nuevo."
+
+            return _build_reply_with_pending(state)
+
+        clarifs_raw = split_clarifications(user_text)
+        clarifs = [c for c in clarifs_raw if c.strip()]
+
+        if clarifs:
+            conn = get_conn()
+            try:
+                still = []
+                for i, p in enumerate(pend):
+                    qty = int(p.get("qty") or 0)
+                    raw = (p.get("raw") or "").strip()
+                    prod_raw = clarifs[i] if i < len(clarifs) else raw
+                    if is_specs_only(prod_raw):
+                        prod_raw = f"{raw} {prod_raw}"
+
+                    try:
+                        result = smart_search(conn, company_id, prod_raw, qty)
+                    except Exception as e:
+                        print("SMART SEARCH ERROR:", repr(e))
+                        result = {"status": "not_found", "item": None, "candidates": []}
+
+                    if result["status"] == "found":
+                        state = cart_add_item(state, {
+                            "sku": result["item"].get("sku"),
+                            "name": result["item"].get("name"),
+                            "unit": result["item"].get("unit") or "unidad",
+                            "price": float(result["item"].get("price") or 0.0),
+                            "vat_rate": result["item"].get("vat_rate"),
+                            "qty": qty,
+                        })
+                    else:
+                        still.append({
+                            "qty": qty,
+                            "raw": prod_raw,
+                            "candidates": result["candidates"],
+                        })
+
+                if still:
+                    state["pending"] = still
+                else:
+                    state.pop("pending", None)
+
+                if wa_from:
+                    upsert_quote_state(company_id, wa_from, state)
+
+                return _build_reply_with_pending(state)
+            finally:
+                conn.close()
+
+        if pend and pend[0].get("candidates"):
+            pending_render = _render_pending_suggestions(pend)
+            if isinstance(pending_render, dict):
+                return pending_render
+            return (
+                pending_render
+                + "\n\n🧭 Comandos:\n"
+                "• 'nueva cotizacion' → empezar de cero\n"
+                "• 'salir' → cancelar"
+            )
+
+        pendientes_txt = "\n".join(
+            [f"- {int(p.get('qty') or 0)} x {(p.get('raw') or '').strip()}" for p in pend[:12]]
+        )
+        return (
+            "👍 Mándame el nombre exacto o SKU de estos productos:\n\n"
+            f"{pendientes_txt}\n\n"
+            "🧭 Comandos:\n"
+            "• 'nueva cotizacion' → empezar de cero\n"
+            "• 'salir' → cancelar"
+        )
+
+    # =========================================================
+    # 4) GUARD — mensaje con números pero sin producto
+    # =========================================================
+    if re.search(r"\b\d+\b", user_text):
+        return (
+            "Veo cantidades pero no encontré esos productos.\n\n"
+            "👉 Escríbelos más exacto o con SKU.\n"
+            "Ejemplo: '10 cemento' o '5 varilla 3/8'.\n\n"
+            "🧭 Comandos:\n"
+            "• 'nueva cotizacion' → empezar de cero\n"
+            "• 'salir' → cancelar"
+        )
+
+    # =========================================================
+    # 4.5) HORARIOS / UBICACIÓN
+    # =========================================================
+    if looks_like_hours_question(user_text):
+        return (
+            "📍 Para horarios y ubicación, dime tu sucursal o ciudad.\n\n"
+            "Si quieres cotizar: mándame ej: 10 cemento, 5 varilla 3/8"
+        )
+
+    # 4.75) Parece producto sin cantidad
+    if looks_like_product_phrase(user_text) and not re.search(r"\b\d+\b", user_text):
+        return (
+            "¿Cuántas piezas necesitas?\n"
+            "Ejemplo: '10 sacos cemento' o '5 varilla 3/8'\n\n"
+            "🧭 Comandos:\n"
+            "• 'nueva cotizacion' → empezar de cero\n"
+            "• 'salir' → cancelar"
+        )
+
+    # =========================================================
+    # 5) OPENAI FALLBACK
+    # =========================================================
+    if not openai_client:
+        return "Estoy en mantenimiento. Intenta más tarde."
+
+    resp = openai_client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": COTIZABOT_SYSTEM_PROMPT},
+            {"role": "user", "content": user_text},
+        ],
+        temperature=0.3,
+    )
+    return resp.choices[0].message.content or "¿Me repites eso?"
+
 
 @app.post("/api/admin/rebuild-embeddings-public")
 def rebuild_embeddings_public(company_id: str = "aa743e3f-1496-491d-99eb-02fcc5a839d5"):
