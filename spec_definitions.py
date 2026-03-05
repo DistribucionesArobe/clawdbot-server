@@ -55,7 +55,8 @@ def already_has_specs(product_raw: str, steps: list) -> bool:
 def build_spec_query(raw: str, resolved: dict) -> str:
     parts = [raw.strip()]
     for v in resolved.values():
-        # Quitar comillas para que el search matchee bien
         clean = v.replace('"', '').replace("'", '').strip()
-        parts.append(clean)
+        # Solo agregar si no está ya en el raw
+        if clean.lower() not in raw.lower():
+            parts.append(clean)
     return " ".join(parts)
