@@ -40,17 +40,12 @@ def get_spec_steps(product_raw: str) -> list:
 
 
 def already_has_specs(product_raw: str, steps: list) -> bool:
-    """
-    True si el texto ya contiene las specs requeridas.
-    Ej: "varilla 1/2" no necesita preguntar diámetro.
-    """
     n = (product_raw or "").lower()
     for step in steps:
-        # Checar si alguna opción del paso ya está en el texto
-        if not any(opt.lower() in n for opt in step["options"]):
+        if not any(opt.lower().replace('"', '').replace("'", '') in n for opt in step["options"]):
             return False
     return True
-
+    
 
 def build_spec_query(raw: str, resolved: dict) -> str:
     parts = [raw.strip()]
