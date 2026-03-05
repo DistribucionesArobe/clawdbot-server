@@ -392,7 +392,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict: 
             second = scored[1][0] if len(scored) > 1 else 0
             gap = top - second
 
-            print(f"ILIKE RANK: query='{user_query}' top='{scored[0][1][1]}' score={top} gap={gap}")
+            print(f"ILIKE SCORED: {[(s, r[1]) for s, r in scored[:3]]}")
 
             # Con calibre, el gap mínimo es más bajo porque el bonus ya discrimina
             min_score = 80 if (q_medida or q_cal) else 85
