@@ -980,6 +980,68 @@ def send_whatsapp_text(wa_api_key: str, phone_number_id: str, to: str, text: str
     if r.status_code >= 300:
         raise RuntimeError(f"WhatsApp send failed {r.status_code}: {r.text[:400]}")
 
+def download_whatsapp_media(image_id: str, wa_api_key: str) -> bytes:
+    """Descarga imagen de WhatsApp dado el media ID."""
+    url_resp = requests.get(
+        f"https://graph.facebook.com/v19.0/{image_id}",
+        headers={"Authorization": f"Bearer {wa_api_key}"},
+        timeout=10,
+    )
+    url_resp.raise_for_status()
+    media_url = url_resp.json()["url"]
+    
+    img_resp = requests.get(
+        media_url,
+        headers={"Authorization": f"Bearer {wa_api_key}"},
+        timeout=15,
+    )
+    img_resp.raise_for_status()
+    return img_resp.content
+
+def extract_text_from_image(image_bytes: bytes) -> str | None:
+    """Usa GPT-4o-mini Vision para extraer lista de productos de una imagen."""
+    if not openai_client:
+        return None
+    try:
+        import base64
+        b64 = base64.b64encode(image_bytes).decode()
+        resp = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{b64}",
+                                "detail": "low",
+                            }
+                        },
+                        {
+                            "type": "text",
+                            "text": (
+                                "Eres asistente de ferretería mexicana. Esta imagen puede ser "
+                                "una lista de materiales manuscrita o impresa. "
+                                "Extrae todos los productos con sus cantidades. "
+                                "Responde SOLO con el texto de la lista, un item por línea, "
+                                "formato: CANTIDAD PRODUCTO. "
+                                "Ejemplo: 10 sacos cemento\n5 varilla 3/8\n2 cubetas pintura\n"
+                                "Si no hay lista de productos, responde exactamente: NO_LIST"
+                            )
+                        }
+                    ]
+                }
+            ],
+            max_tokens=300,
+            temperature=0.1,
+        )
+        result = (resp.choices[0].message.content or "").strip()
+        return None if result == "NO_LIST" else result
+    except Exception as e:
+        print("VISION ERROR:", repr(e))
+        return None
+
 def notify_owner_escalation(wa_api_key: str, phone_number_id: str, owner_phone: str, 
                              client_phone: str, reason: str, state: dict):
     cart = (state or {}).get("cart") or []
@@ -1182,10 +1244,39 @@ async def whatsapp_webhook(request: Request):
     from_phone = msg.get("from")
     msg_type = msg.get("type", "text")
 
-    # 4) Extraer texto (texto normal o interactive)
+    # 4) Extraer texto (texto normal, imagen o interactive)
     text = ""
     if msg_type == "text":
         text = (msg.get("text") or {}).get("body") or ""
+
+    elif msg_type == "image":
+        image_id = (msg.get("image") or {}).get("id")
+        caption = (msg.get("image") or {}).get("caption") or ""
+        if image_id and company.get("wa_api_key"):
+            try:
+                img_bytes = download_whatsapp_media(image_id, company["wa_api_key"])
+                extracted = extract_text_from_image(img_bytes)
+                if extracted:
+                    text = f"{caption}\n{extracted}".strip() if caption else extracted
+                    print("IMAGE EXTRACTED:", text[:200])
+                else:
+                    send_whatsapp_text(
+                        wa_api_key=company["wa_api_key"],
+                        phone_number_id=company["wa_phone_number_id"],
+                        to=from_phone,
+                        text="📷 Vi tu imagen pero no encontré una lista de productos.\n\nMándame el pedido así:\n10 cemento, 5 varilla 3/8",
+                    )
+                    return {"ok": True}
+            except Exception as e:
+                print("IMAGE PROCESSING ERROR:", repr(e))
+                send_whatsapp_text(
+                    wa_api_key=company["wa_api_key"],
+                    phone_number_id=company["wa_phone_number_id"],
+                    to=from_phone,
+                    text="No pude leer la imagen 😔 Intenta enviarla más clara o escribe el pedido.",
+                )
+                return {"ok": True}
+
     elif msg_type == "interactive":
         interactive = msg.get("interactive") or {}
         itype = interactive.get("type")
@@ -1198,11 +1289,7 @@ async def whatsapp_webhook(request: Request):
         elif itype == "button_reply":
             text = (interactive.get("button_reply") or {}).get("title") or ""
     
-    text = (text or "").strip()
-    if not text or not from_phone:
-        return {"ok": True}
 
-    print("WA IN:", {"from": from_phone, "type": msg_type, "text": text})
 
     # 5) Construir respuesta (tu lógica)
     reply = build_reply_for_company(
@@ -1694,6 +1781,8 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
     # 1) MULTI-ITEMS + CARRITO
     # =========================================================
     multi = extract_qty_items_robust(user_text)
+    if not multi:
+        multi = ner_extract_items(user_text)
     if multi:
         conn = get_conn()
         try:
@@ -1701,13 +1790,10 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             if not state:
                 state = {}
             state.pop("pending_specs", None)
-
             missing = []
-
             for qty, prod_raw in multi:
                 if not looks_like_product_phrase(prod_raw):
                     continue
-
                 steps = get_spec_steps(prod_raw)
                 if steps and not already_has_specs(prod_raw, steps):
                     specs_pending = state.get("pending_specs") or []
@@ -1720,13 +1806,11 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                     })
                     state["pending_specs"] = specs_pending
                     continue
-
                 try:
                     result = smart_search(conn, company_id, prod_raw, qty)
                 except Exception as e:
                     print("SMART SEARCH ERROR:", repr(e))
                     result = {"status": "not_found", "item": None, "candidates": []}
-
                 if result["status"] == "found":
                     state = cart_add_item(state, {
                         "sku": result["item"].get("sku"),
@@ -1742,15 +1826,12 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                         "raw": prod_raw,
                         "candidates": result["candidates"],
                     })
-
             if missing:
                 state["pending"] = missing
             else:
                 state.pop("pending", None)
-
             if wa_from:
                 upsert_quote_state(company_id, wa_from, state)
-
             if state.get("pending_specs"):
                 first = state["pending_specs"][0]
                 first_step = first["steps"][first["step_idx"]]
@@ -1768,14 +1849,11 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                     "options": first_step["options"],
                     "button_label": "Ver opciones",
                 }
-
             if not state.get("cart") and not missing:
                 return "No encontré esos productos en el catálogo."
-
             return _build_reply_with_pending(state)
-
         finally:
-            conn.close()
+            conn.close() 
 
     # =========================================================
     # 2) SINGLE ITEM + CARRITO
@@ -3339,6 +3417,38 @@ def search_pricebook(conn, company_id: str, q: str, limit: int = 8):
     finally:
         cur.close()
 
+def ner_extract_items(user_text: str):
+    """
+    GPT-mini extrae qty + producto de mensajes con typos o lenguaje informal.
+    Retorna lista de (qty, producto) o lista vacía si falla.
+    """
+    if not openai_client:
+        return []
+    try:
+        resp = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Eres asistente de ferretería mexicana. Extrae productos y cantidades "
+                        "de mensajes con posibles errores ortográficos o lenguaje informal. "
+                        "Responde SOLO JSON sin explicación: "
+                        '[{"qty": 10, "product": "cemento"}, {"qty": 5, "product": "varilla 3/8"}] '
+                        "Si no hay productos claros, responde: []"
+                    )
+                },
+                {"role": "user", "content": user_text},
+            ],
+            temperature=0.1,
+            max_tokens=200,
+        )
+        raw = (resp.choices[0].message.content or "[]").replace("```json", "").replace("```", "").strip()
+        parsed = json.loads(raw)
+        return [(int(it["qty"]), str(it["product"]).strip()) for it in parsed if it.get("qty") and it.get("product")]
+    except Exception as e:
+        print("NER ERROR:", repr(e))
+        return []
 
 def extract_qty_items_robust(text: str):
     t = (text or "").strip()
