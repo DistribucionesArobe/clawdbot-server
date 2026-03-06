@@ -29,13 +29,22 @@ def build_product_text(name: str, sku: str = "", unit: str = "", synonyms: str =
 
 def build_query_text(user_input: str) -> str:
     t = (user_input or "").lower().strip()
-    noise = r"\b(cotiza|cotizame|dame|quiero|necesito|por favor|porfa|pls|precio|precios)\b"
-    t = re.sub(noise, " ", t)
+    
+    # Quitar ruido de intención
+    noise_intent = r"\b(cotiza|cotizame|dame|quiero|necesito|por favor|porfa|pls|precio|precios)\b"
+    t = re.sub(noise_intent, " ", t)
+    
+    # Quitar unidades/presentaciones — no describen el producto, solo el empaque
+    noise_units = r"\b(cubeta|cubetas|bulto|bultos|bolsa|bolsas|rollo|rollos|pieza|piezas|metro|metros|kilo|kilos|kilogramo|kilogramos|litro|litros|par|pares|juego|juegos|caja|cajas|saco|sacos|bote|botes|lata|latas|tubo|tubos|tira|tiras|hoja|hojas)\b"
+    t = re.sub(noise_units, " ", t)
+    
+    # Quitar números sueltos (cantidades)
+    t = re.sub(r"\b\d+\b", " ", t)
+    
     t = re.sub(r"\s+", " ", t).strip()
     if not t:
         t = (user_input or "").lower().strip()
     return t
-
 
 def get_embedding(text: str) -> list:
     if not openai_client:
