@@ -444,9 +444,12 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict: 
         scored.sort(key=lambda x: x[0], reverse=True)
 
         if len(scored) == 1:
-            print(f"FUZZY UNIQUE: query='{user_query}' match='{scored[0][1]['name']}' score={scored[0][0]}")
-            return {"status": "found", "item": scored[0][1], "candidates": []}
-
+            if scored[0][0] >= 92:
+                print(f"FUZZY UNIQUE: query='{user_query}' match='{scored[0][1]['name']}' score={scored[0][0]}")
+                return {"status": "found", "item": scored[0][1], "candidates": []}
+            else:
+                print(f"FUZZY UNIQUE LOW SCORE: query='{user_query}' match='{scored[0][1]['name']}' score={scored[0][0]} → semántico")
+     
         if len(scored) > 1:
             top_score = scored[0][0]
             second_score = scored[1][0]
