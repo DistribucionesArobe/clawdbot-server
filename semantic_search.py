@@ -490,17 +490,19 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict: 
             else:
                 print(f"FUZZY UNIQUE LOW SCORE: query='{user_query}' match='{scored[0][1]['name']}' score={scored[0][0]} → semántico")
 
+        
         if len(scored) > 1:
             top_score = scored[0][0]
             second_score = scored[1][0]
             gap = top_score - second_score
-            min_gap = 15 if (q_medida or q_cal) else 10
-            if top_score >= 95 and gap >= min_gap:
+            min_gap = 10 if (q_medida or q_cal) else 10
+            min_score = 85 if (q_medida or q_cal) else 95
+            if top_score >= min_score and gap >= min_gap:
                 print(f"FUZZY CLEAR WIN: query='{user_query}' match='{scored[0][1]['name']}' score={top_score}")
                 return {"status": "found", "item": scored[0][1], "candidates": []}
             print(f"FUZZY AMBIGUOUS: query='{user_query}' found={len(scored)}")
             return {"status": "ambiguous", "item": None, "candidates": [s[1] for s in scored[:5]]}
-        
+
         # =========================================================
         # PASO 3: Semántico
         # =========================================================
