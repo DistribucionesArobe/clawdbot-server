@@ -3603,6 +3603,9 @@ async def twilio_webhook(
     To: str = Form(...),
     Body: str = Form(default=""),
     MessageSid: str = Form(default=""),
+    NumMedia: str = Form(default="0"),
+    MediaUrl0: str = Form(default=""),
+    MediaContentType0: str = Form(default=""),
 ):
     From = normalize_wa(From)
     To = normalize_wa(To)
@@ -3625,6 +3628,36 @@ async def twilio_webhook(
 
     try:
         print("TWILIO IN:", {"from": From, "to": To, "body": Body})
+
+        # Manejo de imagen (Twilio)
+        if not Body and int(NumMedia or 0) > 0 and MediaUrl0:
+            if "image" in (MediaContentType0 or ""):
+                try:
+                    twilio_sid = (os.getenv("TWILIO_ACCOUNT_SID") or "").strip()
+                    twilio_token = (os.getenv("TWILIO_AUTH_TOKEN") or "").strip()
+                    img_resp = requests.get(
+                        MediaUrl0,
+                        auth=(twilio_sid, twilio_token),
+                        timeout=15,
+                    )
+                    img_resp.raise_for_status()
+                    extracted = extract_text_from_image(img_resp.content)
+                    if extracted:
+                        Body = extracted
+                        print("TWILIO IMAGE EXTRACTED:", Body[:200])
+                    else:
+                        twilio_send_whatsapp(
+                            to_user_whatsapp=From,
+                            text="📷 Vi tu imagen pero no encontré una lista de productos.\n\nMándame el pedido así:\n10 cemento, 5 varilla 3/8",
+                        )
+                        return TWIML_OK
+                except Exception as e:
+                    print("TWILIO IMAGE ERROR:", repr(e))
+                    twilio_send_whatsapp(
+                        to_user_whatsapp=From,
+                        text="No pude leer la imagen 😔 Intenta enviarla más clara o escribe el pedido.",
+                    )
+                    return TWIML_OK
 
         if not Body:
             twilio_send_whatsapp(
@@ -3662,4 +3695,3 @@ async def twilio_webhook(
         except Exception:
             pass
         return TWIML_OK
-
