@@ -330,7 +330,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict: 
             if m_med:
                 medida = m_med.group(1)
             return medida, cal
-
+    
         def _spec_bonus(item_name, medida, cal):
             n = item_name.lower()
             bonus = 0
@@ -338,8 +338,13 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict: 
                 bonus += 30
             if cal and (_re.search(rf"\bcal\s*{cal}\b", n)):
                 bonus += 50
+            # Bonus por tokens únicos de la query que aparecen en el nombre
+            q_tokens = [t for t in q.split() if len(t) >= 4]
+            for tok in q_tokens:
+                if tok in n:
+                    bonus += 15
             return bonus
-
+        
         def _make_item(r):
             return {
                 "sku": r[0], "name": r[1], "unit": r[2],
