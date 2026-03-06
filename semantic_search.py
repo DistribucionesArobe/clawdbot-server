@@ -419,19 +419,47 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict: 
                     "candidates": [_make_item(r) for _, r in scored[:5]]}
 
         # =========================================================
-        # PASO 2: Fuzzy con sinónimos
+        # PASO 2: tsvector (GIN index) + fuzzy sobre candidatos
         # =========================================================
+        # Construir tsquery desde tokens de la query
+        _tokens = [t for t in q.split() if len(t) >= 3]
+        _tsquery = " | ".join(_tokens) if _tokens else q  # OR entre tokens
+
         cur2 = conn.cursor()
         try:
             cur2.execute(
                 """
                 SELECT sku, name, unit, price, vat_rate, synonyms
                 FROM pricebook_items
-                WHERE company_id = %s AND embedding IS NOT NULL
+                WHERE company_id = %s
+                  AND (
+                      search_vector @@ to_tsquery('spanish', %s)
+                      OR name ILIKE %s
+                      OR synonyms ILIKE %s
+                  )
+                LIMIT 30
                 """,
-                (company_id,),
+                (company_id, _tsquery, f"%{q}%", f"%{q}%"),
             )
             rows = cur2.fetchall()
+        except Exception as e:
+            # Fallback si tsquery falla por caracteres especiales (ej: "3/8")
+            print(f"TSVECTOR FALLBACK: {repr(e)}")
+            cur2_b = conn.cursor()
+            try:
+                cur2_b.execute(
+                    """
+                    SELECT sku, name, unit, price, vat_rate, synonyms
+                    FROM pricebook_items
+                    WHERE company_id = %s
+                      AND (name ILIKE %s OR synonyms ILIKE %s)
+                    LIMIT 30
+                    """,
+                    (company_id, f"%{q}%", f"%{q}%"),
+                )
+                rows = cur2_b.fetchall()
+            finally:
+                cur2_b.close()
         finally:
             cur2.close()
 
@@ -461,7 +489,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict: 
                 return {"status": "found", "item": scored[0][1], "candidates": []}
             else:
                 print(f"FUZZY UNIQUE LOW SCORE: query='{user_query}' match='{scored[0][1]['name']}' score={scored[0][0]} → semántico")
-     
+
         if len(scored) > 1:
             top_score = scored[0][0]
             second_score = scored[1][0]
@@ -472,7 +500,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict: 
                 return {"status": "found", "item": scored[0][1], "candidates": []}
             print(f"FUZZY AMBIGUOUS: query='{user_query}' found={len(scored)}")
             return {"status": "ambiguous", "item": None, "candidates": [s[1] for s in scored[:5]]}
-
+        
         # =========================================================
         # PASO 3: Semántico
         # =========================================================
