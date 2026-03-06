@@ -201,8 +201,8 @@ def semantic_search_candidates(conn, company_id: str, user_query: str,
         for r in rows
     ]
     print(f"SEMANTIC CANDIDATES: query='{user_query}' found={len(candidates)}")
+    print(f"SEMANTIC CANDS DETAIL: {[(c['name'], round(c['similarity'],3)) for c in candidates]}")
     return candidates
-
 
 def fuzzy_search_best(conn, company_id: str, user_query: str, threshold: int = 95) -> Optional[dict]:
     from rapidfuzz import fuzz
