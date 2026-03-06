@@ -1861,7 +1861,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 "• 'salir' → cancelar"
             )
 
-    # =========================================================
+# =========================================================
     # 3.5) CONTEXTO — picks A1/B2 o aclaraciones
     # =========================================================
     state = get_quote_state(company_id, wa_from) if wa_from else None
@@ -1939,13 +1939,51 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                             "qty": qty,
                         })
                     else:
+                        attempts = int(p.get("clarification_attempts") or 0) + 1
                         still.append({
                             "qty": qty,
                             "raw": prod_raw,
                             "candidates": result["candidates"],
+                            "clarification_attempts": attempts,
                         })
 
                 if still:
+                    max_attempts = max(int(p.get("clarification_attempts") or 0) for p in still)
+                    if max_attempts >= 2:
+                        # Escalar a asesor automáticamente
+                        try:
+                            conn2 = get_conn()
+                            cur2 = conn2.cursor()
+                            cur2.execute(
+                                "SELECT owner_phone, wa_api_key, wa_phone_number_id FROM companies WHERE id=%s",
+                                (company_id,)
+                            )
+                            row2 = cur2.fetchone()
+                            cur2.close()
+                            conn2.close()
+                            if row2 and row2[0]:
+                                productos_txt = ", ".join([p["raw"] for p in still])
+                                notify_owner_escalation(
+                                    wa_api_key=row2[1],
+                                    phone_number_id=row2[2],
+                                    owner_phone=row2[0],
+                                    client_phone=wa_from,
+                                    reason=f"Producto no encontrado después de 2 intentos: {productos_txt}",
+                                    state=state,
+                                )
+                        except Exception as e:
+                            print("AUTO ESCALATION ERROR:", repr(e))
+
+                        state.pop("pending", None)
+                        if wa_from:
+                            upsert_quote_state(company_id, wa_from, state)
+                        cart_txt = cart_render_quote(state) + "\n\n" if state.get("cart") else ""
+                        return (
+                            f"{cart_txt}"
+                            "No encontré esos productos en el catálogo 😔\n\n"
+                            "Un asesor te contactará pronto para ayudarte 🙏"
+                        )
+
                     state["pending"] = still
                 else:
                     state.pop("pending", None)
@@ -1978,7 +2016,6 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             "• 'nueva cotizacion' → empezar de cero\n"
             "• 'salir' → cancelar"
         )
-
     # =========================================================
     # 4) GUARD — mensaje con números pero sin producto
     # =========================================================
