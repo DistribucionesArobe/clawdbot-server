@@ -284,7 +284,6 @@ def resolve_global_synonym(conn, q: str) -> str:
     finally:
         cur.close()
 
-
 def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict:  # noqa
     try:
         from rapidfuzz import fuzz
@@ -293,8 +292,6 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict: 
         q = user_query.lower().strip()
         q = build_query_text(q)
 
-        # Limpiar stopwords
-        
         # Limpiar stopwords
         _stopwords = {"para", "de", "del", "la", "el", "un", "una", "con", "sin", "los", "las"}
         q_tokens = [t for t in q.split() if t not in _stopwords]
@@ -330,7 +327,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict: 
             if m_med:
                 medida = m_med.group(1)
             return medida, cal
-    
+
         def _spec_bonus(item_name, medida, cal):
             n = item_name.lower()
             bonus = 0
@@ -344,7 +341,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict: 
                 if tok in n:
                     bonus += 15
             return bonus
-        
+
         def _make_item(r):
             return {
                 "sku": r[0], "name": r[1], "unit": r[2],
@@ -392,7 +389,6 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict: 
         pool_rows = _name_search(q)
         if not pool_rows and q.endswith("s") and len(q) > 3:
             pool_rows = _name_search(q[:-1])
-        # Si la query tiene medida, buscar también por medida sola
         if not pool_rows and q_medida:
             pool_rows = _name_search(q_medida)
 
@@ -411,7 +407,6 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict: 
 
             print(f"ILIKE SCORED: {[(s, r[1]) for s, r in scored[:3]]}")
 
-            # Con calibre, el gap mínimo es más bajo porque el bonus ya discrimina
             min_score = 80 if (q_medida or q_cal) else 85
             min_gap = 15 if (q_medida or q_cal) else 8
 
@@ -426,9 +421,8 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict: 
         # =========================================================
         # PASO 2: tsvector (GIN index) + fuzzy sobre candidatos
         # =========================================================
-        # Construir tsquery desde tokens de la query
         _tokens = [t for t in q.split() if len(t) >= 3]
-        _tsquery = " | ".join(_tokens) if _tokens else q  # OR entre tokens
+        _tsquery = " | ".join(_tokens) if _tokens else q
 
         cur2 = conn.cursor()
         try:
@@ -448,7 +442,6 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict: 
             )
             rows = cur2.fetchall()
         except Exception as e:
-            # Fallback si tsquery falla por caracteres especiales (ej: "3/8")
             print(f"TSVECTOR FALLBACK: {repr(e)}")
             cur2_b = conn.cursor()
             try:
@@ -477,6 +470,10 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict: 
                 max(fuzz.token_set_ratio(q, t), fuzz.partial_ratio(q, t))
                 for t in all_terms
             )
+            # Si el score viene principalmente del sinónimo y no del nombre, penalizar
+            name_score = max(fuzz.token_set_ratio(q, name), fuzz.partial_ratio(q, name))
+            if name_score < base - 20:
+                base = name_score
             bonus = _spec_bonus(r[1], q_medida, q_cal)
             total = base + bonus
             if total >= 80:
@@ -495,7 +492,6 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict: 
             else:
                 print(f"FUZZY UNIQUE LOW SCORE: query='{user_query}' match='{scored[0][1]['name']}' score={scored[0][0]} → semántico")
 
-        
         if len(scored) > 1:
             top_score = scored[0][0]
             second_score = scored[1][0]
