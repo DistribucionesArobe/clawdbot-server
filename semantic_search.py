@@ -291,7 +291,10 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict: 
         import re as _re
 
         q = user_query.lower().strip()
+        q = build_query_text(q)
 
+        # Limpiar stopwords
+        
         # Limpiar stopwords
         _stopwords = {"para", "de", "del", "la", "el", "un", "una", "con", "sin", "los", "las"}
         q_tokens = [t for t in q.split() if t not in _stopwords]
