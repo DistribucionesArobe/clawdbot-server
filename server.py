@@ -3676,10 +3676,15 @@ async def twilio_webhook(
             )
             return TWIML_OK
 
-        reply_text = build_reply_for_company(company["company_id"], Body, wa_from=From)
-        reply_text = (reply_text or "").strip() or "¿Me repites eso?"
-        print("REPLY TEXT:", repr(reply_text))
 
+        reply = build_reply_for_company(company["company_id"], Body, wa_from=From)
+        if isinstance(reply, dict):
+            # Twilio no soporta listas interactivas, convertir a texto plano
+            reply_text = (reply.get("body") or "").strip() or "¿Me repites eso?"
+        else:
+            reply_text = (reply or "").strip() or "¿Me repites eso?"
+
+        
         twilio_send_whatsapp(to_user_whatsapp=From, text=reply_text)
         print("WHATSAPP ENVIADO OK")
         return TWIML_OK
