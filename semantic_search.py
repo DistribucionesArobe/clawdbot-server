@@ -300,6 +300,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict: 
         # =========================================================
         # HELPERS
         # =========================================================
+
         def _name_search(term):
             c = conn.cursor()
             try:
@@ -307,7 +308,8 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict: 
                     """
                     SELECT sku, name, unit, price, vat_rate
                     FROM pricebook_items
-                    WHERE company_id = %s AND name ILIKE %s
+                    WHERE company_id = %s
+                    AND unaccent(lower(name)) ILIKE unaccent(lower(%s))
                     LIMIT 10
                     """,
                     (company_id, f"%{term}%"),
@@ -433,8 +435,8 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict: 
                 WHERE company_id = %s
                   AND (
                       search_vector @@ to_tsquery('spanish', %s)
-                      OR name ILIKE %s
-                      OR synonyms ILIKE %s
+                      OR unaccent(lower(name)) ILIKE unaccent(lower(%s))
+                      OR unaccent(lower(synonyms)) ILIKE unaccent(lower(%s))
                   )
                 LIMIT 30
                 """,
@@ -450,7 +452,10 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict: 
                     SELECT sku, name, unit, price, vat_rate, synonyms
                     FROM pricebook_items
                     WHERE company_id = %s
-                      AND (name ILIKE %s OR synonyms ILIKE %s)
+                      AND (
+                          unaccent(lower(name)) ILIKE unaccent(lower(%s))
+                          OR unaccent(lower(synonyms)) ILIKE unaccent(lower(%s))
+                      )
                     LIMIT 30
                     """,
                     (company_id, f"%{q}%", f"%{q}%"),
