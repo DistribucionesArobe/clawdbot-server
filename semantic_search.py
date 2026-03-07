@@ -381,12 +381,12 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict: 
             print(f"SYNONYM DIRECT HIT: query='{user_query}' match='{syn_rows[0][1]}'")
             return {"status": "found", "item": _make_item(syn_rows[0]), "candidates": []}
         elif len(syn_rows) > 1:
-            # Verificar si la query coincide directamente con algún nombre — si sí, ignorar sinónimos
+            # Si la query coincide directamente con algún nombre, ignorar sinónimos y pasar al ILIKE
             name_matches = [r for r in syn_rows if q in (r[1] or "").lower()]
             if not name_matches:
                 print(f"SYNONYM AMBIGUOUS: query='{user_query}' found={len(syn_rows)}")
                 return {"status": "ambiguous", "item": None, "candidates": [_make_item(r) for r in syn_rows]}
- 
+        
         # =========================================================
         # PASO 1: ILIKE + ranking con bonus de specs (medida + calibre)
         # =========================================================
