@@ -3725,3 +3725,9 @@ async def twilio_webhook(
         traceback.print_exc()
         try:
             twilio_send_whatsapp(
+                to_user_whatsapp=From,
+                text="Error interno. Intenta de nuevo en 1 minuto.",
+            )
+        except Exception:
+            pass
+        return TWIML_OK
