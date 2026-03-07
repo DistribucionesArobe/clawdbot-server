@@ -1021,13 +1021,17 @@ def extract_text_from_image(image_bytes: bytes) -> str | None:
                         {
                             "type": "text",
                             "text": (
-                                "Eres asistente de ferretería mexicana. Esta imagen puede ser "
-                                "una lista de materiales manuscrita o impresa. "
-                                "Extrae todos los productos con sus cantidades. "
-                                "Responde SOLO con el texto de la lista, un item por línea, "
-                                "formato: CANTIDAD PRODUCTO. "
-                                "Ejemplo: 10 sacos cemento\n5 varilla 3/8\n2 cubetas pintura\n"
-                                "Si no hay lista de productos, responde exactamente: NO_LIST"
+                                "Eres asistente de ferretería mexicana. Esta imagen es una lista "
+                                "de materiales manuscrita. Extrae SOLO los productos con sus cantidades. "
+                                "Formato estricto: CANTIDAD PRODUCTO, un item por línea. "
+                                "Productos comunes: poste, tablaroca, cemento, varilla, block, "
+                                "malla, perfacinta, redimix, canal, tornillo, clavo, tubo. "
+                                "Si una palabra parece un producto de ferretería con error ortográfico, corrígela. "
+                                "Ejemplo: 'paste' → 'poste', 'tablroca' → 'tablaroca'. "
+                                "Ignora palabras sueltas que no sean productos (Menu, Total, Fecha, etc). "
+                                "Si un renglón existe pero no puedes leerlo claramente, escribe: 1 ???. "
+                                "Ejemplo de salida:\n10 sacos cemento\n5 varilla 3/8\n1 ???\n2 cubetas pintura\n"
+                                "Si no hay lista de productos en absoluto, responde exactamente: NO_LIST"
                             )
                         }
                     ]
@@ -1792,68 +1796,75 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             state.pop("pending_specs", None)
             missing = []
             for qty, prod_raw in multi:
-                if not looks_like_product_phrase(prod_raw):
-                    continue
-                steps = get_spec_steps(prod_raw)
-                if steps and not already_has_specs(prod_raw, steps):
-                    specs_pending = state.get("pending_specs") or []
-                    specs_pending.append({
-                        "raw": prod_raw,
-                        "qty": qty,
-                        "steps": steps,
-                        "step_idx": 0,
-                        "resolved": {},
-                    })
-                    state["pending_specs"] = specs_pending
-                    continue
-                try:
-                    result = smart_search(conn, company_id, prod_raw, qty)
-                except Exception as e:
-                    print("SMART SEARCH ERROR:", repr(e))
-                    result = {"status": "not_found", "item": None, "candidates": []}
-                if result["status"] == "found":
-                    state = cart_add_item(state, {
-                        "sku": result["item"].get("sku"),
-                        "name": result["item"].get("name"),
-                        "unit": result["item"].get("unit") or "unidad",
-                        "price": float(result["item"].get("price") or 0.0),
-                        "vat_rate": result["item"].get("vat_rate"),
-                        "qty": qty,
-                    })
+                    if not looks_like_product_phrase(prod_raw):
+                        continue
+                    if prod_raw.strip() == "???":
+                        missing.append({
+                            "qty": qty,
+                            "raw": "producto ilegible",
+                            "candidates": [],
+                        })
+                        continue
+                    steps = get_spec_steps(prod_raw)
+                    if steps and not already_has_specs(prod_raw, steps):
+                        specs_pending = state.get("pending_specs") or []
+                        specs_pending.append({
+                            "raw": prod_raw,
+                            "qty": qty,
+                            "steps": steps,
+                            "step_idx": 0,
+                            "resolved": {},
+                        })
+                        state["pending_specs"] = specs_pending
+                        continue
+                    try:
+                        result = smart_search(conn, company_id, prod_raw, qty)
+                    except Exception as e:
+                        print("SMART SEARCH ERROR:", repr(e))
+                        result = {"status": "not_found", "item": None, "candidates": []}
+                    if result["status"] == "found":
+                        state = cart_add_item(state, {
+                            "sku": result["item"].get("sku"),
+                            "name": result["item"].get("name"),
+                            "unit": result["item"].get("unit") or "unidad",
+                            "price": float(result["item"].get("price") or 0.0),
+                            "vat_rate": result["item"].get("vat_rate"),
+                            "qty": qty,
+                        })
+                    else:
+                        missing.append({
+                            "qty": qty,
+                            "raw": prod_raw,
+                            "candidates": result["candidates"],
+                        })
+                if missing:
+                    state["pending"] = missing
                 else:
-                    missing.append({
-                        "qty": qty,
-                        "raw": prod_raw,
-                        "candidates": result["candidates"],
-                    })
-            if missing:
-                state["pending"] = missing
-            else:
-                state.pop("pending", None)
-            if wa_from:
-                upsert_quote_state(company_id, wa_from, state)
-            if state.get("pending_specs"):
-                first = state["pending_specs"][0]
-                first_step = first["steps"][first["step_idx"]]
-                prefix = ""
-                if state.get("cart"):
-                    prefix = cart_render_quote(state) + "\n\n"
-                n_specs = len(state["pending_specs"])
-                intro = (
-                    f"Encontré {n_specs} producto(s) que necesitan especificaciones.\n\n"
-                    if n_specs > 1 else ""
-                )
-                return {
-                    "type": "list",
-                    "body": prefix + intro + first_step["question"],
-                    "options": first_step["options"],
-                    "button_label": "Ver opciones",
-                }
-            if not state.get("cart") and not missing:
-                return "No encontré esos productos en el catálogo."
-            return _build_reply_with_pending(state)
+                    state.pop("pending", None)
+                if wa_from:
+                    upsert_quote_state(company_id, wa_from, state)
+                if state.get("pending_specs"):
+                    first = state["pending_specs"][0]
+                    first_step = first["steps"][first["step_idx"]]
+                    prefix = ""
+                    if state.get("cart"):
+                        prefix = cart_render_quote(state) + "\n\n"
+                    n_specs = len(state["pending_specs"])
+                    intro = (
+                        f"Encontré {n_specs} producto(s) que necesitan especificaciones.\n\n"
+                        if n_specs > 1 else ""
+                    )
+                    return {
+                        "type": "list",
+                        "body": prefix + intro + first_step["question"],
+                        "options": first_step["options"],
+                        "button_label": "Ver opciones",
+                    }
+                if not state.get("cart") and not missing:
+                    return "No encontré esos productos en el catálogo."
+                return _build_reply_with_pending(state)
         finally:
-            conn.close() 
+            conn.close()
 
     # =========================================================
     # 2) SINGLE ITEM + CARRITO
