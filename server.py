@@ -3597,6 +3597,7 @@ async def chat(req: ChatRequest, authorization: str = Header(default="")):
 
 _processed_sids: set = set()
 
+
 @app.post("/webhook/twilio")
 async def twilio_webhook(
     From: str = Form(...),
@@ -3677,46 +3678,45 @@ async def twilio_webhook(
 
         reply = build_reply_for_company(company["company_id"], Body, wa_from=From)
 
+        def _sections_to_text(sections: list) -> str:
+            lines = []
+            for section in (sections or []):
+                title = (section.get("title") or "").strip()
+                if title:
+                    lines.append(f"\n{title}")
+                for row in (section.get("rows") or []):
+                    row_id = (row.get("id") or "").upper().replace("PICK_", "")
+                    row_title = (row.get("title") or "").strip()
+                    row_desc = (row.get("description") or "").strip()
+                    lines.append(f"  {row_id}) {row_title} — {row_desc}")
+            return "\n".join(lines)
+
         if isinstance(reply, dict):
             reply_type = reply.get("type", "")
 
             if reply_type == "text_then_list_sections":
-                # Texto de carrito + secciones de pendientes
-                lines = [(reply.get("text") or ""), "", (reply.get("body") or "")]
-                for section in (reply.get("sections") or []):
-                    title = section.get("title", "")
-                    if title:
-                        lines.append(f"\n{title}")
-                    for row in (section.get("rows") or []):
-                        row_id = (row.get("id") or "").upper().replace("PICK_", "")
-                        row_title = row.get("title", "")
-                        row_desc = row.get("description", "")
-                        lines.append(f"  {row_id}) {row_title} — {row_desc}")
-                reply_text = "\n".join(lines)
+                cart_text = (reply.get("text") or "").strip()
+                if cart_text:
+                    twilio_send_whatsapp(to_user_whatsapp=From, text=cart_text)
+                opciones = (reply.get("body") or "") + _sections_to_text(reply.get("sections") or [])
+                opciones += "\n\n✅ Responde con el código, ej: A1, B2"
+                twilio_send_whatsapp(to_user_whatsapp=From, text=opciones.strip())
 
             elif reply_type in ("list_sections", "list"):
-                # Solo secciones de pendientes
                 lines = [(reply.get("body") or "")]
-                for section in (reply.get("sections") or []):
-                    title = section.get("title", "")
-                    if title:
-                        lines.append(f"\n{title}")
-                    for row in (section.get("rows") or []):
-                        row_id = (row.get("id") or "").upper().replace("PICK_", "")
-                        row_title = row.get("title", "")
-                        row_desc = row.get("description", "")
-                        lines.append(f"  {row_id}) {row_title} — {row_desc}")
+                lines.append(_sections_to_text(reply.get("sections") or reply.get("options") or []))
                 lines.append("\n✅ Responde con el código, ej: A1, B2")
-                reply_text = "\n".join(lines)
+                reply_text = "\n".join(lines).strip()
+                twilio_send_whatsapp(to_user_whatsapp=From, text=reply_text)
 
             else:
-                reply_text = (reply.get("body") or "")
+                reply_text = (reply.get("body") or "").strip() or "¿Me repites eso?"
+                twilio_send_whatsapp(to_user_whatsapp=From, text=reply_text)
 
-            reply_text = reply_text.strip() or "¿Me repites eso?"
         else:
             reply_text = (reply or "").strip() or "¿Me repites eso?"
+            twilio_send_whatsapp(to_user_whatsapp=From, text=reply_text)
 
-        twilio_send_whatsapp(to_user_whatsapp=From, text=reply_text)
         print("WHATSAPP ENVIADO OK")
         return TWIML_OK
 
