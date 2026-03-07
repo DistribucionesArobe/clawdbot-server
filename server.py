@@ -3616,7 +3616,6 @@ async def twilio_webhook(
         media_type="text/xml",
     )
 
-    # Deduplicación — ignora si ya procesamos este MessageSid
     if MessageSid:
         cache_key = f"msid:{MessageSid}"
         if cache_key in _processed_sids:
@@ -3629,7 +3628,7 @@ async def twilio_webhook(
     try:
         print("TWILIO IN:", {"from": From, "to": To, "body": Body})
 
-        # Manejo de imagen (Twilio)
+        # Manejo de imagen
         if not Body and int(NumMedia or 0) > 0 and MediaUrl0:
             if "image" in (MediaContentType0 or ""):
                 try:
@@ -3677,16 +3676,46 @@ async def twilio_webhook(
             return TWIML_OK
 
         reply = build_reply_for_company(company["company_id"], Body, wa_from=From)
+
         if isinstance(reply, dict):
             reply_type = reply.get("type", "")
+
             if reply_type == "text_then_list_sections":
-                reply_text = (reply.get("text") or "") + "\n\n" + (reply.get("body") or "")
+                # Texto de carrito + secciones de pendientes
+                lines = [(reply.get("text") or ""), "", (reply.get("body") or "")]
+                for section in (reply.get("sections") or []):
+                    title = section.get("title", "")
+                    if title:
+                        lines.append(f"\n{title}")
+                    for row in (section.get("rows") or []):
+                        row_id = (row.get("id") or "").upper().replace("PICK_", "")
+                        row_title = row.get("title", "")
+                        row_desc = row.get("description", "")
+                        lines.append(f"  {row_id}) {row_title} — {row_desc}")
+                reply_text = "\n".join(lines)
+
+            elif reply_type in ("list_sections", "list"):
+                # Solo secciones de pendientes
+                lines = [(reply.get("body") or "")]
+                for section in (reply.get("sections") or []):
+                    title = section.get("title", "")
+                    if title:
+                        lines.append(f"\n{title}")
+                    for row in (section.get("rows") or []):
+                        row_id = (row.get("id") or "").upper().replace("PICK_", "")
+                        row_title = row.get("title", "")
+                        row_desc = row.get("description", "")
+                        lines.append(f"  {row_id}) {row_title} — {row_desc}")
+                lines.append("\n✅ Responde con el código, ej: A1, B2")
+                reply_text = "\n".join(lines)
+
             else:
                 reply_text = (reply.get("body") or "")
+
             reply_text = reply_text.strip() or "¿Me repites eso?"
         else:
             reply_text = (reply or "").strip() or "¿Me repites eso?"
-        
+
         twilio_send_whatsapp(to_user_whatsapp=From, text=reply_text)
         print("WHATSAPP ENVIADO OK")
         return TWIML_OK
@@ -3696,9 +3725,3 @@ async def twilio_webhook(
         traceback.print_exc()
         try:
             twilio_send_whatsapp(
-                to_user_whatsapp=From,
-                text="Error interno. Intenta de nuevo en 1 minuto.",
-            )
-        except Exception:
-            pass
-        return TWIML_OK
