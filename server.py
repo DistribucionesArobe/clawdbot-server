@@ -2240,7 +2240,7 @@ def rebuild_embeddings_public(company_id: str = "aa743e3f-1496-491d-99eb-02fcc5a
 
 @app.get("/api/_version")
 def _version():
-    return {"version": "pricebook-v2-2026-02-12"}
+    return {"version": "pricebook-v2-2026-02-12", "unaccent": True}
 
 class CompanySettingsBody(BaseModel):
     hours_text: Optional[str] = None
