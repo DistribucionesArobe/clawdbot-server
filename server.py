@@ -1454,7 +1454,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 if not cands:
                     continue
                 rows = []
-                for j, it in enumerate(cands[:5], start=1):
+                for j, it in enumerate(cands[:2], start=1):
                     price = float(it.get("price") or 0.0)
                     sku = (it.get("sku") or "").strip()
                     sku_txt = f" ({sku})" if sku else ""
