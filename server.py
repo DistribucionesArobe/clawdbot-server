@@ -2746,18 +2746,11 @@ def pricebook_upload(
         headers_norm = [h.strip().lower() for h in headers_raw]
 
         alias = {
-            "nombre": "name",
-            "producto": "name",
-            "product": "name",
-            "precio": "price",
-            "precio_base": "price",
-            "precio unitario": "price",
-            "costo": "price",
-            "cost": "price",
-            "unidad": "unit",
-            "uom": "unit",
-            "vat_rate": "vat_rate",
-            "iva": "vat_rate",
+            "nombre": "name", "producto": "name", "product": "name",
+            "precio": "price", "precio_base": "price", "precio unitario": "price",
+            "costo": "price", "cost": "price",
+            "unidad": "unit", "uom": "unit",
+            "vat_rate": "vat_rate", "iva": "vat_rate",
             "sku": "sku",
         }
 
@@ -2765,39 +2758,29 @@ def pricebook_upload(
         idx = {h: i for i, h in enumerate(headers_mapped)}
 
         required = {"name", "price"}
-        missing = required - set(headers_mapped)
-        if missing:
+        missing_cols = required - set(headers_mapped)
+        if missing_cols:
             raise HTTPException(
                 status_code=400,
                 detail={
-                    "error": f"Faltan columnas requeridas: {sorted(missing)}",
+                    "error": f"Faltan columnas requeridas: {sorted(missing_cols)}",
                     "headers_detectadas": headers_norm,
                     "headers_mapeadas": headers_mapped,
                 },
             )
 
-        rows_total = 0
-        rows_upserted = 0
-        rows_skipped = 0
-
+        # ── PASO 1: Leer todas las filas válidas ──────────────────────────
+        parsed_rows = []
         for r in ws.iter_rows(min_row=2, values_only=True):
             if r is None or all(v is None or str(v).strip() == "" for v in r):
                 continue
-
-            rows_total += 1
-
             name = str(r[idx["name"]]).strip() if r[idx["name"]] is not None else ""
             price_raw = r[idx["price"]] if idx.get("price") is not None else None
-
             if not name or price_raw is None:
-                rows_skipped += 1
                 continue
-
             try:
-                price_str = str(price_raw).replace("$", "").replace(",", "").strip()
-                price = float(price_str)
+                price = float(str(price_raw).replace("$", "").replace(",", "").strip())
             except Exception:
-                rows_skipped += 1
                 continue
 
             unit = None
@@ -2816,39 +2799,95 @@ def pricebook_upload(
                 sku_val = str(r[idx["sku"]]).strip()
                 sku = sku_val if sku_val else None
 
+            parsed_rows.append({
+                "name": name, "price": price, "unit": unit,
+                "vat_rate": vat_rate, "sku": sku,
+            })
+
+        # ── PASO 2: Generar sinónimos en batch de 10 ─────────────────────
+        synonyms_map = {}  # name -> synonyms string
+        names = [row["name"] for row in parsed_rows]
+
+        def _batch_synonyms(names_batch: list) -> dict:
+            """Llama GPT una vez para 10 productos, retorna {name: synonyms}"""
+            if not openai_client:
+                return {}
+            try:
+                numbered = "\n".join(f"{i+1}. {n}" for i, n in enumerate(names_batch))
+                resp = openai_client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "Eres experto en ferreterías de México. Para cada producto numerado, "
+                                "genera hasta 5 sinónimos coloquiales, typos comunes o marcas usadas como nombre genérico. "
+                                "Responde SOLO en JSON válido así: "
+                                '{"1": "sin1, sin2", "2": "sin1, sin2"} '
+                                "Sin explicación, sin markdown, solo el JSON."
+                            )
+                        },
+                        {"role": "user", "content": numbered}
+                    ],
+                    temperature=0.3,
+                    max_tokens=300,
+                )
+                raw = (resp.choices[0].message.content or "{}").strip()
+                raw = raw.replace("```json", "").replace("```", "").strip()
+                parsed = json.loads(raw)
+                return {names_batch[int(k)-1]: v for k, v in parsed.items() if k.isdigit() and int(k)-1 < len(names_batch)}
+            except Exception as e:
+                print("BATCH SYNONYMS ERROR:", repr(e))
+                return {}
+
+        batch_size = 10
+        for i in range(0, len(names), batch_size):
+            batch = names[i:i+batch_size]
+            result = _batch_synonyms(batch)
+            synonyms_map.update(result)
+            print(f"SYNONYMS BATCH {i//batch_size + 1}: generated {len(result)} entries")
+
+        # ── PASO 3: Insertar en DB ────────────────────────────────────────
+        rows_total = len(parsed_rows)
+        rows_upserted = 0
+        rows_skipped = 0
+
+        for row in parsed_rows:
+            name = row["name"]
             name_norm = norm_name(name)
-            auto_syn = auto_synonyms(name)
+            auto_syn = synonyms_map.get(name, "")
 
-            cur.execute(
-                """
-                INSERT INTO pricebook_items
-                    (company_id, sku, name, name_norm, unit, price, vat_rate, synonyms, source, updated_at)
-                VALUES
-                    (%s, %s, %s, %s, %s, %s, %s, %s, 'excel', now())
-                ON CONFLICT (company_id, name_norm)
-                DO UPDATE SET
-                    sku = EXCLUDED.sku,
-                    name = EXCLUDED.name,
-                    unit = EXCLUDED.unit,
-                    price = EXCLUDED.price,
-                    vat_rate = EXCLUDED.vat_rate,
-                    synonyms = COALESCE(NULLIF(pricebook_items.synonyms, ''), EXCLUDED.synonyms),
-                    source = 'excel',
-                    updated_at = now()
-                """,
-                (company_id, sku, name, name_norm, unit, price, vat_rate, auto_syn),
-            )
-
-            rows_upserted += 1
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO pricebook_items
+                        (company_id, sku, name, name_norm, unit, price, vat_rate, synonyms, source, updated_at)
+                    VALUES
+                        (%s, %s, %s, %s, %s, %s, %s, %s, 'excel', now())
+                    ON CONFLICT (company_id, name_norm)
+                    DO UPDATE SET
+                        sku = EXCLUDED.sku,
+                        name = EXCLUDED.name,
+                        unit = EXCLUDED.unit,
+                        price = EXCLUDED.price,
+                        vat_rate = EXCLUDED.vat_rate,
+                        synonyms = COALESCE(NULLIF(pricebook_items.synonyms, ''), EXCLUDED.synonyms),
+                        source = 'excel',
+                        updated_at = now()
+                    """,
+                    (company_id, row["sku"], name, name_norm, row["unit"],
+                     row["price"], row["vat_rate"], auto_syn),
+                )
+                rows_upserted += 1
+            except Exception as e:
+                print(f"ROW INSERT ERROR {name}:", repr(e))
+                rows_skipped += 1
 
         cur.execute(
             """
             UPDATE pricebook_uploads
-            SET status='success',
-                rows_total=%s,
-                rows_upserted=%s,
-                error=NULL,
-                finished_at=now()
+            SET status='success', rows_total=%s, rows_upserted=%s,
+                error=NULL, finished_at=now()
             WHERE id=%s
             """,
             (rows_total, rows_upserted, upload_id),
@@ -2870,18 +2909,15 @@ def pricebook_upload(
 
     except HTTPException:
         raise
-
     except Exception as e:
         print("UPLOAD ERROR:", repr(e))
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
-
     finally:
         if cur:
             cur.close()
         if conn:
             conn.close()
-
 # -------------------------
 # Pricebook items (cookie session, DEFAULT_COMPANY_ID)
 # -------------------------
