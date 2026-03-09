@@ -356,10 +356,11 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict: 
         # =========================================================
         # PASO -1: Sinónimo global
         # =========================================================
+        print(f"SMART SEARCH q='{q}' original='{user_query}'")
         q_resolved = resolve_global_synonym(conn, q)
+        print(f"RESOLVED: q='{q}' → q_resolved='{q_resolved}'")
         if q_resolved != q:
             return smart_search(conn, company_id, q_resolved, qty)
-
         # =========================================================
         # PASO 0: Sinónimo exacto en DB
         # =========================================================
