@@ -1,4 +1,5 @@
 from prompts_cotizabot import COTIZABOT_SYSTEM_PROMPT
+from fastapi.background import BackgroundTasks
 import json
 import os
 import re
@@ -2708,10 +2709,25 @@ def download_template(request: Request):
 # -------------------------
 # Pricebook upload (bearer token)
 # -------------------------
+def _rebuild_embeddings_bg(company_id: str):
+    """Reconstruye embeddings en background sin bloquear el request."""
+    try:
+        print(f"BG EMBEDDINGS START: company={company_id}")
+        conn = get_conn()
+        try:
+            result = rebuild_embeddings_for_company(conn, company_id)
+            print(f"BG EMBEDDINGS DONE: {result}")
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"BG EMBEDDINGS ERROR: {repr(e)}")
+
+
 @app.post("/api/pricebook/upload")
 def pricebook_upload(
     authorization: str = Header(default=""),
     file: UploadFile = File(...),
+    background_tasks: BackgroundTasks = None,
 ):
     tenant = get_company_from_bearer(authorization)
     company_id = tenant["company_id"]
@@ -2805,15 +2821,17 @@ def pricebook_upload(
             })
 
         # ── PASO 2: Generar sinónimos en batch de 10 ─────────────────────
-        synonyms_map = {}  # name -> synonyms string
+        synonyms_map = {}
         names = [row["name"] for row in parsed_rows]
 
         def _batch_synonyms(names_batch: list) -> dict:
-            """Llama GPT una vez para 10 productos, retorna {name: synonyms}"""
             if not openai_client:
                 return {}
             try:
-                numbered = "\n".join(f"{i+1}. {n}" for i, n in enumerate(names_batch))
+                numbered = "\n".join(
+                    f"{i+1}. {re.sub(r'[\"\\']', '', n)}"
+                    for i, n in enumerate(names_batch)
+                )
                 resp = openai_client.chat.completions.create(
                     model="gpt-4o-mini",
                     messages=[
@@ -2835,7 +2853,11 @@ def pricebook_upload(
                 raw = (resp.choices[0].message.content or "{}").strip()
                 raw = raw.replace("```json", "").replace("```", "").strip()
                 parsed = json.loads(raw)
-                return {names_batch[int(k)-1]: v for k, v in parsed.items() if k.isdigit() and int(k)-1 < len(names_batch)}
+                return {
+                    names_batch[int(k)-1]: v
+                    for k, v in parsed.items()
+                    if k.isdigit() and int(k)-1 < len(names_batch)
+                }
             except Exception as e:
                 print("BATCH SYNONYMS ERROR:", repr(e))
                 return {}
@@ -2893,10 +2915,13 @@ def pricebook_upload(
             (rows_total, rows_upserted, upload_id),
         )
 
-        try:
-            rebuild_embeddings_for_company(conn, company_id)
-        except Exception as e:
-            print("EMBEDDINGS REBUILD ERROR:", repr(e))
+        if background_tasks:
+            background_tasks.add_task(_rebuild_embeddings_bg, company_id)
+        else:
+            try:
+                rebuild_embeddings_for_company(conn, company_id)
+            except Exception as e:
+                print("EMBEDDINGS REBUILD ERROR:", repr(e))
 
         return {
             "ok": True,
@@ -2918,6 +2943,7 @@ def pricebook_upload(
             cur.close()
         if conn:
             conn.close()
+
 # -------------------------
 # Pricebook items (cookie session, DEFAULT_COMPANY_ID)
 # -------------------------
