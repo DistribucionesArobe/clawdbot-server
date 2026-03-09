@@ -2151,11 +2151,37 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
     # 4.5) HORARIOS / UBICACIÓN
     # =========================================================
     if looks_like_hours_question(user_text):
+        try:
+            conn = get_conn()
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT hours_text, address_text, google_maps_url FROM companies WHERE id=%s",
+                (company_id,)
+            )
+            row = cur.fetchone()
+            cur.close()
+            conn.close()
+        except Exception:
+            row = None
+
+        if row:
+            hours = (row[0] or "").strip()
+            address = (row[1] or "").strip()
+            maps_url = (row[2] or "").strip()
+            parts = []
+            if hours:
+                parts.append(f"🕐 *Horarios:* {hours}")
+            if address:
+                parts.append(f"📍 *Dirección:* {address}")
+            if maps_url:
+                parts.append(f"🗺️ *Google Maps:* {maps_url}")
+            if parts:
+                return "\n".join(parts) + "\n\n¿Cotizamos algo? Mándame ej: 10 cemento, 5 varilla 3/8"
+
         return (
-            "📍 Para horarios y ubicación, dime tu sucursal o ciudad.\n\n"
+            "📍 Escríbenos directamente para darte la ubicación y horarios.\n\n"
             "Si quieres cotizar: mándame ej: 10 cemento, 5 varilla 3/8"
         )
-
     # 4.75) Parece producto sin cantidad
     if looks_like_product_phrase(user_text) and not re.search(r"\b\d+\b", user_text):
         return (
