@@ -2857,7 +2857,13 @@ def pricebook_upload(
                 raw = raw.replace("```json", "").replace("```", "").strip()
                 parsed = json.loads(raw)
                 return {
-                    names_batch[int
+                    names_batch[int(k)-1]: v
+                    for k, v in parsed.items()
+                    if k.isdigit() and int(k)-1 < len(names_batch)
+                }
+            except Exception as e:
+                print("BATCH SYNONYMS ERROR:", repr(e))
+                return {}
 
         # ── PASO 3: Insertar en DB ────────────────────────────────────────
         rows_total = len(parsed_rows)
