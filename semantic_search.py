@@ -337,7 +337,6 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict: 
                 bonus += 30
             if cal and (_re.search(rf"\bcal\s*{cal}\b", n)):
                 bonus += 50
-            # Bonus por tokens únicos de la query que aparecen en el nombre
             q_tokens = [t for t in q.split() if len(t) >= 4]
             for tok in q_tokens:
                 if tok in n:
@@ -360,7 +359,15 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict: 
         q_resolved = resolve_global_synonym(conn, q)
         print(f"RESOLVED: q='{q}' → q_resolved='{q_resolved}'")
         if q_resolved != q:
+            rows = _name_search(q_resolved)
+            if rows:
+                scored = [(fuzz.token_set_ratio(q_resolved, (r[1] or "").lower()), r) for r in rows]
+                scored.sort(key=lambda x: x[0], reverse=True)
+                if scored[0][0] >= 70:
+                    print(f"GLOBAL SYNONYM ILIKE HIT: '{q_resolved}' → '{scored[0][1][1]}'")
+                    return {"status": "found", "item": _make_item(scored[0][1]), "candidates": []}
             return smart_search(conn, company_id, q_resolved, qty)
+
         # =========================================================
         # PASO 0: Sinónimo exacto en DB
         # =========================================================
@@ -382,12 +389,11 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict: 
             print(f"SYNONYM DIRECT HIT: query='{user_query}' match='{syn_rows[0][1]}'")
             return {"status": "found", "item": _make_item(syn_rows[0]), "candidates": []}
         elif len(syn_rows) > 1:
-            # Si la query coincide directamente con algún nombre, ignorar sinónimos y pasar al ILIKE
             name_matches = [r for r in syn_rows if q in (r[1] or "").lower()]
             if not name_matches:
                 print(f"SYNONYM AMBIGUOUS: query='{user_query}' found={len(syn_rows)}")
                 return {"status": "ambiguous", "item": None, "candidates": [_make_item(r) for r in syn_rows]}
-        
+
         # =========================================================
         # PASO 1: ILIKE + ranking con bonus de specs (medida + calibre)
         # =========================================================
@@ -478,7 +484,6 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict: 
                 max(fuzz.token_set_ratio(q, t), fuzz.partial_ratio(q, t))
                 for t in all_terms
             )
-            # Si el score viene principalmente del sinónimo y no del nombre, penalizar
             name_score = max(fuzz.token_set_ratio(q, name), fuzz.partial_ratio(q, name))
             if name_score < base - 20:
                 base = name_score
