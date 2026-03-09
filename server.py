@@ -2824,12 +2824,15 @@ def pricebook_upload(
         synonyms_map = {}
         names = [row["name"] for row in parsed_rows]
 
+        def _clean_name(n):
+            return re.sub(r'[\"\'\\]', '', n)
+
         def _batch_synonyms(names_batch: list) -> dict:
             if not openai_client:
                 return {}
             try:
                 numbered = "\n".join(
-                    f"{i+1}. {re.sub(r'[\"\\']', '', n)}"
+                    f"{i+1}. {_clean_name(n)}"
                     for i, n in enumerate(names_batch)
                 )
                 resp = openai_client.chat.completions.create(
@@ -2854,20 +2857,7 @@ def pricebook_upload(
                 raw = raw.replace("```json", "").replace("```", "").strip()
                 parsed = json.loads(raw)
                 return {
-                    names_batch[int(k)-1]: v
-                    for k, v in parsed.items()
-                    if k.isdigit() and int(k)-1 < len(names_batch)
-                }
-            except Exception as e:
-                print("BATCH SYNONYMS ERROR:", repr(e))
-                return {}
-
-        batch_size = 10
-        for i in range(0, len(names), batch_size):
-            batch = names[i:i+batch_size]
-            result = _batch_synonyms(batch)
-            synonyms_map.update(result)
-            print(f"SYNONYMS BATCH {i//batch_size + 1}: generated {len(result)} entries")
+                    names_batch[int
 
         # ── PASO 3: Insertar en DB ────────────────────────────────────────
         rows_total = len(parsed_rows)
