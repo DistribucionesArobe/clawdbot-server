@@ -840,6 +840,21 @@ def notify_owner_escalation(wa_api_key: str, phone_number_id: str, owner_phone: 
     )
     send_whatsapp_text(wa_api_key, phone_number_id, owner_phone, msg)
 
+def notify_owner_comprobante(wa_api_key: str, phone_number_id: str, owner_phone: str,
+                              client_phone: str, state: dict):
+    cart = (state or {}).get("cart") or []
+    cart_txt = ""
+    if cart:
+        lines = [f"• {it['qty']}x {it['name']} — ${float(it.get('price',0))*int(it.get('qty',0)):,.2f}" for it in cart]
+        cart_txt = "\n" + "\n".join(lines)
+    msg = (
+        f"💰 *Comprobante de pago recibido*\n"
+        f"📱 Cliente: {client_phone}\n"
+        f"🛒 Cotización:{cart_txt if cart_txt else ' (sin carrito)'}\n\n"
+        f"Revisa tu WhatsApp — el cliente acaba de mandar el comprobante."
+    )
+    send_whatsapp_text(wa_api_key, phone_number_id, owner_phone, msg)
+
 # -------------------------
 # Sessions
 # -------------------------
@@ -1003,6 +1018,45 @@ async def whatsapp_webhook(request: Request):
     elif msg_type == "image":
         image_id = (msg.get("image") or {}).get("id")
         caption = (msg.get("image") or {}).get("caption") or ""
+
+        # ── Comprobante de pago ──────────────────────────────────────────
+        _st_check = get_quote_state(company["company_id"], from_phone) or {}
+        if _st_check.get("awaiting_comprobante"):
+            # Notificar al dueño
+            try:
+                owner_row = None
+                conn2 = get_conn()
+                cur2 = conn2.cursor()
+                cur2.execute(
+                    "SELECT owner_phone, wa_api_key, wa_phone_number_id FROM companies WHERE id=%s",
+                    (company["company_id"],)
+                )
+                owner_row = cur2.fetchone()
+                cur2.close()
+                conn2.close()
+                if owner_row and owner_row[0]:
+                    notify_owner_comprobante(
+                        wa_api_key=owner_row[1],
+                        phone_number_id=owner_row[2],
+                        owner_phone=owner_row[0],
+                        client_phone=from_phone,
+                        state=_st_check,
+                    )
+            except Exception as e:
+                print("COMPROBANTE NOTIFY ERROR:", repr(e))
+            # Limpiar flag
+            _st_check.pop("awaiting_comprobante", None)
+            upsert_quote_state(company["company_id"], from_phone, _st_check)
+            # Confirmar al cliente
+            send_whatsapp_text(
+                wa_api_key=company["wa_api_key"],
+                phone_number_id=company["wa_phone_number_id"],
+                to=from_phone,
+                text="✅ ¡Comprobante recibido! Le avisamos a la empresa y en breve te confirman tu pedido. 🙏",
+            )
+            return {"ok": True}
+        # ────────────────────────────────────────────────────────────────
+
         if image_id and company.get("wa_api_key"):
             try:
                 img_bytes = download_whatsapp_media(image_id, company["wa_api_key"])
@@ -1286,7 +1340,15 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 parts.append(f"💳 *Pago con tarjeta:*\n{mp_url}")
 
         if parts:
-            return "\n\n".join(parts) + "\n\n¿Quieres agregar algo más a tu cotización?"
+            _st = get_quote_state(company_id, wa_from) if wa_from else {}
+            _st = _st or {}
+            _st["awaiting_comprobante"] = True
+            if wa_from:
+                upsert_quote_state(company_id, wa_from, _st)
+            return (
+                "\n\n".join(parts)
+                + "\n\n📎 Cuando realices tu pago, *manda el comprobante* por aquí y avisamos a la empresa."
+            )
         else:
             return (
                 "Para recibir los datos de pago, escribe *asesor* y un representante te los enviará. 🙏"
