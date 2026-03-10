@@ -366,10 +366,25 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict: 
                 if scored[0][0] >= 70:
                     print(f"GLOBAL SYNONYM ILIKE HIT: '{q_resolved}' → '{scored[0][1][1]}'")
                     return {"status": "found", "item": _make_item(scored[0][1]), "candidates": []}
-            return smart_search(conn, company_id, q_resolved, qty)
+
+            # FIX: sinónimo no dio hit → intentar también con el primer token del sinónimo
+            # Ejemplo: 'durock usg' → intentar solo 'durock'
+            first_token = q_resolved.split()[0] if q_resolved.split() else q_resolved
+            if first_token != q_resolved:
+                rows_token = _name_search(first_token)
+                if rows_token:
+                    scored = [(fuzz.token_set_ratio(q_resolved, (r[1] or "").lower()), r) for r in rows_token]
+                    scored.sort(key=lambda x: x[0], reverse=True)
+                    if scored[0][0] >= 65:
+                        print(f"GLOBAL SYNONYM FIRST TOKEN HIT: '{first_token}' → '{scored[0][1][1]}'")
+                        return {"status": "found", "item": _make_item(scored[0][1]), "candidates": []}
+
+            # FIX: sinónimo no matcheó nada útil → continuar con q original
+            # NO hacer recursión con q_resolved (evita el loop y la pérdida del flujo)
+            print(f"GLOBAL SYNONYM NO HIT: '{q_resolved}' → continuando con q original='{q}'")
 
         # =========================================================
-        # PASO 0: Sinónimo exacto en DB
+        # PASO 0: Sinónimo exacto en pricebook (campo synonyms)
         # =========================================================
         cur0 = conn.cursor()
         try:
@@ -395,7 +410,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict: 
                 return {"status": "ambiguous", "item": None, "candidates": [_make_item(r) for r in syn_rows]}
 
         # =========================================================
-        # PASO 1: ILIKE + ranking con bonus de specs (medida + calibre)
+        # PASO 1: ILIKE directo + ranking con bonus de specs
         # =========================================================
         pool_rows = _name_search(q)
         if not pool_rows and q.endswith("s") and len(q) > 3:
