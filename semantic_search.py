@@ -311,7 +311,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict: 
                     SELECT sku, name, unit, price, vat_rate
                     FROM pricebook_items
                     WHERE company_id = %s
-                    AND unaccent(lower(name)) ILIKE unaccent(lower(%s))
+                    AND lower(name) LIKE lower(%s)
                     LIMIT 10
                     """,
                     (company_id, f"%{term}%"),
@@ -397,7 +397,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict: 
                 """
                 SELECT sku, name, unit, price, vat_rate
                 FROM pricebook_items
-                WHERE company_id = %s AND synonyms ILIKE %s
+                WHERE company_id = %s AND lower(synonyms) LIKE lower(%s)
                 LIMIT 5
                 """,
                 (company_id, f"%{q}%"),
@@ -464,8 +464,8 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict: 
                 WHERE company_id = %s
                   AND (
                       search_vector @@ to_tsquery('spanish', %s)
-                      OR unaccent(lower(name)) ILIKE unaccent(lower(%s))
-                      OR unaccent(lower(synonyms)) ILIKE unaccent(lower(%s))
+                      OR lower(name) LIKE lower(%s)
+                      OR lower(synonyms) LIKE lower(%s)
                   )
                 LIMIT 30
                 """,
@@ -482,8 +482,8 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict: 
                     FROM pricebook_items
                     WHERE company_id = %s
                       AND (
-                          unaccent(lower(name)) ILIKE unaccent(lower(%s))
-                          OR unaccent(lower(synonyms)) ILIKE unaccent(lower(%s))
+                          lower(name) LIKE lower(%s)
+                          OR lower(synonyms) LIKE lower(%s)
                       )
                     LIMIT 30
                     """,
