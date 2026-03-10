@@ -500,7 +500,8 @@ def cart_render_quote(state: dict) -> str:
     return (
         "Cotización:\n"
         + "\n".join(lines)
-        + f"\n\n*Total: ${total:,.2f}* (IVA incluido)"
+        + f"\n\n*Total: ${total:,.2f}* (IVA incluido)\n\n"
+        "💳 Escribe *pagar* y te mandamos datos bancarios o link para pago con tarjeta."
     )
 
 def api_key_prefix(token: str) -> str:
@@ -1246,6 +1247,50 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
     # 0) COMANDOS (reset / salir)
     # =========================================================
     tnorm = norm_name(user_text).replace("cotización", "cotizacion")
+
+    # =========================================================
+    # 0.1) PAGAR
+    # =========================================================
+    pagar_triggers = {"pagar", "pago", "como pago", "cómo pago", "quiero pagar", "datos de pago", "datos bancarios", "transferencia"}
+    if any(pt == tnorm or pt in tnorm for pt in pagar_triggers):
+        try:
+            conn = get_conn()
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT bank_name, bank_account_name, bank_clabe, bank_account_number, mercadopago_url FROM companies WHERE id=%s",
+                (company_id,)
+            )
+            row = cur.fetchone()
+            cur.close()
+            conn.close()
+        except Exception:
+            row = None
+
+        parts = []
+        if row:
+            bank_name = (row[0] or "").strip()
+            bank_acc_name = (row[1] or "").strip()
+            bank_clabe = (row[2] or "").strip()
+            bank_acc_num = (row[3] or "").strip()
+            mp_url = (row[4] or "").strip()
+
+            if bank_clabe or bank_acc_num:
+                lines = ["🏦 *Datos bancarios:*"]
+                if bank_name: lines.append(f"Banco: {bank_name}")
+                if bank_acc_name: lines.append(f"A nombre de: {bank_acc_name}")
+                if bank_clabe: lines.append(f"CLABE: {bank_clabe}")
+                if bank_acc_num: lines.append(f"Cuenta: {bank_acc_num}")
+                parts.append("\n".join(lines))
+
+            if mp_url:
+                parts.append(f"💳 *Pago con tarjeta:*\n{mp_url}")
+
+        if parts:
+            return "\n\n".join(parts) + "\n\n¿Quieres agregar algo más a tu cotización?"
+        else:
+            return (
+                "Para recibir los datos de pago, escribe *asesor* y un representante te los enviará. 🙏"
+            )
 
     reset_triggers = {
         "salir", "cancelar", "cancel", "reset", "reiniciar",
