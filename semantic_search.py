@@ -59,28 +59,6 @@ def get_embedding(text: str) -> list:
     )
     return resp.data[0].embedding
 
-def _name_search(term):
-    c = conn.cursor()
-    try:
-        c.execute(
-            """
-            SELECT sku, name, unit, price, vat_rate
-            FROM pricebook_items
-            WHERE company_id = %s
-            AND unaccent(lower(name)) ILIKE unaccent(lower(%s))
-            LIMIT 10
-            """,
-            (company_id, f"%{term}%"),
-        )
-        rows = c.fetchall()
-        print(f">>> _name_search('{term}') → {len(rows)} rows: {[r[1] for r in rows]}")
-        return rows
-    except Exception as e:
-        print(f">>> _name_search ERROR: {repr(e)}")
-        return []
-    finally:
-        c.close()
-
 def get_embeddings_batch(texts: list) -> list:
     if not openai_client:
         raise RuntimeError("OpenAI client no inicializado")
@@ -323,21 +301,27 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict: 
         # =========================================================
 
         def _name_search(term):
-            c = conn.cursor()
-            try:
-                c.execute(
-                    """
-                    SELECT sku, name, unit, price, vat_rate
-                    FROM pricebook_items
-                    WHERE company_id = %s
-                    AND unaccent(lower(name)) ILIKE unaccent(lower(%s))
-                    LIMIT 10
-                    """,
-                    (company_id, f"%{term}%"),
-                )
-                return c.fetchall()
-            finally:
-                c.close()
+    c = conn.cursor()
+    try:
+        c.execute(
+            """
+            SELECT sku, name, unit, price, vat_rate
+            FROM pricebook_items
+            WHERE company_id = %s
+            AND unaccent(lower(name)) ILIKE unaccent(lower(%s))
+            LIMIT 10
+            """,
+            (company_id, f"%{term}%"),
+        )
+        rows = c.fetchall()
+        print(f">>> _name_search('{term}') → {len(rows)} rows: {[r[1] for r in rows]}")
+        return rows
+    except Exception as e:
+        print(f">>> _name_search ERROR: {repr(e)}")
+        return []
+    finally:
+        c.close()
+       
 
         def _extract_specs(text):
             t = text.lower()
