@@ -29,22 +29,23 @@ def build_product_text(name: str, sku: str = "", unit: str = "", synonyms: str =
 
 def build_query_text(user_input: str) -> str:
     t = (user_input or "").lower().strip()
-    
+
     # Quitar ruido de intención
     noise_intent = r"\b(cotiza|cotizame|dame|quiero|necesito|por favor|porfa|pls|precio|precios)\b"
     t = re.sub(noise_intent, " ", t)
-    
+
     # Quitar unidades/presentaciones — no describen el producto, solo el empaque
     noise_units = r"\b(cubeta|cubetas|bulto|bultos|bolsa|bolsas|rollo|rollos|pieza|piezas|metro|metros|kilo|kilos|kilogramo|kilogramos|litro|litros|par|pares|juego|juegos|caja|cajas|saco|sacos|bote|botes|lata|latas|tubo|tubos|tira|tiras|hoja|hojas)\b"
     t = re.sub(noise_units, " ", t)
-    
+
     # Quitar números sueltos (cantidades)
     t = re.sub(r"\b\d+\b", " ", t)
-    
+
     t = re.sub(r"\s+", " ", t).strip()
     if not t:
         t = (user_input or "").lower().strip()
     return t
+
 
 def get_embedding(text: str) -> list:
     if not openai_client:
@@ -58,6 +59,7 @@ def get_embedding(text: str) -> list:
         encoding_format="float",
     )
     return resp.data[0].embedding
+
 
 def get_embeddings_batch(texts: list) -> list:
     if not openai_client:
@@ -212,6 +214,7 @@ def semantic_search_candidates(conn, company_id: str, user_query: str,
     print(f"SEMANTIC CANDS DETAIL: {[(c['name'], round(c['similarity'],3)) for c in candidates]}")
     return candidates
 
+
 def fuzzy_search_best(conn, company_id: str, user_query: str, threshold: int = 95) -> Optional[dict]:
     from rapidfuzz import fuzz
 
@@ -261,7 +264,6 @@ def fuzzy_search_best(conn, company_id: str, user_query: str, threshold: int = 9
     }
 
 
-
 def resolve_global_synonym(conn, q: str) -> str:
     """
     Busca q en global_synonyms y devuelve termino_busqueda.
@@ -283,6 +285,7 @@ def resolve_global_synonym(conn, q: str) -> str:
     finally:
         cur.close()
 
+
 def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict:  # noqa
     try:
         from rapidfuzz import fuzz
@@ -301,27 +304,26 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict: 
         # =========================================================
 
         def _name_search(term):
-    c = conn.cursor()
-    try:
-        c.execute(
-            """
-            SELECT sku, name, unit, price, vat_rate
-            FROM pricebook_items
-            WHERE company_id = %s
-            AND unaccent(lower(name)) ILIKE unaccent(lower(%s))
-            LIMIT 10
-            """,
-            (company_id, f"%{term}%"),
-        )
-        rows = c.fetchall()
-        print(f">>> _name_search('{term}') → {len(rows)} rows: {[r[1] for r in rows]}")
-        return rows
-    except Exception as e:
-        print(f">>> _name_search ERROR: {repr(e)}")
-        return []
-    finally:
-        c.close()
-       
+            c = conn.cursor()
+            try:
+                c.execute(
+                    """
+                    SELECT sku, name, unit, price, vat_rate
+                    FROM pricebook_items
+                    WHERE company_id = %s
+                    AND unaccent(lower(name)) ILIKE unaccent(lower(%s))
+                    LIMIT 10
+                    """,
+                    (company_id, f"%{term}%"),
+                )
+                rows = c.fetchall()
+                print(f">>> _name_search('{term}') → {len(rows)} rows: {[r[1] for r in rows]}")
+                return rows
+            except Exception as e:
+                print(f">>> _name_search ERROR: {repr(e)}")
+                return []
+            finally:
+                c.close()
 
         def _extract_specs(text):
             t = text.lower()
@@ -372,8 +374,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict: 
                     print(f"GLOBAL SYNONYM ILIKE HIT: '{q_resolved}' → '{scored[0][1][1]}'")
                     return {"status": "found", "item": _make_item(scored[0][1]), "candidates": []}
 
-            # FIX: sinónimo no dio hit → intentar también con el primer token del sinónimo
-            # Ejemplo: 'durock usg' → intentar solo 'durock'
+            # Si el sinónimo no dio hit, intentar con el primer token
             first_token = q_resolved.split()[0] if q_resolved.split() else q_resolved
             if first_token != q_resolved:
                 rows_token = _name_search(first_token)
@@ -384,8 +385,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict: 
                         print(f"GLOBAL SYNONYM FIRST TOKEN HIT: '{first_token}' → '{scored[0][1][1]}'")
                         return {"status": "found", "item": _make_item(scored[0][1]), "candidates": []}
 
-            # FIX: sinónimo no matcheó nada útil → continuar con q original
-            # NO hacer recursión con q_resolved (evita el loop y la pérdida del flujo)
+            # Sinónimo no matcheó → continuar con q original sin recursión
             print(f"GLOBAL SYNONYM NO HIT: '{q_resolved}' → continuando con q original='{q}'")
 
         # =========================================================
