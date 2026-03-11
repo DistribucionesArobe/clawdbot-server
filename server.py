@@ -20,6 +20,7 @@ from psycopg2 import IntegrityError
 
 from openai import OpenAI
 from semantic_search import smart_search, rebuild_embeddings_for_company, upsert_single_embedding
+from generate_quote_pdf import build_quote_pdf, generate_folio
 
 from fastapi import (
     FastAPI,
@@ -484,7 +485,7 @@ def parse_pending_picks(text: str):
     t = t.replace(" ", "")
     return [(m[0], int(m[1])) for m in re.findall(r"\b([A-Z])(\d+)\b", t)]
 
-def cart_render_quote(state: dict) -> str:
+def cart_render_quote(state: dict, company_id: str = "", client_phone: str = "") -> str:
     cart = (state or {}).get("cart") or []
     if not cart:
         return ""
@@ -497,11 +498,22 @@ def cart_render_quote(state: dict) -> str:
         subtotal = qty * price
         total += subtotal
         lines.append(f"• {qty} x {name} — ${subtotal:,.2f}")
+
+    # Guardar cotización en BD si tenemos contexto de empresa
+    folio_txt = ""
+    if company_id and client_phone:
+        try:
+            folio = save_quote(company_id, client_phone, cart)
+            folio_txt = f"\n📋 Folio: *{folio}*"
+        except Exception as e:
+            print("CART RENDER SAVE QUOTE ERROR:", repr(e))
+
     return (
         "Cotización:\n"
         + "\n".join(lines)
-        + f"\n\n*Total: ${total:,.2f}* (IVA incluido)\n\n"
-        "💳 Escribe *pagar* y te mandamos datos bancarios o link para pago con tarjeta."
+        + f"\n\n*Total: ${total:,.2f}* (IVA incluido)"
+        + folio_txt
+        + "\n\n💳 Escribe *pagar* y te mandamos datos bancarios o link para pago con tarjeta."
     )
 
 def api_key_prefix(token: str) -> str:
@@ -690,6 +702,44 @@ def track_conversation_if_new(company_id: str, wa_from: str) -> dict:
     finally:
         cur.close()
         conn.close()
+
+def save_quote(company_id: str, client_phone: str, cart: list) -> str:
+    """
+    Guarda la cotización en la tabla `quotes`.
+    Devuelve el folio generado (ej. 'CX-A3F9K2').
+    """
+    folio = generate_folio()
+    total = sum(float(it.get("price", 0)) * int(it.get("qty", 0)) for it in cart)
+
+    items_json = [
+        {
+            "name":       it.get("name", ""),
+            "qty":        int(it.get("qty", 0)),
+            "unit":       it.get("unit", "pza"),
+            "unit_price": float(it.get("price", 0)),
+            "subtotal":   float(it.get("price", 0)) * int(it.get("qty", 0)),
+            "sku":        it.get("sku", ""),
+        }
+        for it in cart
+    ]
+
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            INSERT INTO quotes (folio, company_id, client_phone, items, total)
+            VALUES (%s, %s::uuid, %s, %s::jsonb, %s)
+            """,
+            (folio, company_id, client_phone, json.dumps(items_json), total),
+        )
+    except Exception as e:
+        print("SAVE QUOTE ERROR:", repr(e))
+    finally:
+        cur.close()
+        conn.close()
+
+    return folio
 
 def upsert_quote_state(company_id: str, wa_from: str, state: dict):
     if not wa_from:
@@ -1022,7 +1072,6 @@ async def whatsapp_webhook(request: Request):
         # ── Comprobante de pago ──────────────────────────────────────────
         _st_check = get_quote_state(company["company_id"], from_phone) or {}
         if _st_check.get("awaiting_comprobante"):
-            # Notificar al dueño
             try:
                 owner_row = None
                 conn2 = get_conn()
@@ -1044,10 +1093,8 @@ async def whatsapp_webhook(request: Request):
                     )
             except Exception as e:
                 print("COMPROBANTE NOTIFY ERROR:", repr(e))
-            # Limpiar flag
             _st_check.pop("awaiting_comprobante", None)
             upsert_quote_state(company["company_id"], from_phone, _st_check)
-            # Confirmar al cliente
             send_whatsapp_text(
                 wa_api_key=company["wa_api_key"],
                 phone_number_id=company["wa_phone_number_id"],
@@ -1245,13 +1292,12 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         return False
 
     # =========================================================
-    # _build_reply_with_pending — NUEVO: muestra UN pendiente a la vez
+    # _build_reply_with_pending — muestra UN pendiente a la vez
     # =========================================================
-    def _build_reply_with_pending(state: dict):
+    def _build_reply_with_pending(state: dict, company_id: str = "", wa_from: str = ""):
         pending = state.get("pending") or []
 
         if pending:
-            # Mostrar SOLO el primero como lista interactiva
             p = pending[0]
             qty = int(p.get("qty") or 0)
             raw = (p.get("raw") or "").strip()
@@ -1279,7 +1325,6 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                     "button_label": "Ver opciones",
                 }
             else:
-                # Sin candidatos — pedir aclaración
                 suffix = f" (quedan {remaining} más)" if remaining > 0 else ""
                 return (
                     f"❓ No encontré *{raw}*{suffix}\n\n"
@@ -1288,7 +1333,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 )
 
         # Sin pendientes — mostrar carrito
-        msg = cart_render_quote(state) if (state.get("cart") or []) else ""
+        msg = cart_render_quote(state, company_id=company_id, client_phone=wa_from) if (state.get("cart") or []) else ""
         msg += (
             "\n\n¿Agregamos algo más?\n"
             "🧭 Comandos:\n"
@@ -1510,7 +1555,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                         "button_label": "Ver opciones",
                     }
 
-                return _build_reply_with_pending(_state_specs)
+                return _build_reply_with_pending(_state_specs, company_id=company_id, wa_from=wa_from)
 
             else:
                 if wa_from:
@@ -1531,7 +1576,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             }
 
     # =========================================================
-    # 0.8) PICKS — ahora siempre resuelve pending[0] (el primero)
+    # 0.8) PICKS
     # =========================================================
     _quick_picks = _parse_pending_picks(user_text)
     _state_picks = get_quote_state(company_id, wa_from) if wa_from else {}
@@ -1542,10 +1587,9 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         pend = state.get("pending") or []
 
         if pend:
-            # Siempre resolvemos pending[0] — el bot solo muestra uno a la vez
             p = pend[0]
             cands = p.get("candidates") or []
-            _, opt = _quick_picks[0]  # tomar el número elegido (la letra ya no importa)
+            _, opt = _quick_picks[0]
 
             if cands and 1 <= opt <= len(cands):
                 chosen = cands[opt - 1]
@@ -1558,7 +1602,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                     "vat_rate": chosen.get("vat_rate"),
                     "qty": qty,
                 })
-                pend.pop(0)  # quitar el primero resuelto
+                pend.pop(0)
                 if pend:
                     state["pending"] = pend
                 else:
@@ -1567,12 +1611,11 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 if wa_from:
                     upsert_quote_state(company_id, wa_from, state)
 
-                return _build_reply_with_pending(state)
+                return _build_reply_with_pending(state, company_id=company_id, wa_from=wa_from)
 
-        # Si no pudo resolver (opt fuera de rango), volver a mostrar el pendiente actual
         if wa_from:
             upsert_quote_state(company_id, wa_from, state)
-        return _build_reply_with_pending(state)
+        return _build_reply_with_pending(state, company_id=company_id, wa_from=wa_from)
 
     # =========================================================
     # 1) MULTI-ITEMS + CARRITO
@@ -1627,7 +1670,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 first_step = first["steps"][first["step_idx"]]
                 prefix = ""
                 if state.get("cart"):
-                    prefix = cart_render_quote(state) + "\n\n"
+                    prefix = cart_render_quote(state, company_id=company_id, client_phone=wa_from) + "\n\n"
                 n_specs = len(state["pending_specs"])
                 intro = f"Encontré {n_specs} producto(s) que necesitan especificaciones.\n\n" if n_specs > 1 else ""
                 return {
@@ -1638,7 +1681,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 }
             if not state.get("cart") and not missing:
                 return "No encontré esos productos en el catálogo."
-            return _build_reply_with_pending(state)
+            return _build_reply_with_pending(state, company_id=company_id, wa_from=wa_from)
         finally:
             conn.close()
 
@@ -1678,7 +1721,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 state.pop("pending", None)
                 if wa_from:
                     upsert_quote_state(company_id, wa_from, state)
-                return _build_reply_with_pending(state)
+                return _build_reply_with_pending(state, company_id=company_id, wa_from=wa_from)
 
             elif result["status"] == "ambiguous":
                 pending = [{"qty": qty, "raw": prod_query, "candidates": result["candidates"]}]
@@ -1687,7 +1730,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 state["pending"] = pending
                 if wa_from:
                     upsert_quote_state(company_id, wa_from, state)
-                return _build_reply_with_pending(state)
+                return _build_reply_with_pending(state, company_id=company_id, wa_from=wa_from)
 
         finally:
             conn.close()
@@ -1724,7 +1767,6 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
 
         picks = _parse_pending_picks(user_text)
         if picks:
-            # Siempre resolvemos pending[0]
             if pend:
                 p = pend[0]
                 cands = p.get("candidates") or []
@@ -1754,7 +1796,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 print("UPSERT STATE ERROR:", repr(e))
                 return "Error guardando cotización. Intenta de nuevo."
 
-            return _build_reply_with_pending(state)
+            return _build_reply_with_pending(state, company_id=company_id, wa_from=wa_from)
 
         clarifs_raw = split_clarifications(user_text)
         clarifs = [c for c in clarifs_raw if c.strip()]
@@ -1820,7 +1862,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                         state.pop("pending", None)
                         if wa_from:
                             upsert_quote_state(company_id, wa_from, state)
-                        cart_txt = cart_render_quote(state) + "\n\n" if state.get("cart") else ""
+                        cart_txt = cart_render_quote(state, company_id=company_id, client_phone=wa_from) + "\n\n" if state.get("cart") else ""
                         return (
                             f"{cart_txt}"
                             "No encontré esos productos en el catálogo 😔\n\n"
@@ -1834,13 +1876,12 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 if wa_from:
                     upsert_quote_state(company_id, wa_from, state)
 
-                return _build_reply_with_pending(state)
+                return _build_reply_with_pending(state, company_id=company_id, wa_from=wa_from)
             finally:
                 conn.close()
 
-        # Si hay pendiente sin resolver, mostrar el primero
         if pend:
-            return _build_reply_with_pending(state)
+            return _build_reply_with_pending(state, company_id=company_id, wa_from=wa_from)
 
     # =========================================================
     # 4) GUARD — mensaje con números pero sin producto
@@ -1868,7 +1909,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 state.pop("pending", None)
                 if wa_from:
                     upsert_quote_state(company_id, wa_from, state)
-                return _build_reply_with_pending(state)
+                return _build_reply_with_pending(state, company_id=company_id, wa_from=wa_from)
 
             elif result["status"] == "ambiguous":
                 state = get_quote_state(company_id, wa_from) if wa_from else {}
@@ -1876,7 +1917,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 state["pending"] = [{"qty": qty, "raw": prod_query, "candidates": result["candidates"]}]
                 if wa_from:
                     upsert_quote_state(company_id, wa_from, state)
-                return _build_reply_with_pending(state)
+                return _build_reply_with_pending(state, company_id=company_id, wa_from=wa_from)
 
     # =========================================================
     # 4.5) HORARIOS / UBICACIÓN
@@ -1919,7 +1960,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         )
 
     # =========================================================
-    # 5) OPENAI FALLBACK — extracción inteligente
+    # 5) OPENAI FALLBACK
     # =========================================================
     if not openai_client:
         return "Estoy en mantenimiento. Intenta más tarde."
@@ -1981,7 +2022,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 if wa_from:
                     upsert_quote_state(company_id, wa_from, state)
 
-                return _build_reply_with_pending(state)
+                return _build_reply_with_pending(state, company_id=company_id, wa_from=wa_from)
             finally:
                 conn.close()
 
@@ -2087,6 +2128,102 @@ def company_settings_get(request: Request):
     finally:
         if cur: cur.close()
         if conn: conn.close()
+
+
+# ── Quotes ────────────────────────────────────────────────────────────────────
+
+@app.get("/api/quotes")
+def list_quotes(
+    request: Request,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+):
+    company_id = require_company_id(request)
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT id, folio, client_phone, total, created_at
+            FROM quotes
+            WHERE company_id = %s::uuid
+            ORDER BY created_at DESC
+            LIMIT %s OFFSET %s
+            """,
+            (company_id, limit, offset),
+        )
+        rows = cur.fetchall()
+        cur.execute("SELECT COUNT(*) FROM quotes WHERE company_id = %s::uuid", (company_id,))
+        total_count = cur.fetchone()[0]
+        quotes = [
+            {
+                "id":           str(r[0]),
+                "folio":        r[1],
+                "client_phone": r[2],
+                "total":        float(r[3]),
+                "created_at":   r[4].isoformat() if r[4] else None,
+            }
+            for r in rows
+        ]
+        return {"ok": True, "quotes": quotes, "total": total_count}
+    finally:
+        cur.close()
+        conn.close()
+
+
+@app.get("/api/quotes/{folio}/pdf")
+def download_quote_pdf(request: Request, folio: str):
+    company_id = require_company_id(request)
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT q.folio, q.client_phone, q.items, q.total, q.created_at,
+                   c.name, c.address_text, c.rfc,
+                   c.owner_phone
+            FROM quotes q
+            JOIN companies c ON c.id = q.company_id
+            WHERE q.company_id = %s::uuid AND q.folio = %s
+            LIMIT 1
+            """,
+            (company_id, folio.upper()),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Cotización no encontrada")
+
+        (
+            q_folio, client_phone, items_json, total,
+            created_at, company_name, address, rfc, owner_phone
+        ) = row
+
+        items = items_json if isinstance(items_json, list) else json.loads(items_json or "[]")
+
+        company_dict = {
+            "name":    company_name or "CotizaExpress",
+            "address": address or "",
+            "rfc":     rfc or "",
+            "phone":   owner_phone or "",
+        }
+    finally:
+        cur.close()
+        conn.close()
+
+    pdf_bytes = build_quote_pdf(
+        company=company_dict,
+        items=items,
+        client_phone=client_phone or "",
+        folio=q_folio,
+    )
+
+    filename = f"cotizacion_{q_folio}.pdf"
+    return StreamingResponse(
+        iter([pdf_bytes]),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
 
 @app.get("/api/company/me")
 def company_me(request: Request):
