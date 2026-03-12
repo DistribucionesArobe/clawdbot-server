@@ -2131,10 +2131,14 @@ def company_settings_get(request: Request):
 @app.get("/api/quotes")
 def list_quotes(
     request: Request,
+    authorization: str = Header(default=""),
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
 ):
-    company_id = require_company_id(request)
+    if authorization and authorization.lower().startswith("bearer "):
+        company_id = get_company_from_bearer(authorization)["company_id"]
+    else:
+        company_id = require_company_id(request)
     conn = get_conn()
     cur = conn.cursor()
     try:
@@ -2166,10 +2170,16 @@ def list_quotes(
         cur.close()
         conn.close()
 
-
 @app.get("/api/quotes/{folio}/pdf")
-def download_quote_pdf(request: Request, folio: str):
-    company_id = require_company_id(request)
+def download_quote_pdf(
+    request: Request,
+    folio: str,
+    authorization: str = Header(default=""),
+):
+    if authorization and authorization.lower().startswith("bearer "):
+        company_id = get_company_from_bearer(authorization)["company_id"]
+    else:
+        company_id = require_company_id(request)
     conn = get_conn()
     cur = conn.cursor()
     try:
@@ -2188,14 +2198,11 @@ def download_quote_pdf(request: Request, folio: str):
         row = cur.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Cotización no encontrada")
-
         (
             q_folio, client_phone, items_json, total,
             created_at, company_name, address, rfc, owner_phone
         ) = row
-
         items = items_json if isinstance(items_json, list) else json.loads(items_json or "[]")
-
         company_dict = {
             "name":    company_name or "CotizaExpress",
             "address": address or "",
@@ -2205,21 +2212,18 @@ def download_quote_pdf(request: Request, folio: str):
     finally:
         cur.close()
         conn.close()
-
     pdf_bytes = build_quote_pdf(
         company=company_dict,
         items=items,
         client_phone=client_phone or "",
         folio=q_folio,
     )
-
     filename = f"cotizacion_{q_folio}.pdf"
     return StreamingResponse(
         iter([pdf_bytes]),
         media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
-
 
 @app.get("/api/company/me")
 def company_me(request: Request):
