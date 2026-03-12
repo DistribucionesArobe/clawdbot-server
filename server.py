@@ -960,6 +960,7 @@ def get_company_from_bearer(authorization: str):
         raise HTTPException(status_code=401, detail="Invalid token")
     prefix = api_key_prefix(token)
     key_hash = api_key_hash(token)
+    print(f"BEARER DEBUG: prefix={repr(prefix)} hash={repr(key_hash)}")
     conn = None
     cur = None
     try:
@@ -982,7 +983,6 @@ def get_company_from_bearer(authorization: str):
     finally:
         if cur: cur.close()
         if conn: conn.close()
-
 
 # -------------------------
 # Models
