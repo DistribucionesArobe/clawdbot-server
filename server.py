@@ -702,12 +702,8 @@ def track_conversation_if_new(company_id: str, wa_from: str) -> dict:
     finally:
         cur.close()
         conn.close()
-
 def save_quote(company_id: str, client_phone: str, cart: list) -> str:
-    """
-    Guarda la cotización en la tabla `quotes`.
-    Devuelve el folio generado (ej. 'CX-A3F9K2').
-    """
+    client_phone = (client_phone or "").replace("whatsapp:", "").strip()
     folio = generate_folio()
     total = sum(float(it.get("price", 0)) * int(it.get("qty", 0)) for it in cart)
 
