@@ -499,11 +499,13 @@ def cart_render_quote(state: dict, company_id: str = "", client_phone: str = "")
         total += subtotal
         lines.append(f"• {qty} x {name} — ${subtotal:,.2f}")
 
-    # Guardar cotización en BD si tenemos contexto de empresa
     folio_txt = ""
     if company_id and client_phone:
         try:
-            folio = save_quote(company_id, client_phone, cart)
+            existing_folio = state.get("folio")
+            folio = save_quote(company_id, client_phone, cart, existing_folio=existing_folio)
+            if not existing_folio:
+                state["folio"] = folio  # persiste en state para reutilizar
             folio_txt = f"\n📋 Folio: *{folio}*"
         except Exception as e:
             print("CART RENDER SAVE QUOTE ERROR:", repr(e))
@@ -702,9 +704,9 @@ def track_conversation_if_new(company_id: str, wa_from: str) -> dict:
     finally:
         cur.close()
         conn.close()
-def save_quote(company_id: str, client_phone: str, cart: list) -> str:
+        
+def save_quote(company_id: str, client_phone: str, cart: list, existing_folio: str = None) -> str:
     client_phone = (client_phone or "").replace("whatsapp:", "").strip()
-    folio = generate_folio()
     total = sum(float(it.get("price", 0)) * int(it.get("qty", 0)) for it in cart)
 
     items_json = [
@@ -719,6 +721,8 @@ def save_quote(company_id: str, client_phone: str, cart: list) -> str:
         for it in cart
     ]
 
+    folio = existing_folio or generate_folio()
+
     conn = get_conn()
     cur = conn.cursor()
     try:
@@ -726,6 +730,10 @@ def save_quote(company_id: str, client_phone: str, cart: list) -> str:
             """
             INSERT INTO quotes (folio, company_id, client_phone, items, total)
             VALUES (%s, %s::uuid, %s, %s::jsonb, %s)
+            ON CONFLICT (folio) DO UPDATE
+              SET items = EXCLUDED.items,
+                  total = EXCLUDED.total,
+                  client_phone = EXCLUDED.client_phone
             """,
             (folio, company_id, client_phone, json.dumps(items_json), total),
         )
