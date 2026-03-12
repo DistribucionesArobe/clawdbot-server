@@ -1336,8 +1336,14 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                     "O escribe *asesor* para que te ayude alguien."
                 )
 
+        
         # Sin pendientes — mostrar carrito
         msg = cart_render_quote(state, company_id=company_id, client_phone=wa_from) if (state.get("cart") or []) else ""
+
+        # Persistir folio en state después de cart_render_quote
+        if wa_from and company_id:
+            upsert_quote_state(company_id, wa_from, state)
+        
         msg += (
             "\n\n¿Agregamos algo más?\n"
             "🧭 Comandos:\n"
