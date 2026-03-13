@@ -73,29 +73,16 @@ app = FastAPI(title="Clawdbot Server", version="1.0")
 # -------------------------
 
 app.add_middleware(
-
     CORSMiddleware,
-
     allow_origins=[
-
         "https://cotizaexpress.com",
-
         "https://www.cotizaexpress.com",
-
-        "https://buildquote-12.preview.emergentagent.com",
-
-        "https://ferreteria-whatsapp.emergent.host",
-
+        "https://app.cotizaexpress.com",
     ],
-
     allow_credentials=True,
-
     allow_methods=["*"],
-
     allow_headers=["*"],
-
 )
-
 # -------------------------
 
 # Basic endpoints
