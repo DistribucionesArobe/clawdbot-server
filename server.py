@@ -1,5 +1,5 @@
 from prompts_cotizabot import COTIZABOT_SYSTEM_PROMPT
-from fastapi.background import BackgroundTasks
+from fastapi.background import BackgroundTasksa
 import json
 import os
 import re
@@ -2340,12 +2340,26 @@ def register(body: RegisterBody):
         password_hash = hash_password(password)
         conn = get_conn()
         cur = conn.cursor()
-        cur.execute("insert into users (email, password_hash) values (%s, %s) returning id", (email, password_hash))
+
+        slug = re.sub(r'[^a-z0-9]+', '-', email.split("@")[0].lower()).strip('-')
+        cur.execute("INSERT INTO companies (name, slug) VALUES (%s, %s) RETURNING id", (email, slug or None))
+        company_id = cur.fetchone()[0]
+
+        token = generate_api_key()
+        cur.execute(
+            "INSERT INTO api_keys (company_id, name, prefix, key_hash) VALUES (%s, %s, %s, %s)",
+            (company_id, "default", api_key_prefix(token), api_key_hash(token))
+        )
+
+        cur.execute(
+            "INSERT INTO users (email, password_hash, company_id) VALUES (%s, %s, %s) RETURNING id",
+            (email, password_hash, company_id)
+        )
         row = cur.fetchone()
         if not row:
             raise HTTPException(status_code=500, detail="No se pudo obtener user_id")
         user_id = row[0]
-        return {"ok": True, "user_id": user_id}
+        return {"ok": True, "user_id": user_id, "company_id": str(company_id), "api_key": token}
     except IntegrityError:
         raise HTTPException(status_code=409, detail="Email ya registrado")
     except HTTPException:
