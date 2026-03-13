@@ -1,5 +1,5 @@
 from prompts_cotizabot import COTIZABOT_SYSTEM_PROMPT
-from fastapi.background import BackgroundTasksa
+from fastapi.background import BackgroundTasks
 import json
 import os
 import re
