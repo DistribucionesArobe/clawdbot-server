@@ -2515,12 +2515,16 @@ def _rebuild_embeddings_bg(company_id: str):
 
 @app.post("/api/pricebook/upload")
 def pricebook_upload(
+    request: Request,
     authorization: str = Header(default=""),
     file: UploadFile = File(...),
     background_tasks: BackgroundTasks = None,
 ):
-    tenant = get_company_from_bearer(authorization)
-    company_id = tenant["company_id"]
+    if authorization and authorization.lower().startswith("bearer "):
+        tenant = get_company_from_bearer(authorization)
+        company_id = tenant["company_id"]
+    else:
+        company_id = require_company_id(request)
 
     if not file.filename.lower().endswith((".xlsx", ".xlsm")):
         raise HTTPException(status_code=400, detail="Solo archivos .xlsx o .xlsm")
@@ -2685,7 +2689,6 @@ def pricebook_upload(
     finally:
         if cur: cur.close()
         if conn: conn.close()
-
 
 @app.get("/api/pricebook/items")
 def pricebook_items(
