@@ -66,6 +66,41 @@ Traduces y explicas textos ES/EN de forma natural.
 # -------------------------
 app = FastAPI(title="Clawdbot Server", version="1.0")
 
+# -------------------------
+
+# Middleware (CORS)
+
+# -------------------------
+
+app.add_middleware(
+
+    CORSMiddleware,
+
+    allow_origins=[
+
+        "https://cotizaexpress.com",
+
+        "https://www.cotizaexpress.com",
+
+        "https://buildquote-12.preview.emergentagent.com",
+
+        "https://ferreteria-whatsapp.emergent.host",
+
+    ],
+
+    allow_credentials=True,
+
+    allow_methods=["*"],
+
+    allow_headers=["*"],
+
+)
+
+# -------------------------
+
+# Basic endpoints
+
+# -------------------------
 
 # -------------------------
 # Config
@@ -1016,26 +1051,7 @@ class CompanyCreateBody(BaseModel):
     key_name: str = "default"
 
 
-# -------------------------
-# Middleware (CORS)
-# -------------------------
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "https://cotizaexpress.com",
-        "https://www.cotizaexpress.com",
-        "https://buildquote-12.preview.emergentagent.com",
-        "https://ferreteria-whatsapp.emergent.host",
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
-
-# -------------------------
-# Basic endpoints
-# -------------------------
 @app.get("/")
 def root():
     return {"ok": True, "service": "clawdbot-server"}
@@ -2693,14 +2709,18 @@ def pricebook_upload(
 @app.get("/api/pricebook/items")
 def pricebook_items(
     request: Request,
+    authorization: str = Header(default=""),
     q: Optional[str] = Query(default=None),
     limit: int = Query(default=20, ge=1, le=200),
 ):
     conn = None
     cur = None
     try:
-        _ = get_user_from_session(request)
-        company_id = require_company_id(request)
+        if authorization and authorization.lower().startswith("bearer "):
+            company_id = get_company_from_bearer(authorization)["company_id"]
+        else:
+            _ = get_user_from_session(request)
+            company_id = require_company_id(request)
         if not company_id:
             raise HTTPException(status_code=400, detail="No pude resolver company_id")
         conn = get_conn()
@@ -2746,7 +2766,6 @@ def pricebook_items(
     finally:
         if cur: cur.close()
         if conn: conn.close()
-
 
 class PricebookItemCreateBody(BaseModel):
     name: str
