@@ -78,11 +78,14 @@ app.add_middleware(
         "https://cotizaexpress.com",
         "https://www.cotizaexpress.com",
         "https://app.cotizaexpress.com",
+        "https://whatsapp-quotes-test.preview.emergentagent.com",
+        "https://whatsapp-quotes-test.preview.static.emergentagent.com",
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 # -------------------------
 
 # Basic endpoints
