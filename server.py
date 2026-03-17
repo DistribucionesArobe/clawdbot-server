@@ -320,6 +320,10 @@ def looks_like_hours_question(text: str) -> bool:
         "a que hora", "a qué hora", "que hora abren", "qué hora abren",
         "horario", "horarios", "abren hoy", "abren mañana", "abierto", "abiertos",
         "cierran", "cierre", "ubicacion", "ubicación", "direccion", "dirección",
+        "donde se ubican", "donde estan", "dónde están", "donde quedan",
+        "como llego", "cómo llego", "donde queda", "dónde queda",
+        "donde se encuentran", "donde los encuentro", "donde es", "dónde es",
+        "donde están ubicados", "como los encuentro",
     ])
 
 
