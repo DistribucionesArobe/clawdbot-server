@@ -1477,17 +1477,29 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             "Mientras tanto puedes seguir agregando productos "
             "o esperar a que te contacten."
         )
-
+    
     # =========================================================
     # 0.5) SALUDOS
     # =========================================================
     if _is_greeting_like(tnorm):
+        try:
+            conn_co = get_conn()
+            cur_co = conn_co.cursor()
+            cur_co.execute("SELECT name FROM companies WHERE id=%s LIMIT 1", (company_id,))
+            row_co = cur_co.fetchone()
+            cur_co.close()
+            conn_co.close()
+            company_name = row_co[0] if row_co else "tu ferretería"
+        except Exception:
+            company_name = "tu ferretería"
+    
         if wa_from:
             st = get_quote_state(company_id, wa_from) or {}
             if (st.get("cart") or []) or (st.get("pending") or []):
                 clear_quote_state(company_id, wa_from)
                 return (
-                    "👋 ¡Hola! Empezamos una cotización nueva.\n\n"
+                    f"👋 ¡Hola! Soy el Cotizabot de *{company_name}*\n\n"
+                    "Empezamos una cotización nueva.\n\n"
                     "Mándame tu pedido así:\n"
                     "👉 10 cemento, 5 varilla 3/8\n\n"
                     "🧭 Comandos:\n"
@@ -1495,14 +1507,14 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                     "• 'salir' → cancelar"
                 )
         return (
-            "👋 ¡Hola! Puedo cotizarte materiales de construcción y ferretería.\n\n"
+            f"👋 ¡Hola! Soy el Cotizabot de *{company_name}*\n\n"
+            "Puedo cotizarte materiales de construcción y ferretería.\n\n"
             "Mándame tu pedido así:\n"
             "👉 10 cemento, 5 varilla 3/8, 2 martillos\n\n"
             "🧭 Comandos:\n"
             "• 'nueva cotizacion' → empezar de cero\n"
             "• 'salir' → cancelar"
         )
-
     # =========================================================
     # 0.75) RESOLVER SPECS PENDIENTES
     # =========================================================
