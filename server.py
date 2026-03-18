@@ -909,6 +909,8 @@ def extract_text_from_image(image_bytes: bytes) -> str | None:
 
 def notify_owner_escalation(wa_api_key: str, phone_number_id: str, owner_phone: str,
                              client_phone: str, reason: str, state: dict):
+    # Meta Cloud API requiere número sin '+' ni 'whatsapp:'
+    owner_phone_clean = (owner_phone or "").replace("+", "").replace("whatsapp:", "").strip()
     cart = (state or {}).get("cart") or []
     cart_txt = ""
     if cart:
@@ -921,10 +923,12 @@ def notify_owner_escalation(wa_api_key: str, phone_number_id: str, owner_phone: 
         f"🛒 Carrito actual:{cart_txt if cart_txt else ' (vacío)'}\n\n"
         f"Responde directo a ese número."
     )
-    send_whatsapp_text(wa_api_key, phone_number_id, owner_phone, msg)
+    send_whatsapp_text(wa_api_key, phone_number_id, owner_phone_clean, msg)
 
 def notify_owner_comprobante(wa_api_key: str, phone_number_id: str, owner_phone: str,
                               client_phone: str, state: dict):
+    # Meta Cloud API requiere número sin '+' ni 'whatsapp:'
+    owner_phone_clean = (owner_phone or "").replace("+", "").replace("whatsapp:", "").strip()
     cart = (state or {}).get("cart") or []
     cart_txt = ""
     if cart:
@@ -936,7 +940,7 @@ def notify_owner_comprobante(wa_api_key: str, phone_number_id: str, owner_phone:
         f"🛒 Cotización:{cart_txt if cart_txt else ' (sin carrito)'}\n\n"
         f"Revisa tu WhatsApp — el cliente acaba de mandar el comprobante."
     )
-    send_whatsapp_text(wa_api_key, phone_number_id, owner_phone, msg)
+    send_whatsapp_text(wa_api_key, phone_number_id, owner_phone_clean, msg)
 
 # -------------------------
 # Sessions
