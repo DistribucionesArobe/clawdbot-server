@@ -1548,6 +1548,14 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
     # =========================================================
     pagar_triggers = {"pagar", "pago", "como pago", "cómo pago", "quiero pagar", "datos de pago", "datos bancarios", "transferencia"}
     if any(pt == tnorm or pt in tnorm for pt in pagar_triggers):
+        # ── Cobro integrado solo en Plan Pro y Enterprise ────────────────────
+        _plan = get_company_plan_code(company_id)
+        if _plan not in ("pro", "enterprise"):
+            return (
+                "Para procesar tu pago, contáctanos directamente:\n\n"
+                "📞 Llama o escribe *asesor* y un representante te atenderá. 🙏"
+            )
+        # ─────────────────────────────────────────────────────────────────────
         try:
             conn = get_conn()
             cur = conn.cursor()
@@ -2993,7 +3001,7 @@ def pricebook_items(
     request: Request,
     authorization: str = Header(default=""),
     q: Optional[str] = Query(default=None),
-    limit: int = Query(default=20, ge=1, le=200),
+    limit: int = Query(default=20, ge=1, le=1000),
 ):
     conn = None
     cur = None
