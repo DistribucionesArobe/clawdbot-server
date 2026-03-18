@@ -1154,11 +1154,43 @@ async def whatsapp_webhook(request: Request):
         elif itype == "button_reply":
             text = (interactive.get("button_reply") or {}).get("title") or ""
 
+    # ── Log mensaje del cliente ───────────────────────────────────────────────
+    if text:
+        log_message(company["company_id"], from_phone, "user", text)
+
     reply = build_reply_for_company(
         company["company_id"], text,
         wa_from=from_phone,
         is_interactive=(msg_type == "interactive"),
     )
+
+    # ── Extraer texto plano del reply para el log ─────────────────────────────
+    def _reply_text_for_log(r) -> str:
+        if isinstance(r, dict):
+            rtype = r.get("type", "")
+            if rtype == "text_then_list_sections":
+                body = (r.get("text") or "") + "\n" + (r.get("body") or "")
+            else:
+                body = r.get("body") or ""
+            # Incluir opciones de lista
+            for section in (r.get("sections") or []):
+                for row in (section.get("rows") or []):
+                    body += "\n  " + row.get("id","") + " " + row.get("title","") + " " + row.get("description","")
+            for opt in (r.get("options") or []):
+                body += "\n  • " + str(opt)
+            return body.strip()
+        return (r or "").strip()
+
+    # ── Log respuesta del bot (con carrito/folio del state) ───────────────────
+    try:
+        _state_for_log = get_quote_state(company["company_id"], from_phone) or {}
+        _log_extra = {
+            "cart":  _state_for_log.get("cart") or [],
+            "folio": _state_for_log.get("folio") or None,
+        }
+    except Exception:
+        _log_extra = {}
+    log_message(company["company_id"], from_phone, "bot", _reply_text_for_log(reply), _log_extra)
 
     if isinstance(reply, dict) and reply.get("type") == "list":
         send_whatsapp_list(
@@ -1204,6 +1236,139 @@ async def whatsapp_webhook(request: Request):
         )
 
     return {"ok": True}
+
+
+# ── Conversation logging ──────────────────────────────────────────────────────
+
+def log_message(company_id: str, client_phone: str, role: str, message: str, extra: dict = None):
+    """
+    Guarda un mensaje en conversation_messages.
+    role: 'user' | 'bot'
+    extra: dict opcional con cart/folio para adjuntar al mensaje del bot
+    Falla silently — nunca debe romper el flujo del bot.
+    """
+    try:
+        conn = get_conn()
+        cur  = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO conversation_messages
+                (company_id, client_phone, role, message, extra, created_at)
+            VALUES (%s, %s, %s, %s, %s::jsonb, now())
+            """,
+            (company_id, client_phone, role, (message or "")[:4000],
+             json.dumps(extra or {})),
+        )
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print("LOG_MESSAGE ERROR:", repr(e))
+
+
+@app.get("/api/conversations")
+def list_conversations(
+    request: Request,
+    authorization: str = Header(default=""),
+    limit: int = Query(default=30, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+):
+    """
+    Lista de conversaciones únicas (un registro por cliente),
+    con el último mensaje, carrito y folio más reciente.
+    """
+    if authorization and authorization.lower().startswith("bearer "):
+        company_id = get_company_from_bearer(authorization)["company_id"]
+    else:
+        company_id = require_company_id(request)
+
+    conn = get_conn()
+    cur  = conn.cursor()
+    try:
+        # Un row por cliente: último mensaje, timestamp, y último extra (carrito/folio)
+        cur.execute(
+            """
+            SELECT
+                client_phone,
+                MAX(created_at)                                          AS last_at,
+                (array_agg(message   ORDER BY created_at DESC))[1]       AS last_message,
+                (array_agg(role      ORDER BY created_at DESC))[1]       AS last_role,
+                (array_agg(extra     ORDER BY created_at DESC))[1]       AS last_extra,
+                COUNT(*)                                                  AS total_msgs
+            FROM conversation_messages
+            WHERE company_id = %s::uuid
+            GROUP BY client_phone
+            ORDER BY last_at DESC
+            LIMIT %s OFFSET %s
+            """,
+            (company_id, limit, offset),
+        )
+        rows = cur.fetchall()
+        cur.execute(
+            "SELECT COUNT(DISTINCT client_phone) FROM conversation_messages WHERE company_id = %s::uuid",
+            (company_id,),
+        )
+        total = cur.fetchone()[0]
+        convs = []
+        for r in rows:
+            extra = r[4] or {}
+            convs.append({
+                "client_phone": r[0],
+                "last_at":      r[1].isoformat() if r[1] else None,
+                "last_message": r[2],
+                "last_role":    r[3],
+                "cart":         extra.get("cart") or [],
+                "folio":        extra.get("folio") or None,
+                "total_msgs":   r[5],
+            })
+        return {"ok": True, "conversations": convs, "total": total}
+    finally:
+        cur.close()
+        conn.close()
+
+
+@app.get("/api/conversations/{client_phone}")
+def get_conversation(
+    request: Request,
+    client_phone: str,
+    authorization: str = Header(default=""),
+    limit: int = Query(default=100, ge=1, le=500),
+):
+    """
+    Historial completo de mensajes de un cliente específico.
+    """
+    if authorization and authorization.lower().startswith("bearer "):
+        company_id = get_company_from_bearer(authorization)["company_id"]
+    else:
+        company_id = require_company_id(request)
+
+    conn = get_conn()
+    cur  = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT role, message, extra, created_at
+            FROM conversation_messages
+            WHERE company_id = %s::uuid AND client_phone = %s
+            ORDER BY created_at ASC
+            LIMIT %s
+            """,
+            (company_id, client_phone, limit),
+        )
+        rows = cur.fetchall()
+        messages = [
+            {
+                "role":       r[0],
+                "message":    r[1],
+                "cart":       (r[2] or {}).get("cart") or [],
+                "folio":      (r[2] or {}).get("folio") or None,
+                "created_at": r[3].isoformat() if r[3] else None,
+            }
+            for r in rows
+        ]
+        return {"ok": True, "client_phone": client_phone, "messages": messages}
+    finally:
+        cur.close()
+        conn.close()
 
 def send_whatsapp_list_sections(wa_api_key: str, phone_number_id: str, to: str,
                                  body_text: str, sections: list, button_label: str = "Ver opciones"):
