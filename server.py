@@ -1983,6 +1983,26 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
 
     # 4.75) Parece producto sin cantidad
     if looks_like_product_phrase(user_text) and not re.search(r"\b\d+\b", user_text):
+        # Detectar si menciona múltiples productos
+        productos_detectados = []
+        for sep in [" y ", " e ", ",", "/"]:
+            if sep in user_text.lower():
+                partes = [p.strip() for p in user_text.lower().split(sep) if p.strip()]
+                if len(partes) > 1:
+                    productos_detectados = partes
+                    break
+        
+        if productos_detectados:
+            ejemplos = ", ".join([f"10 {p}" for p in productos_detectados[:3]])
+            return (
+                f"Vi que mencionas varios productos. ¿Cuántas piezas de cada uno necesitas?\n\n"
+                f"Mándamelo así:\n"
+                f"👉 {ejemplos}\n\n"
+                "🧭 Comandos:\n"
+                "• 'nueva cotizacion' → empezar de cero\n"
+                "• 'salir' → cancelar"
+            )
+        
         return (
             "¿Cuántas piezas necesitas?\n"
             "Ejemplo: '10 sacos cemento' o '5 varilla 3/8'\n\n"
@@ -1990,7 +2010,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             "• 'nueva cotizacion' → empezar de cero\n"
             "• 'salir' → cancelar"
         )
-
+    
     # =========================================================
     # 5) OPENAI FALLBACK
     # =========================================================
