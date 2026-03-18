@@ -1109,11 +1109,18 @@ async def whatsapp_webhook(request: Request):
                 print("COMPROBANTE NOTIFY ERROR:", repr(e))
             _st_check.pop("awaiting_comprobante", None)
             upsert_quote_state(company["company_id"], from_phone, _st_check)
+            _bot_reply_comprobante = "✅ ¡Comprobante recibido! Le avisamos a la empresa y en breve te confirman tu pedido. 🙏"
+            # Log comprobante
+            log_message(company["company_id"], from_phone, "user", "📎 [Imagen de comprobante de pago]")
+            log_message(company["company_id"], from_phone, "bot", _bot_reply_comprobante, {
+                "cart":  _st_check.get("cart") or [],
+                "folio": _st_check.get("folio") or None,
+            })
             send_whatsapp_text(
                 wa_api_key=company["wa_api_key"],
                 phone_number_id=company["wa_phone_number_id"],
                 to=from_phone,
-                text="✅ ¡Comprobante recibido! Le avisamos a la empresa y en breve te confirman tu pedido. 🙏",
+                text=_bot_reply_comprobante,
             )
             return {"ok": True}
         # ────────────────────────────────────────────────────────────────
