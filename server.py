@@ -2442,6 +2442,156 @@ def delete_company_logo(request: Request):
         if cur:  cur.close()
         if conn: conn.close()
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STRIPE — Suscripciones CotizaExpress
+# ══════════════════════════════════════════════════════════════════════════════
+
+import stripe as _stripe
+
+_STRIPE_SECRET_KEY     = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
+_STRIPE_WEBHOOK_SECRET = (os.getenv("STRIPE_WEBHOOK_SECRET") or "").strip()
+
+# Price IDs por plan
+_STRIPE_PRICES = {
+    "cotizabot": "price_1TCSlDF3nSPXsrl4Q05iH98d",
+    "pro":        "price_1TCSlcF3nSPXsrl4mDPdBvN3",
+    "enterprise": "price_1TCSlvF3nSPXsrl41CLP8xv7",
+}
+
+# Mapeo inverso: price_id → plan_code
+_PRICE_TO_PLAN = {v: k for k, v in _STRIPE_PRICES.items()}
+
+
+class CheckoutBody(BaseModel):
+    plan: str          # "cotizabot" | "pro" | "enterprise"
+    success_url: str
+    cancel_url: str
+
+
+@app.post("/api/pagos/crear-checkout")
+def crear_checkout(request: Request, body: CheckoutBody):
+    """
+    Crea una sesión de Stripe Checkout para suscripción mensual.
+    Devuelve la URL a la que redirigir al cliente.
+    """
+    if not _STRIPE_SECRET_KEY:
+        raise HTTPException(status_code=500, detail="STRIPE_SECRET_KEY no configurada")
+
+    plan = (body.plan or "").strip().lower()
+    price_id = _STRIPE_PRICES.get(plan)
+    if not price_id:
+        raise HTTPException(status_code=400, detail=f"Plan inválido: {plan}")
+
+    # Obtener company_id del usuario autenticado
+    company_id = require_company_id(request)
+
+    _stripe.api_key = _STRIPE_SECRET_KEY
+    try:
+        session = _stripe.checkout.Session.create(
+            mode="subscription",
+            line_items=[{"price": price_id, "quantity": 1}],
+            success_url=body.success_url + "?session_id={CHECKOUT_SESSION_ID}",
+            cancel_url=body.cancel_url,
+            metadata={"company_id": company_id, "plan": plan},
+            currency="mxn",
+        )
+        return {"ok": True, "checkout_url": session.url, "session_id": session.id}
+    except Exception as e:
+        print("STRIPE CHECKOUT ERROR:", repr(e))
+        raise HTTPException(status_code=500, detail=f"Error creando checkout: {str(e)}")
+
+
+@app.get("/api/pagos/estado")
+def pago_estado(request: Request, session_id: str = Query(...)):
+    """
+    Verifica el estado de una sesión de Stripe.
+    El frontend llama esto después del redirect de éxito.
+    """
+    if not _STRIPE_SECRET_KEY:
+        raise HTTPException(status_code=500, detail="STRIPE_SECRET_KEY no configurada")
+
+    _stripe.api_key = _STRIPE_SECRET_KEY
+    try:
+        session = _stripe.checkout.Session.retrieve(session_id)
+        paid = session.payment_status == "paid"
+        plan = session.metadata.get("plan") if session.metadata else None
+        return {"ok": True, "paid": paid, "plan": plan, "status": session.payment_status}
+    except Exception as e:
+        print("STRIPE ESTADO ERROR:", repr(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/pagos/webhook")
+async def stripe_webhook(request: Request):
+    """
+    Webhook de Stripe — activa el plan automáticamente cuando se paga.
+    Configurar en Stripe Dashboard → Webhooks → Endpoint URL:
+    https://api.cotizaexpress.com/api/pagos/webhook
+    Eventos: checkout.session.completed, customer.subscription.deleted
+    """
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature", "")
+
+    if not _STRIPE_WEBHOOK_SECRET:
+        raise HTTPException(status_code=500, detail="STRIPE_WEBHOOK_SECRET no configurada")
+
+    _stripe.api_key = _STRIPE_SECRET_KEY
+    try:
+        event = _stripe.Webhook.construct_event(payload, sig_header, _STRIPE_WEBHOOK_SECRET)
+    except Exception as e:
+        print("STRIPE WEBHOOK SIGNATURE ERROR:", repr(e))
+        raise HTTPException(status_code=400, detail="Invalid signature")
+
+    event_type = event.get("type")
+    print(f"STRIPE EVENT: {event_type}")
+
+    if event_type == "checkout.session.completed":
+        session = event["data"]["object"]
+        company_id = (session.get("metadata") or {}).get("company_id")
+        plan       = (session.get("metadata") or {}).get("plan")
+        stripe_customer_id = session.get("customer")
+
+        if company_id and plan:
+            try:
+                conn = get_conn()
+                cur  = conn.cursor()
+                cur.execute(
+                    """
+                    UPDATE companies
+                    SET plan_code=%s, stripe_customer_id=%s, updated_at=now()
+                    WHERE id=%s
+                    RETURNING id
+                    """,
+                    (plan, stripe_customer_id, company_id),
+                )
+                row = cur.fetchone()
+                cur.close()
+                conn.close()
+                print(f"STRIPE PLAN ACTIVADO: company={company_id} plan={plan}")
+            except Exception as e:
+                print("STRIPE WEBHOOK DB ERROR:", repr(e))
+
+    elif event_type == "customer.subscription.deleted":
+        # Suscripción cancelada — bajar a free
+        subscription = event["data"]["object"]
+        stripe_customer_id = subscription.get("customer")
+        if stripe_customer_id:
+            try:
+                conn = get_conn()
+                cur  = conn.cursor()
+                cur.execute(
+                    "UPDATE companies SET plan_code='free', updated_at=now() WHERE stripe_customer_id=%s",
+                    (stripe_customer_id,),
+                )
+                cur.close()
+                conn.close()
+                print(f"STRIPE SUSCRIPCION CANCELADA: customer={stripe_customer_id}")
+            except Exception as e:
+                print("STRIPE CANCEL DB ERROR:", repr(e))
+
+    return {"ok": True}
+
 # ── Quotes ────────────────────────────────────────────────────────────────────
 
 @app.get("/api/quotes")
