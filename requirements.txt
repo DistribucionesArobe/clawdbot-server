@@ -12,3 +12,4 @@ rapidfuzz==3.6.2
 rapidfuzz
 pgvector
 reportlab
+stripe
