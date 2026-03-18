@@ -3222,6 +3222,9 @@ def extract_qty_items_robust(text: str):
     t = re.sub(r"\b(cotiza|cotización|cotizacion|precio|precios|por favor|porfa|pls)\b", " ", t, flags=re.IGNORECASE)
     # Protege fracciones 1/4, 5/8
     t = re.sub(r"(\d+)\s*/\s*(\d+)", r"\1_\2", t)
+    # Separar por " y " cuando va seguido de número (ej: "50 tablaroca y 10 durock")
+    t = re.sub(r"\s+y\s+(?=\d)", "\n", t, flags=re.IGNORECASE)
+    t = re.sub(r"\s+e\s+(?=\d)", "\n", t, flags=re.IGNORECASE)
     items = []
     lines = [l.strip() for l in re.split(r"[\n\r]+", t) if l.strip()]
     for line in lines:
