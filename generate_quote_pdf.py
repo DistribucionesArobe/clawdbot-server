@@ -130,28 +130,6 @@ def build_quote_pdf(
     client_phone: str,
     folio: Optional[str] = None,
 ) -> bytes:
-    """
-    Genera cotización en PDF y devuelve bytes listos para enviar.
-
-    Parámetros:
-        company: dict con claves del registro `companies`:
-            - name (str)
-            - address (str, opcional)
-            - phone / whatsapp_display (str, opcional)
-            - rfc (str, opcional)
-            - logo_url (str, opcional) — reservado para futuro
-        items: lista de dicts con:
-            - name (str)       — nombre del producto
-            - qty  (float)     — cantidad
-            - unit (str)       — unidad (pza, mt, kg, etc.)
-            - unit_price (float)
-            - subtotal (float)
-        client_phone: número del cliente (display)
-        folio: si None se genera automáticamente
-
-    Retorna:
-        bytes del PDF
-    """
     if folio is None:
         folio = generate_folio()
 
@@ -177,7 +155,6 @@ def build_quote_pdf(
     phone_disp   = company.get("phone") or company.get("whatsapp_display", "")
     rfc          = company.get("rfc", "")
 
-    # Bloque izquierdo: datos empresa
     left_lines = [Paragraph(company_name, S["company_name"])]
     if address:
         left_lines.append(Paragraph(address, S["company_sub"]))
@@ -186,7 +163,6 @@ def build_quote_pdf(
     if rfc:
         left_lines.append(Paragraph(f"RFC: {rfc}", S["company_sub"]))
 
-    # Bloque derecho: folio + fecha
     right_lines = [
         Paragraph("COTIZACIÓN", S["folio_label"]),
         Paragraph(folio, S["folio_value"]),
@@ -238,7 +214,6 @@ def build_quote_pdf(
     prod_table = Table(table_data, colWidths=col_widths, repeatRows=1)
     prod_table.setStyle(
         TableStyle([
-            # Header
             ("BACKGROUND",   (0, 0), (-1, 0), COLOR_PRIMARY),
             ("TEXTCOLOR",    (0, 0), (-1, 0), COLOR_WHITE),
             ("FONTNAME",     (0, 0), (-1, 0), "Helvetica-Bold"),
@@ -246,14 +221,13 @@ def build_quote_pdf(
             ("ALIGN",        (0, 0), (-1, 0), "CENTER"),
             ("BOTTOMPADDING",(0, 0), (-1, 0), 6),
             ("TOPPADDING",   (0, 0), (-1, 0), 6),
-            # Body
             ("FONTNAME",     (0, 1), (-1, -1), "Helvetica"),
             ("FONTSIZE",     (0, 1), (-1, -1), 8),
             ("ROWBACKGROUNDS",(0, 1), (-1, -1), [COLOR_WHITE, COLOR_LIGHT]),
-            ("ALIGN",        (0, 1), (0, -1),  "CENTER"),   # #
-            ("ALIGN",        (2, 1), (2, -1),  "CENTER"),   # cant
-            ("ALIGN",        (3, 1), (3, -1),  "CENTER"),   # unidad
-            ("ALIGN",        (4, 1), (-1, -1), "RIGHT"),    # precios
+            ("ALIGN",        (0, 1), (0, -1),  "CENTER"),
+            ("ALIGN",        (2, 1), (2, -1),  "CENTER"),
+            ("ALIGN",        (3, 1), (3, -1),  "CENTER"),
+            ("ALIGN",        (4, 1), (-1, -1), "RIGHT"),
             ("LEFTPADDING",  (0, 0), (-1, -1), 5),
             ("RIGHTPADDING", (0, 0), (-1, -1), 5),
             ("BOTTOMPADDING",(0, 1), (-1, -1), 5),
@@ -299,7 +273,7 @@ def build_quote_pdf(
     )
     story.append(
         Paragraph(
-            f"Generado por CotizaExpress  •  {fecha_str}",
+            f'Generado por <a href="https://cotizaexpress.com"><u>CotizaExpress</u></a>  •  cotizaexpress.com  •  {fecha_str}',
             S["footer"],
         )
     )
