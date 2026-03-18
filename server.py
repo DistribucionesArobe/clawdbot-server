@@ -1991,7 +1991,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 if len(partes) > 1:
                     productos_detectados = partes
                     break
-        
+
         if productos_detectados:
             ejemplos = ", ".join([f"10 {p}" for p in productos_detectados[:3]])
             return (
@@ -2002,7 +2002,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 "• 'nueva cotizacion' → empezar de cero\n"
                 "• 'salir' → cancelar"
             )
-        
+
         return (
             "¿Cuántas piezas necesitas?\n"
             "Ejemplo: '10 sacos cemento' o '5 varilla 3/8'\n\n"
@@ -2010,7 +2010,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             "• 'nueva cotizacion' → empezar de cero\n"
             "• 'salir' → cancelar"
         )
-    
+
     # =========================================================
     # 5) OPENAI FALLBACK
     # =========================================================
@@ -2107,6 +2107,9 @@ class CompanySettingsBody(BaseModel):
     bank_clabe: Optional[str] = None
     bank_account_number: Optional[str] = None
     owner_phone: Optional[str] = None
+    email: Optional[str] = None
+    rfc: Optional[str] = None
+    brand_color: Optional[str] = None
 
 
 @app.post("/api/company/settings")
@@ -2125,6 +2128,10 @@ def company_settings_update(request: Request, body: CompanySettingsBody):
     if bank_clabe and (not bank_clabe.isdigit() or len(bank_clabe) != 18):
         raise HTTPException(status_code=400, detail="CLABE inválida (debe ser 18 dígitos)")
 
+    email       = (body.email or "").strip() or None
+    rfc         = (body.rfc or "").strip().upper() or None
+    brand_color = (body.brand_color or "").strip() or None
+
     conn = None
     cur = None
     try:
@@ -2135,15 +2142,17 @@ def company_settings_update(request: Request, body: CompanySettingsBody):
             UPDATE companies
             SET hours_text=%s, address_text=%s, google_maps_url=%s, mercadopago_url=%s,
                 bank_name=%s, bank_account_name=%s, bank_clabe=%s, bank_account_number=%s,
-                owner_phone=%s, updated_at=now()
+                owner_phone=%s, email=%s, rfc=%s, brand_color=%s, updated_at=now()
             WHERE id=%s
             RETURNING id
             """,
-            (hours, addr, maps, mp_url, bank_name, bank_acc_name, bank_clabe, bank_acc_num, owner_phone, company_id),
+            (hours, addr, maps, mp_url, bank_name, bank_acc_name, bank_clabe, bank_acc_num,
+             owner_phone, email, rfc, brand_color, company_id),
         )
         row = cur.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Company no encontrada")
+        conn.commit()
         return {"ok": True}
     finally:
         if cur: cur.close()
@@ -2161,7 +2170,7 @@ def company_settings_get(request: Request):
             """
             SELECT hours_text, address_text, google_maps_url,
                    mercadopago_url, bank_name, bank_account_name, bank_clabe, bank_account_number,
-                   owner_phone
+                   owner_phone, email, rfc, brand_color, logo_url
             FROM companies WHERE id=%s LIMIT 1
             """,
             (company_id,),
@@ -2175,12 +2184,79 @@ def company_settings_get(request: Request):
                 "hours_text": row[0], "address_text": row[1], "google_maps_url": row[2],
                 "mercadopago_url": row[3], "bank_name": row[4], "bank_account_name": row[5],
                 "bank_clabe": row[6], "bank_account_number": row[7], "owner_phone": row[8],
+                "email": row[9], "rfc": row[10], "brand_color": row[11], "logo_url": row[12],
             },
         }
     finally:
         if cur: cur.close()
         if conn: conn.close()
 
+
+
+# ── Logo upload ───────────────────────────────────────────────────────────────
+
+@app.post("/api/company/logo")
+async def upload_company_logo(
+    request: Request,
+    file: UploadFile = File(...),
+):
+    """
+    Recibe una imagen (PNG/JPG/WEBP, máx 2 MB) y la guarda como data URL
+    en companies.logo_url. El PDF la lee directamente desde ahí.
+    """
+    company_id = require_company_id(request)
+
+    content = await file.read()
+    if len(content) > 2 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Imagen demasiado grande (máx 2 MB)")
+
+    ext = (file.filename or "logo.png").rsplit(".", 1)[-1].lower()
+    if ext not in ("png", "jpg", "jpeg", "webp"):
+        raise HTTPException(status_code=400, detail="Formato no soportado (usa PNG, JPG o WEBP)")
+
+    import base64
+    mime = "image/jpeg" if ext in ("jpg", "jpeg") else f"image/{ext}"
+    b64  = base64.b64encode(content).decode()
+    data_url = f"data:{mime};base64,{b64}"
+
+    conn = None
+    cur  = None
+    try:
+        conn = get_conn()
+        cur  = conn.cursor()
+        cur.execute(
+            "UPDATE companies SET logo_url=%s, updated_at=now() WHERE id=%s RETURNING id",
+            (data_url, company_id),
+        )
+        if not cur.fetchone():
+            raise HTTPException(status_code=404, detail="Company no encontrada")
+        conn.commit()
+        return {"ok": True, "logo_url": data_url}
+    finally:
+        if cur:  cur.close()
+        if conn: conn.close()
+
+
+@app.delete("/api/company/logo")
+def delete_company_logo(request: Request):
+    """Elimina el logo de la empresa (pone logo_url = NULL)."""
+    company_id = require_company_id(request)
+    conn = None
+    cur  = None
+    try:
+        conn = get_conn()
+        cur  = conn.cursor()
+        cur.execute(
+            "UPDATE companies SET logo_url=NULL, updated_at=now() WHERE id=%s RETURNING id",
+            (company_id,),
+        )
+        if not cur.fetchone():
+            raise HTTPException(status_code=404, detail="Company no encontrada")
+        conn.commit()
+        return {"ok": True}
+    finally:
+        if cur:  cur.close()
+        if conn: conn.close()
 
 # ── Quotes ────────────────────────────────────────────────────────────────────
 
@@ -2243,7 +2319,7 @@ def download_quote_pdf(
             """
             SELECT q.folio, q.client_phone, q.items, q.total, q.created_at,
                    c.name, c.address_text, c.rfc,
-                   c.owner_phone
+                   c.owner_phone, c.email, c.logo_url, c.brand_color
             FROM quotes q
             JOIN companies c ON c.id = q.company_id
             WHERE q.company_id = %s::uuid AND q.folio = %s
@@ -2256,14 +2332,18 @@ def download_quote_pdf(
             raise HTTPException(status_code=404, detail="Cotización no encontrada")
         (
             q_folio, client_phone, items_json, total,
-            created_at, company_name, address, rfc, owner_phone
+            created_at, company_name, address, rfc,
+            owner_phone, company_email, logo_url, brand_color
         ) = row
         items = items_json if isinstance(items_json, list) else json.loads(items_json or "[]")
         company_dict = {
-            "name":    company_name or "CotizaExpress",
-            "address": address or "",
-            "rfc":     rfc or "",
-            "phone":   owner_phone or "",
+            "name":        company_name or "CotizaExpress",
+            "address":     address or "",
+            "rfc":         rfc or "",
+            "phone":       owner_phone or "",
+            "email":       company_email or "",
+            "logo_url":    logo_url or "",
+            "brand_color": brand_color or "",
         }
     finally:
         cur.close()
