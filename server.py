@@ -1550,7 +1550,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
     if any(pt == tnorm or pt in tnorm for pt in pagar_triggers):
         # ── Cobro integrado solo en Plan Pro y Enterprise ────────────────────
         _plan = get_company_plan_code(company_id)
-        if _plan not in ("pro", "enterprise"):
+        if _plan not in ("cotizabot", "pro", "enterprise", "owner"):
             return (
                 "Para procesar tu pago, contáctanos directamente:\n\n"
                 "📞 Llama o escribe *asesor* y un representante te atenderá. 🙏"
