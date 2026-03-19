@@ -1687,21 +1687,21 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 clear_quote_state(company_id, wa_from)
                 return (
                     f"👋 ¡Hola! Soy el Cotizabot de *{company_name}*\n\n"
-                    "Empezamos una cotización nueva.\n\n"
-                    "Mándame tu pedido así:\n"
-                    "👉 10 cemento, 5 varilla 3/8\n\n"
-                    "🧭 Comandos:\n"
-                    "• 'nueva cotizacion' → empezar de cero\n"
-                    "• 'salir' → cancelar"
+                    "¿En qué te puedo ayudar?\n"
+                    "🔨 Cotizar materiales → mándame tu pedido\n"
+                    "🕐 Horarios y ubicación → escribe *horario* o *ubicación*\n"
+                    "👤 Hablar con alguien → escribe *asesor*\n\n"
+                    "Ejemplo de cotización:\n"
+                    "👉 10 cemento, 5 varilla 3/8"
                 )
         return (
             f"👋 ¡Hola! Soy el Cotizabot de *{company_name}*\n\n"
-            "Puedo cotizarte materiales de construcción y ferretería.\n\n"
-            "Mándame tu pedido así:\n"
-            "👉 10 cemento, 5 varilla 3/8, 2 martillos\n\n"
-            "🧭 Comandos:\n"
-            "• 'nueva cotizacion' → empezar de cero\n"
-            "• 'salir' → cancelar"
+            "¿En qué te puedo ayudar?\n"
+            "🔨 Cotizar materiales → mándame tu pedido\n"
+            "🕐 Horarios y ubicación → escribe *horario* o *ubicación*\n"
+            "👤 Hablar con alguien → escribe *asesor*\n\n"
+            "Ejemplo de cotización:\n"
+            "👉 10 cemento, 5 varilla 3/8, 2 martillos"
         )
     # =========================================================
     # 0.75) RESOLVER SPECS PENDIENTES
