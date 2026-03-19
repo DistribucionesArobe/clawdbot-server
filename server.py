@@ -2703,11 +2703,11 @@ def company_me(request: Request):
     try:
         conn = get_conn()
         cur = conn.cursor()
-        cur.execute("SELECT id::text, name, slug, twilio_phone FROM companies WHERE id=%s LIMIT 1", (company_id,))
+        cur.execute("SELECT id::text, name, slug, twilio_phone, plan_code FROM companies WHERE id=%s LIMIT 1", (company_id,))
         row = cur.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Company no encontrada")
-        return {"ok": True, "company": {"id": row[0], "name": row[1], "slug": row[2], "twilio_phone": row[3]}}
+        return {"ok": True, "company": {"id": row[0], "name": row[1], "slug": row[2], "twilio_phone": row[3], "plan_code": row[4]}}
     finally:
         if cur: cur.close()
         if conn: conn.close()
