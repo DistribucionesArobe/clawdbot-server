@@ -514,6 +514,27 @@ def parse_pending_picks(text: str):
     t = t.replace(" ", "")
     return [(m[0], int(m[1])) for m in re.findall(r"\b([A-Z])(\d+)\b", t)]
 
+def _get_company_discount(company_id: str) -> tuple:
+    """Devuelve (threshold, percent) o (None, None) si no hay descuento configurado."""
+    if not company_id:
+        return None, None
+    try:
+        conn = get_conn()
+        cur  = conn.cursor()
+        cur.execute(
+            "SELECT discount_threshold, discount_percent FROM companies WHERE id=%s LIMIT 1",
+            (company_id,)
+        )
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        if row and row[0] and row[1]:
+            return float(row[0]), float(row[1])
+    except Exception:
+        pass
+    return None, None
+
+
 def cart_render_quote(state: dict, company_id: str = "", client_phone: str = "") -> str:
     cart = (state or {}).get("cart") or []
     if not cart:
@@ -526,7 +547,19 @@ def cart_render_quote(state: dict, company_id: str = "", client_phone: str = "")
         name = it.get("name") or ""
         subtotal = qty * price
         total += subtotal
-        lines.append(f"• {qty} x {name} — ${subtotal:,.2f}")
+        lines.append(f"• {qty} x {name} — ${subtotal:,.0f}")
+
+    # ── Descuento por volumen ─────────────────────────────────────────────────
+    descuento_txt = ""
+    total_final = total
+    if company_id:
+        threshold, percent = _get_company_discount(company_id)
+        if threshold and percent and total >= threshold:
+            descuento = round(total * percent / 100)
+            total_final = total - descuento
+            descuento_txt = (
+                f"\n🏷️ Descuento {percent:.0f}% por volumen: -${descuento:,.0f}"
+            )
 
     folio_txt = ""
     if company_id and client_phone:
@@ -534,7 +567,7 @@ def cart_render_quote(state: dict, company_id: str = "", client_phone: str = "")
             existing_folio = state.get("folio")
             folio = save_quote(company_id, client_phone, cart, existing_folio=existing_folio)
             if not existing_folio:
-                state["folio"] = folio  # persiste en state para reutilizar
+                state["folio"] = folio
             folio_txt = f"\n📋 Folio: *{folio}*"
         except Exception as e:
             print("CART RENDER SAVE QUOTE ERROR:", repr(e))
@@ -542,7 +575,8 @@ def cart_render_quote(state: dict, company_id: str = "", client_phone: str = "")
     return (
         "Cotización:\n"
         + "\n".join(lines)
-        + f"\n\n*Total: ${total:,.2f}* (IVA incluido)"
+        + descuento_txt
+        + f"\n\n*Total: ${total_final:,.0f}* (IVA incluido)"
         + folio_txt
         + "\n\n💳 Escribe *pagar* y te mandamos datos bancarios o link para pago con tarjeta."
     )
@@ -2294,6 +2328,8 @@ class CompanySettingsBody(BaseModel):
     email: Optional[str] = None
     rfc: Optional[str] = None
     brand_color: Optional[str] = None
+    discount_threshold: Optional[float] = None
+    discount_percent: Optional[float] = None
 
 
 @app.post("/api/company/settings")
@@ -2315,6 +2351,8 @@ def company_settings_update(request: Request, body: CompanySettingsBody):
     email       = (body.email or "").strip() or None
     rfc         = (body.rfc or "").strip().upper() or None
     brand_color = (body.brand_color or "").strip() or None
+    discount_threshold = body.discount_threshold if body.discount_threshold and body.discount_threshold > 0 else None
+    discount_percent   = body.discount_percent   if body.discount_percent   and 0 < body.discount_percent <= 100 else None
 
     conn = None
     cur = None
@@ -2326,12 +2364,13 @@ def company_settings_update(request: Request, body: CompanySettingsBody):
             UPDATE companies
             SET hours_text=%s, address_text=%s, google_maps_url=%s, mercadopago_url=%s,
                 bank_name=%s, bank_account_name=%s, bank_clabe=%s, bank_account_number=%s,
-                owner_phone=%s, email=%s, rfc=%s, brand_color=%s, updated_at=now()
+                owner_phone=%s, email=%s, rfc=%s, brand_color=%s,
+                discount_threshold=%s, discount_percent=%s, updated_at=now()
             WHERE id=%s
             RETURNING id
             """,
             (hours, addr, maps, mp_url, bank_name, bank_acc_name, bank_clabe, bank_acc_num,
-             owner_phone, email, rfc, brand_color, company_id),
+             owner_phone, email, rfc, brand_color, discount_threshold, discount_percent, company_id),
         )
         row = cur.fetchone()
         if not row:
@@ -2354,7 +2393,8 @@ def company_settings_get(request: Request):
             """
             SELECT hours_text, address_text, google_maps_url,
                    mercadopago_url, bank_name, bank_account_name, bank_clabe, bank_account_number,
-                   owner_phone, email, rfc, brand_color, logo_url
+                   owner_phone, email, rfc, brand_color, logo_url,
+                   discount_threshold, discount_percent
             FROM companies WHERE id=%s LIMIT 1
             """,
             (company_id,),
@@ -2369,6 +2409,8 @@ def company_settings_get(request: Request):
                 "mercadopago_url": row[3], "bank_name": row[4], "bank_account_name": row[5],
                 "bank_clabe": row[6], "bank_account_number": row[7], "owner_phone": row[8],
                 "email": row[9], "rfc": row[10], "brand_color": row[11], "logo_url": row[12],
+                "discount_threshold": float(row[13]) if row[13] else None,
+                "discount_percent":   float(row[14]) if row[14] else None,
             },
         }
     finally:
