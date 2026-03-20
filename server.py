@@ -1931,6 +1931,18 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 }
             if not state.get("cart") and not missing:
                 return "No encontré esos productos en el catálogo."
+            # ── Aviso cuando hay múltiples productos con opciones pendientes ──
+            total_items = len(multi)
+            if missing and total_items > 1 and len(missing) > 0:
+                state["_showed_multi_intro"] = True
+                upsert_quote_state(company_id, wa_from, state)
+                intro_msg = f"✅ Recibí tu pedido de {total_items} productos. Voy a mostrarte opciones solo para confirmar cada uno.\n\n"
+                reply = _build_reply_with_pending(state, company_id=company_id, wa_from=wa_from)
+                if isinstance(reply, dict):
+                    reply["body"] = intro_msg + (reply.get("body") or "")
+                else:
+                    reply = intro_msg + (reply or "")
+                return reply
             return _build_reply_with_pending(state, company_id=company_id, wa_from=wa_from)
         finally:
             conn.close()
