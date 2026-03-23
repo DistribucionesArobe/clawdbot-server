@@ -2320,9 +2320,10 @@ def company_settings_update(request: Request, body: CompanySettingsBody):
     email       = (body.email or "").strip() or None
     rfc         = (body.rfc or "").strip().upper() or None
     brand_color = (body.brand_color or "").strip() or None
-    discount_threshold = body.discount_threshold if body.discount_threshold and body.discount_threshold > 0 else None
-    discount_percent   = body.discount_percent   if body.discount_percent   and 0 < body.discount_percent <= 100 else None
+    discount_threshold = float(body.discount_threshold) if body.discount_threshold is not None and body.discount_threshold > 0 else None
+    discount_percent   = float(body.discount_percent)   if body.discount_percent   is not None and 0 < body.discount_percent <= 100 else None
 
+    
     conn = None
     cur = None
     try:
