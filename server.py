@@ -1146,7 +1146,6 @@ async def whatsapp_webhook(request: Request):
         _st_check = get_quote_state(company["company_id"], from_phone) or {}
         if _st_check.get("awaiting_comprobante"):
             try:
-                owner_row = None
                 conn2 = get_conn()
                 cur2 = conn2.cursor()
                 cur2.execute(
@@ -1227,6 +1226,9 @@ async def whatsapp_webhook(request: Request):
         is_interactive=(msg_type == "interactive"),
     )
 
+    if not reply:
+        return {"ok": True}
+
     def _reply_text_for_log(r) -> str:
         if isinstance(r, dict):
             rtype = r.get("type", "")
@@ -1296,7 +1298,6 @@ async def whatsapp_webhook(request: Request):
         )
 
     return {"ok": True}
-
 
 # ── Conversation logging ──────────────────────────────────────────────────────
 
@@ -1434,6 +1435,15 @@ def send_whatsapp_list_sections(wa_api_key: str, phone_number_id: str, to: str,
 
 
 def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", is_interactive: bool = False) -> str:
+     # ── Verificar si bot está silenciado para esta conversación ──
+    if wa_from:
+        _bot_state = get_quote_state(company_id, wa_from) or {}
+        if _bot_state.get("bot_active") is False:
+            return ""  # Bot silenciado — el agente está atendiendo
+
+    # ... resto del código igual
+
+    
     if is_interactive:
         user_text = (user_text or "").strip()
     else:
@@ -3735,6 +3745,9 @@ async def twilio_webhook(
 
         reply = build_reply_for_company(company["company_id"], Body, wa_from=From)
 
+        if not reply:
+            return TWIML_OK
+
         def _sections_to_text(sections: list) -> str:
             lines = []
             for section in (sections or []):
@@ -3781,3 +3794,92 @@ async def twilio_webhook(
         except Exception:
             pass
         return TWIML_OK
+
+# ── Agent Console: enviar mensaje manual + toggle bot ─────────────────────────
+
+class AgentMessageBody(BaseModel):
+    message: str
+
+@app.post("/api/conversations/{client_phone}/mensaje")
+def agent_send_message(
+    request: Request,
+    client_phone: str,
+    body: AgentMessageBody,
+    authorization: str = Header(default=""),
+):
+    if authorization and authorization.lower().startswith("bearer "):
+        company_id = get_company_from_bearer(authorization)["company_id"]
+    else:
+        company_id = require_company_id(request)
+
+    text = (body.message or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="message requerido")
+
+    # Detectar si el tenant usa Meta API o Twilio
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT c.wa_api_key, c.wa_phone_number_id, ch.provider
+            FROM companies c
+            LEFT JOIN channels ch ON ch.company_id = c.id AND ch.is_active = true
+            WHERE c.id = %s::uuid
+            LIMIT 1
+            """,
+            (company_id,),
+        )
+        row = cur.fetchone()
+    finally:
+        cur.close()
+        conn.close()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Company no encontrada")
+
+    wa_api_key, wa_phone_number_id, provider = row
+
+    # Normalizar teléfono destino
+    to_phone = client_phone.replace("whatsapp:", "").strip()
+
+    try:
+        if provider == "twilio":
+            twilio_send_whatsapp(to_user_whatsapp=to_phone, text=text)
+        else:
+            send_whatsapp_text(
+                wa_api_key=wa_api_key,
+                phone_number_id=wa_phone_number_id,
+                to=to_phone,
+                text=text,
+            )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error enviando mensaje: {str(e)}")
+
+    # Loggear como 'agent'
+    log_message(company_id, client_phone, "agent", text)
+
+    return {"ok": True}
+
+
+class BotToggleBody(BaseModel):
+    bot_active: bool
+
+@app.put("/api/conversations/{client_phone}/bot")
+def toggle_bot(
+    request: Request,
+    client_phone: str,
+    body: BotToggleBody,
+    authorization: str = Header(default=""),
+):
+    if authorization and authorization.lower().startswith("bearer "):
+        company_id = get_company_from_bearer(authorization)["company_id"]
+    else:
+        company_id = require_company_id(request)
+
+    # Guardamos bot_active en wa_quote_state como campo extra
+    state = get_quote_state(company_id, client_phone) or {}
+    state["bot_active"] = body.bot_active
+    upsert_quote_state(company_id, client_phone, state)
+
+    return {"ok": True, "bot_active": body.bot_active}
