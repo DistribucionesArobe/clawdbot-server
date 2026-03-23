@@ -2978,7 +2978,6 @@ def _rebuild_embeddings_bg(company_id: str):
     except Exception as e:
         print(f"BG EMBEDDINGS ERROR: {repr(e)}")
 
-
 @app.post("/api/pricebook/upload")
 def pricebook_upload(
     request: Request,
@@ -3067,12 +3066,6 @@ def pricebook_upload(
 
             parsed_rows.append({"name": name, "price": price, "unit": unit, "vat_rate": vat_rate, "sku": sku})
 
-        synonyms_map = {}
-        names_list = [r["name"] for r in parsed_rows]
-        for i in range(0, len(names_list), 20):
-                batch = names_list[i:i+20]
-                synonyms_map.update(_batch_synonyms(batch))
-        
         def _clean_name(n):
             return re.sub(r'[\"\'\\]', '', n)
 
@@ -3105,6 +3098,12 @@ def pricebook_upload(
             except Exception as e:
                 print("BATCH SYNONYMS ERROR:", repr(e))
                 return {}
+
+        synonyms_map = {}
+        names_list = [r["name"] for r in parsed_rows]
+        for i in range(0, len(names_list), 20):
+            batch = names_list[i:i+20]
+            synonyms_map.update(_batch_synonyms(batch))
 
         rows_total = len(parsed_rows)
         rows_upserted = 0
@@ -3587,7 +3586,7 @@ def extract_qty_items_robust(text: str):
             if m:
                 qty = int(m.group(1))
                 prod = m.group(2).replace("_", "/").strip()
-                prod = re.sub(r"\bde\b", "", prod, flags=re.IGNORECASE).strip()
+                prod = re.sub(r"\b(de|hojas|hoja|piezas|pieza|rollos|rollo|bultos|bulto|sacos|saco|atados|atado|paquetes|paquete)\b", "", prod, flags=re.IGNORECASE).strip()
                 prod = re.sub(r"\s+", " ", prod).strip()
                 if prod and qty > 0:
                     items.append((qty, prod))
