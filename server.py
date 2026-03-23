@@ -1516,29 +1516,27 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
 
 
     def _is_greeting_like(tnorm: str) -> bool:
-    t = (tnorm or "").strip()
-    if not t:
+        t = (tnorm or "").strip()
+        if not t:
+            return False
+        if t in {"hola", "buenas", "hey", "holi", "menu", "menú", "ayuda", "inicio",
+                 "buen dia", "buen día", "buenos dias", "buenos días",
+                 "buenas tardes", "buenas noches"}:
+            return True
+        if t.startswith("hola"):
+            return True
+        if t.startswith("buenos") or t.startswith("buenas") or t.startswith("buen"):
+            return True
         return False
-    if t in {"hola", "buenas", "hey", "holi", "menu", "menú", "ayuda", "inicio",
-             "buen dia", "buen día", "buenos dias", "buenos días",
-             "buenas tardes", "buenas noches"}:
-        return True
-    if t.startswith("hola"):
-        return True
-    if t.startswith("buenos") or t.startswith("buenas") or t.startswith("buen"):
-        return True
-    return False
-    
+
     def _build_reply_with_pending(state: dict, company_id: str = "", wa_from: str = ""):
         pending = state.get("pending") or []
-
         if pending:
             p = pending[0]
             qty = int(p.get("qty") or 0)
             raw = (p.get("raw") or "").strip()
             cands = p.get("candidates") or []
             remaining = len(pending) - 1
-
             if cands:
                 rows = []
                 for j, it in enumerate(cands[:10], start=1):
@@ -1566,6 +1564,19 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                     "¿Me lo puedes describir mejor o escribir el SKU?\n"
                     "O escribe *asesor* para que te ayude alguien."
                 )
+
+        msg = cart_render_quote(state, company_id=company_id, client_phone=wa_from) if (state.get("cart") or []) else ""
+
+        if wa_from and company_id:
+            upsert_quote_state(company_id, wa_from, state)
+
+        msg += (
+            "\n\n¿Agregamos algo más?\n"
+            "🧭 Comandos:\n"
+            "• 'nueva cotizacion' → empezar de cero\n"
+            "• 'salir' → cancelar"
+        )
+        return msg
 
         msg = cart_render_quote(state, company_id=company_id, client_phone=wa_from) if (state.get("cart") or []) else ""
 
