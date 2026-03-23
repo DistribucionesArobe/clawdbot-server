@@ -3068,7 +3068,11 @@ def pricebook_upload(
             parsed_rows.append({"name": name, "price": price, "unit": unit, "vat_rate": vat_rate, "sku": sku})
 
         synonyms_map = {}
-
+        names_list = [r["name"] for r in parsed_rows]
+        for i in range(0, len(names_list), 20):
+                batch = names_list[i:i+20]
+                synonyms_map.update(_batch_synonyms(batch))
+        
         def _clean_name(n):
             return re.sub(r'[\"\'\\]', '', n)
 
