@@ -1514,18 +1514,21 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         t = t.replace("PICK_", "")
         return [(m[0], int(m[1])) for m in re.findall(r"\b([A-Z])(\d+)\b", t)]
 
-    def _is_greeting_like(tnorm: str) -> bool:
-        t = (tnorm or "").strip()
-        if not t:
-            return False
-        if t in {"hola", "buenas", "hey", "holi", "menu", "menú", "ayuda", "inicio"}:
-            return True
-        if t.startswith("hola"):
-            return True
-        if t.startswith("buenos") or t.startswith("buenas"):
-            return True
-        return False
 
+    def _is_greeting_like(tnorm: str) -> bool:
+    t = (tnorm or "").strip()
+    if not t:
+        return False
+    if t in {"hola", "buenas", "hey", "holi", "menu", "menú", "ayuda", "inicio",
+             "buen dia", "buen día", "buenos dias", "buenos días",
+             "buenas tardes", "buenas noches"}:
+        return True
+    if t.startswith("hola"):
+        return True
+    if t.startswith("buenos") or t.startswith("buenas") or t.startswith("buen"):
+        return True
+    return False
+    
     def _build_reply_with_pending(state: dict, company_id: str = "", wa_from: str = ""):
         pending = state.get("pending") or []
 
