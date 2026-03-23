@@ -34,7 +34,8 @@ from fastapi import (
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, validator
+
 
 from openpyxl import load_workbook, Workbook
 
@@ -185,6 +186,11 @@ def normalize_wa(addr: str) -> str:
 
 def norm_name(s: str) -> str:
     return " ".join((s or "").strip().lower().split())
+
+def normalize_display_name(name: str) -> str:
+    """Primera letra mayúscula, resto minúsculas. Ej: 'CLAVO 1 1/2' → 'Clavo 1 1/2'"""
+    n = (name or "").strip()
+    return (n[0].upper() + n[1:].lower()) if n else n
 
 # -------------------------
 # Normalización universal
@@ -2285,7 +2291,15 @@ class CompanySettingsBody(BaseModel):
     brand_color: Optional[str] = None
     discount_threshold: Optional[float] = None
     discount_percent: Optional[float] = None
-
+    @validator('discount_threshold', 'discount_percent', pre=True)
+    def coerce_empty_to_none(cls, v):
+        if v == '' or v is None:
+            return None
+        try:
+            return float(v)
+        except (ValueError, TypeError):
+            return None
+        
 
 @app.post("/api/company/settings")
 def company_settings_update(request: Request, body: CompanySettingsBody):
@@ -3001,7 +3015,7 @@ def pricebook_upload(
         for r in ws.iter_rows(min_row=2, values_only=True):
             if r is None or all(v is None or str(v).strip() == "" for v in r):
                 continue
-            name = str(r[idx["name"]]).strip() if r[idx["name"]] is not None else ""
+            name = normalize_display_name(str(r[idx["name"]])) if r[idx["name"]] is not None else ""
             price_raw = r[idx["price"]] if idx.get("price") is not None else None
             if not name or price_raw is None:
                 continue
@@ -3186,10 +3200,10 @@ def pricebook_item_create(request: Request, body: PricebookItemCreateBody):
     if not company_id:
         raise HTTPException(status_code=500, detail="DEFAULT_COMPANY_ID missing en Render")
 
-    name = (body.name or "").strip()
+    name = normalize_display_name(body.name or "")
     if not name:
         raise HTTPException(status_code=400, detail="name requerido")
-
+    
     sku = (body.sku or "").strip() or None
     unit = (body.unit or "").strip() or None
     source = (body.source or "manual").strip() or "manual"
