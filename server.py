@@ -943,7 +943,6 @@ def extract_text_from_image(image_bytes: bytes) -> str | None:
 
 def notify_owner_escalation(wa_api_key: str, phone_number_id: str, owner_phone: str,
                              client_phone: str, reason: str, state: dict):
-    # Meta Cloud API requiere número sin '+' ni 'whatsapp:'
     owner_phone_clean = (owner_phone or "").replace("+", "").replace("whatsapp:", "").strip()
     cart = (state or {}).get("cart") or []
     cart_txt = ""
@@ -961,7 +960,6 @@ def notify_owner_escalation(wa_api_key: str, phone_number_id: str, owner_phone: 
 
 def notify_owner_comprobante(wa_api_key: str, phone_number_id: str, owner_phone: str,
                               client_phone: str, state: dict):
-    # Meta Cloud API requiere número sin '+' ni 'whatsapp:'
     owner_phone_clean = (owner_phone or "").replace("+", "").replace("whatsapp:", "").strip()
     cart = (state or {}).get("cart") or []
     cart_txt = ""
@@ -1082,6 +1080,24 @@ class CompanyCreateBody(BaseModel):
     slug: Optional[str] = None
     key_name: str = "default"
 
+class PricebookItemCreateBody(BaseModel):
+    name: str
+    sku: Optional[str] = None
+    unit: Optional[str] = None
+    price: Optional[float] = None
+    vat_rate: Optional[float] = 0.16
+    source: Optional[str] = "manual"
+    synonyms: Optional[str] = None
+
+# ── NUEVO: schema para PATCH (todos los campos opcionales) ────────────────────
+class PricebookItemUpdateBody(BaseModel):
+    name: Optional[str] = None
+    sku: Optional[str] = None
+    unit: Optional[str] = None
+    price: Optional[float] = None
+    vat_rate: Optional[float] = None
+    synonyms: Optional[str] = None
+# ─────────────────────────────────────────────────────────────────────────────
 
 
 @app.get("/")
@@ -1121,7 +1137,6 @@ async def whatsapp_webhook(request: Request):
         image_id = (msg.get("image") or {}).get("id")
         caption = (msg.get("image") or {}).get("caption") or ""
 
-        # ── Comprobante de pago ──────────────────────────────────────────
         _st_check = get_quote_state(company["company_id"], from_phone) or {}
         if _st_check.get("awaiting_comprobante"):
             try:
@@ -1148,7 +1163,6 @@ async def whatsapp_webhook(request: Request):
             _st_check.pop("awaiting_comprobante", None)
             upsert_quote_state(company["company_id"], from_phone, _st_check)
             _bot_reply_comprobante = "✅ ¡Comprobante recibido! Le avisamos a la empresa y en breve te confirman tu pedido. 🙏"
-            # Log comprobante
             log_message(company["company_id"], from_phone, "user", "📎 [Imagen de comprobante de pago]")
             log_message(company["company_id"], from_phone, "bot", _bot_reply_comprobante, {
                 "cart":  _st_check.get("cart") or [],
@@ -1161,7 +1175,6 @@ async def whatsapp_webhook(request: Request):
                 text=_bot_reply_comprobante,
             )
             return {"ok": True}
-        # ────────────────────────────────────────────────────────────────
 
         if image_id and company.get("wa_api_key"):
             try:
@@ -1199,7 +1212,6 @@ async def whatsapp_webhook(request: Request):
         elif itype == "button_reply":
             text = (interactive.get("button_reply") or {}).get("title") or ""
 
-    # ── Log mensaje del cliente ───────────────────────────────────────────────
     if text:
         log_message(company["company_id"], from_phone, "user", text)
 
@@ -1209,7 +1221,6 @@ async def whatsapp_webhook(request: Request):
         is_interactive=(msg_type == "interactive"),
     )
 
-    # ── Extraer texto plano del reply para el log ─────────────────────────────
     def _reply_text_for_log(r) -> str:
         if isinstance(r, dict):
             rtype = r.get("type", "")
@@ -1217,7 +1228,6 @@ async def whatsapp_webhook(request: Request):
                 body = (r.get("text") or "") + "\n" + (r.get("body") or "")
             else:
                 body = r.get("body") or ""
-            # Incluir opciones de lista
             for section in (r.get("sections") or []):
                 for row in (section.get("rows") or []):
                     body += "\n  " + row.get("id","") + " " + row.get("title","") + " " + row.get("description","")
@@ -1226,7 +1236,6 @@ async def whatsapp_webhook(request: Request):
             return body.strip()
         return (r or "").strip()
 
-    # ── Log respuesta del bot (con carrito/folio del state) ───────────────────
     try:
         _state_for_log = get_quote_state(company["company_id"], from_phone) or {}
         _log_extra = {
@@ -1286,12 +1295,6 @@ async def whatsapp_webhook(request: Request):
 # ── Conversation logging ──────────────────────────────────────────────────────
 
 def log_message(company_id: str, client_phone: str, role: str, message: str, extra: dict = None):
-    """
-    Guarda un mensaje en conversation_messages.
-    role: 'user' | 'bot'
-    extra: dict opcional con cart/folio para adjuntar al mensaje del bot
-    Falla silently — nunca debe romper el flujo del bot.
-    """
     try:
         conn = get_conn()
         cur  = conn.cursor()
@@ -1317,10 +1320,6 @@ def list_conversations(
     limit: int = Query(default=30, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
 ):
-    """
-    Lista de conversaciones únicas (un registro por cliente),
-    con el último mensaje, carrito y folio más reciente.
-    """
     if authorization and authorization.lower().startswith("bearer "):
         company_id = get_company_from_bearer(authorization)["company_id"]
     else:
@@ -1329,7 +1328,6 @@ def list_conversations(
     conn = get_conn()
     cur  = conn.cursor()
     try:
-        # Un row por cliente: último mensaje, timestamp, y último extra (carrito/folio)
         cur.execute(
             """
             SELECT
@@ -1378,9 +1376,6 @@ def get_conversation(
     authorization: str = Header(default=""),
     limit: int = Query(default=100, ge=1, le=500),
 ):
-    """
-    Historial completo de mensajes de un cliente específico.
-    """
     if authorization and authorization.lower().startswith("bearer "):
         company_id = get_company_from_bearer(authorization)["company_id"]
     else:
@@ -1515,9 +1510,6 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             return True
         return False
 
-    # =========================================================
-    # _build_reply_with_pending — muestra UN pendiente a la vez
-    # =========================================================
     def _build_reply_with_pending(state: dict, company_id: str = "", wa_from: str = ""):
         pending = state.get("pending") or []
 
@@ -1556,11 +1548,8 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                     "O escribe *asesor* para que te ayude alguien."
                 )
 
-        
-        # Sin pendientes — mostrar carrito
         msg = cart_render_quote(state, company_id=company_id, client_phone=wa_from) if (state.get("cart") or []) else ""
 
-        # Persistir folio en state después de cart_render_quote
         if wa_from and company_id:
             upsert_quote_state(company_id, wa_from, state)
         
@@ -1572,24 +1561,16 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         )
         return msg
 
-    # =========================================================
-    # 0) COMANDOS (reset / salir)
-    # =========================================================
     tnorm = norm_name(user_text).replace("cotización", "cotizacion")
 
-    # =========================================================
-    # 0.1) PAGAR
-    # =========================================================
     pagar_triggers = {"pagar", "pago", "como pago", "cómo pago", "quiero pagar", "datos de pago", "datos bancarios", "transferencia"}
     if any(pt == tnorm or pt in tnorm for pt in pagar_triggers):
-        # ── Cobro integrado solo en Plan Pro y Enterprise ────────────────────
         _plan = get_company_plan_code(company_id)
         if _plan not in ("cotizabot", "pro", "enterprise", "owner"):
             return (
                 "Para procesar tu pago, contáctanos directamente:\n\n"
                 "📞 Llama o escribe *asesor* y un representante te atenderá. 🙏"
             )
-        # ─────────────────────────────────────────────────────────────────────
         try:
             conn = get_conn()
             cur = conn.cursor()
@@ -1656,9 +1637,6 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             "• 'salir' → cancelar"
         )
 
-    # =========================================================
-    # 0.25) GRACIAS
-    # =========================================================
     thanks_triggers = {"gracias", "muchas gracias", "mil gracias", "thx", "thanks"}
     if tnorm in thanks_triggers:
         return (
@@ -1669,9 +1647,6 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             "• 'salir' → cancelar"
         )
 
-    # =========================================================
-    # 0.3) ESCALADO A ASESOR
-    # =========================================================
     escalation_triggers = {
         "asesor", "asesor humano", "humano", "persona", "agente",
         "hablar con alguien", "hablar con una persona", "quiero hablar",
@@ -1700,9 +1675,6 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             "o esperar a que te contacten."
         )
     
-    # =========================================================
-    # 0.5) SALUDOS
-    # =========================================================
     if _is_greeting_like(tnorm):
         try:
             conn_co = get_conn()
@@ -1737,9 +1709,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             "Ejemplo de cotización:\n"
             "👉 10 cemento, 5 varilla 3/8, 2 martillos"
         )
-    # =========================================================
-    # 0.75) RESOLVER SPECS PENDIENTES
-    # =========================================================
+
     _state_specs = get_quote_state(company_id, wa_from) if wa_from else {}
     _state_specs = _state_specs or {}
 
@@ -1825,9 +1795,6 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 "button_label": "Ver opciones",
             }
 
-    # =========================================================
-    # 0.8) PICKS
-    # =========================================================
     _quick_picks = _parse_pending_picks(user_text)
     _state_picks = get_quote_state(company_id, wa_from) if wa_from else {}
     _state_picks = _state_picks or {}
@@ -1867,9 +1834,6 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             upsert_quote_state(company_id, wa_from, state)
         return _build_reply_with_pending(state, company_id=company_id, wa_from=wa_from)
 
-    # =========================================================
-    # 1) MULTI-ITEMS + CARRITO
-    # =========================================================
     multi = extract_qty_items_robust(user_text)
     if not multi:
         multi = ner_extract_items(user_text)
@@ -1931,7 +1895,6 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 }
             if not state.get("cart") and not missing:
                 return "No encontré esos productos en el catálogo."
-            # ── Aviso cuando hay múltiples productos con opciones pendientes ──
             total_items = len(multi)
             if missing and total_items > 1 and len(missing) > 0:
                 state["_showed_multi_intro"] = True
@@ -1947,9 +1910,6 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         finally:
             conn.close()
 
-    # =========================================================
-    # 2) SINGLE ITEM + CARRITO
-    # =========================================================
     qty, prod_query = extract_qty_and_product(user_text)
     if qty and prod_query:
         steps = get_spec_steps(prod_query)
@@ -1997,9 +1957,6 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         finally:
             conn.close()
 
-    # =========================================================
-    # 3) PREGUNTA DE PRECIO
-    # =========================================================
     if looks_like_price_question(user_text):
         conn = get_conn()
         try:
@@ -2020,9 +1977,6 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 "• 'salir' → cancelar"
             )
 
-    # =========================================================
-    # 3.5) CONTEXTO — picks A1/B2 o aclaraciones
-    # =========================================================
     state = get_quote_state(company_id, wa_from) if wa_from else None
     if state and state.get("pending"):
         pend = state.get("pending") or []
@@ -2145,9 +2099,6 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         if pend:
             return _build_reply_with_pending(state, company_id=company_id, wa_from=wa_from)
 
-    # =========================================================
-    # 4) GUARD — mensaje con números pero sin producto
-    # =========================================================
     if re.search(r"\b\d+\b", user_text):
         qty, prod_query = extract_qty_and_product(user_text)
         if qty and prod_query:
@@ -2181,9 +2132,6 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                     upsert_quote_state(company_id, wa_from, state)
                 return _build_reply_with_pending(state, company_id=company_id, wa_from=wa_from)
 
-    # =========================================================
-    # 4.5) HORARIOS / UBICACIÓN
-    # =========================================================
     if looks_like_hours_question(user_text):
         try:
             conn = get_conn()
@@ -2211,9 +2159,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             "Si quieres cotizar: mándame ej: 10 cemento, 5 varilla 3/8"
         )
 
-    # 4.75) Parece producto sin cantidad
     if looks_like_product_phrase(user_text) and not re.search(r"\b\d+\b", user_text):
-        # Detectar si menciona múltiples productos
         productos_detectados = []
         for sep in [" y ", " e ", ",", "/"]:
             if sep in user_text.lower():
@@ -2241,9 +2187,6 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             "• 'salir' → cancelar"
         )
 
-    # =========================================================
-    # 5) OPENAI FALLBACK
-    # =========================================================
     if not openai_client:
         return "Estoy en mantenimiento. Intenta más tarde."
 
@@ -2430,18 +2373,11 @@ def company_settings_get(request: Request):
         if conn: conn.close()
 
 
-
-# ── Logo upload ───────────────────────────────────────────────────────────────
-
 @app.post("/api/company/logo")
 async def upload_company_logo(
     request: Request,
     file: UploadFile = File(...),
 ):
-    """
-    Recibe una imagen (PNG/JPG/WEBP, máx 2 MB) y la guarda como data URL
-    en companies.logo_url. El PDF la lee directamente desde ahí.
-    """
     company_id = require_company_id(request)
 
     content = await file.read()
@@ -2477,7 +2413,6 @@ async def upload_company_logo(
 
 @app.delete("/api/company/logo")
 def delete_company_logo(request: Request):
-    """Elimina el logo de la empresa (pone logo_url = NULL)."""
     company_id = require_company_id(request)
     conn = None
     cur  = None
@@ -2498,7 +2433,7 @@ def delete_company_logo(request: Request):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# STRIPE — Suscripciones CotizaExpress
+# STRIPE
 # ══════════════════════════════════════════════════════════════════════════════
 
 import stripe as _stripe
@@ -2506,29 +2441,23 @@ import stripe as _stripe
 _STRIPE_SECRET_KEY     = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
 _STRIPE_WEBHOOK_SECRET = (os.getenv("STRIPE_WEBHOOK_SECRET") or "").strip()
 
-# Price IDs por plan
 _STRIPE_PRICES = {
     "cotizabot": "price_1TCSlDF3nSPXsrl4Q05iH98d",
     "pro":        "price_1TCSlcF3nSPXsrl4mDPdBvN3",
     "enterprise": "price_1TCSlvF3nSPXsrl41CLP8xv7",
 }
 
-# Mapeo inverso: price_id → plan_code
 _PRICE_TO_PLAN = {v: k for k, v in _STRIPE_PRICES.items()}
 
 
 class CheckoutBody(BaseModel):
-    plan: str          # "cotizabot" | "pro" | "enterprise"
+    plan: str
     success_url: str
     cancel_url: str
 
 
 @app.post("/api/pagos/crear-checkout")
 def crear_checkout(request: Request, body: CheckoutBody):
-    """
-    Crea una sesión de Stripe Checkout para suscripción mensual.
-    Devuelve la URL a la que redirigir al cliente.
-    """
     if not _STRIPE_SECRET_KEY:
         raise HTTPException(status_code=500, detail="STRIPE_SECRET_KEY no configurada")
 
@@ -2537,7 +2466,6 @@ def crear_checkout(request: Request, body: CheckoutBody):
     if not price_id:
         raise HTTPException(status_code=400, detail=f"Plan inválido: {plan}")
 
-    # Obtener company_id del usuario autenticado
     company_id = require_company_id(request)
 
     _stripe.api_key = _STRIPE_SECRET_KEY
@@ -2558,10 +2486,6 @@ def crear_checkout(request: Request, body: CheckoutBody):
 
 @app.get("/api/pagos/estado")
 def pago_estado(request: Request, session_id: str = Query(...)):
-    """
-    Verifica el estado de una sesión de Stripe.
-    El frontend llama esto después del redirect de éxito.
-    """
     if not _STRIPE_SECRET_KEY:
         raise HTTPException(status_code=500, detail="STRIPE_SECRET_KEY no configurada")
 
@@ -2578,12 +2502,6 @@ def pago_estado(request: Request, session_id: str = Query(...)):
 
 @app.post("/api/pagos/webhook")
 async def stripe_webhook(request: Request):
-    """
-    Webhook de Stripe — activa el plan automáticamente cuando se paga.
-    Configurar en Stripe Dashboard → Webhooks → Endpoint URL:
-    https://api.cotizaexpress.com/api/pagos/webhook
-    Eventos: checkout.session.completed, customer.subscription.deleted
-    """
     payload = await request.body()
     sig_header = request.headers.get("stripe-signature", "")
 
@@ -2627,7 +2545,6 @@ async def stripe_webhook(request: Request):
                 print("STRIPE WEBHOOK DB ERROR:", repr(e))
 
     elif event_type == "customer.subscription.deleted":
-        # Suscripción cancelada — bajar a free
         subscription = event["data"]["object"]
         stripe_customer_id = subscription.get("customer")
         if stripe_customer_id:
@@ -3261,15 +3178,6 @@ def pricebook_items(
         if cur: cur.close()
         if conn: conn.close()
 
-class PricebookItemCreateBody(BaseModel):
-    name: str
-    sku: Optional[str] = None
-    unit: Optional[str] = None
-    price: Optional[float] = None
-    vat_rate: Optional[float] = 0.16
-    source: Optional[str] = "manual"
-    synonyms: Optional[str] = None
-
 
 @app.post("/api/pricebook/items")
 def pricebook_item_create(request: Request, body: PricebookItemCreateBody):
@@ -3363,22 +3271,35 @@ def pricebook_item_delete(request: Request, item_id: str):
         if cur: cur.close()
         if conn: conn.close()
 
+
+# ── PATCH actualizado: usa PricebookItemUpdateBody (todos los campos opcionales) ──
 @app.patch("/api/pricebook/items/{item_id}")
-def pricebook_item_update(request: Request, item_id: str, body: PricebookItemCreateBody):
+def pricebook_item_update(request: Request, item_id: str, body: PricebookItemUpdateBody):
     _ = get_user_from_session(request)
     company_id = require_company_id(request)
-    name = (body.name or "").strip()
-    if not name:
-        raise HTTPException(status_code=400, detail="name requerido")
-    sku = (body.sku or "").strip() or None
-    unit = (body.unit or "").strip() or None
-    price = body.price
-    vat_rate = body.vat_rate
-    synonyms = (body.synonyms or "").strip() or None
-    name_norm = norm_name(name)
+
     conn = get_conn()
     cur = conn.cursor()
     try:
+        # 1) Leer valores actuales de la BD
+        cur.execute(
+            "SELECT name, sku, unit, price, vat_rate, synonyms FROM pricebook_items WHERE id=%s AND company_id=%s",
+            (item_id, company_id),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Producto no encontrado")
+
+        # 2) Merge: usar valor nuevo si viene, conservar el existente si no
+        name     = (body.name.strip() if body.name is not None else None) or row[0]
+        sku      = (body.sku.strip()  if body.sku  is not None else None) or row[1]
+        unit     = (body.unit.strip() if body.unit is not None else None) or row[2]
+        price    = body.price    if body.price    is not None else row[3]
+        vat_rate = body.vat_rate if body.vat_rate is not None else row[4]
+        synonyms = (body.synonyms.strip() if body.synonyms is not None else None) or row[5]
+
+        name_norm = norm_name(name)
+
         cur.execute(
             """
             UPDATE pricebook_items
@@ -3388,17 +3309,20 @@ def pricebook_item_update(request: Request, item_id: str, body: PricebookItemCre
             """,
             (name, name_norm, sku, unit, price, vat_rate, synonyms, item_id, company_id),
         )
-        row = cur.fetchone()
-        if not row:
+        if not cur.fetchone():
             raise HTTPException(status_code=404, detail="Producto no encontrado")
+
         try:
             upsert_single_embedding(conn, company_id, item_id, name, sku or "", unit or "", synonyms or "")
         except Exception as e:
             print("EMBEDDING UPDATE ERROR:", repr(e))
+
         return {"ok": True}
     finally:
         cur.close()
         conn.close()
+# ─────────────────────────────────────────────────────────────────────────────
+
 
 @app.get("/api/pricebook/items/{item_id}/synonyms-suggestions")
 def synonyms_suggestions(request: Request, item_id: str):
@@ -3608,9 +3532,7 @@ def extract_qty_items_robust(text: str):
     t = re.sub(r"^\s*(ocupo|necesito|quiero|quisiera|dame|deme|manda|mandame|mandeme|pasame|pásame|paseme|necesitamos|queremos|ocupamos|me puede dar|me pueden dar|me das|me mandas|favor de|necesito cotizar|quiero cotizar)\s+", "", t, flags=re.IGNORECASE)
     t = re.sub(r"^\s*(me\s+)?(puede[ns]?|podría[ns]?|podrías)\s+(cotizar|dar|mandar|pasar)\s+", "", t, flags=re.IGNORECASE)
     t = re.sub(r"\b(cotiza|cotización|cotizacion|precio|precios|por favor|porfa|pls)\b", " ", t, flags=re.IGNORECASE)
-    # Protege fracciones 1/4, 5/8
     t = re.sub(r"(\d+)\s*/\s*(\d+)", r"\1_\2", t)
-    # Separar por " y " cuando va seguido de número (ej: "50 tablaroca y 10 durock")
     t = re.sub(r"\s+y\s+(?=\d)", "\n", t, flags=re.IGNORECASE)
     t = re.sub(r"\s+e\s+(?=\d)", "\n", t, flags=re.IGNORECASE)
     items = []
