@@ -3070,7 +3070,7 @@ def rebuild_synonyms(request: Request):
     finally:
         cur.close()
         conn.close()
-```
+
 
 @app.get("/api/health")
 def api_health():
