@@ -1,5 +1,8 @@
 """
-semantic_search.py — Búsqueda semántica para CotizaBot v3
+semantic_search.py — Búsqueda semántica para CotizaBot v4
+Novedades vs v3:
+  - PASO 4: Fallback GPT con catálogo completo cuando fuzzy+semántico fallan
+  - Auto-save de sinónimos cuando GPT resuelve (evita costo futuro)
 """
 
 import re
@@ -46,6 +49,7 @@ def build_query_text(user_input: str) -> str:
     if not t:
         t = (user_input or "").lower().strip()
     return t
+
 
 def get_embedding(text: str) -> list:
     if not openai_client:
@@ -282,6 +286,139 @@ def resolve_global_synonym(conn, q: str) -> str:
         cur.close()
 
 
+def _auto_save_synonym(conn, company_id: str, user_query: str, resolved_name: str):
+    """
+    Guarda user_query como sinónimo del producto resuelto por GPT.
+    La próxima vez el mismo query lo resuelve fuzzy sin costo.
+    Solo guarda si el sinónimo no existe ya y tiene al menos 3 caracteres.
+    """
+    query_clean = (user_query or "").strip().lower()
+    if len(query_clean) < 3:
+        return
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT id, synonyms FROM pricebook_items WHERE company_id = %s AND lower(name) = lower(%s) LIMIT 1",
+            (company_id, resolved_name),
+        )
+        row = cur.fetchone()
+        if not row:
+            return
+        item_id, existing_synonyms = row
+        existing_set = {s.strip().lower() for s in (existing_synonyms or "").split(",") if s.strip()}
+        if query_clean in existing_set:
+            print(f"AUTO SYNONYM: '{query_clean}' ya existe en '{resolved_name}', skip")
+            return
+        new_synonyms = ((existing_synonyms or "").rstrip(", ") + f", {query_clean}").lstrip(", ")
+        cur.execute(
+            "UPDATE pricebook_items SET synonyms = %s, updated_at = now() WHERE id = %s AND company_id = %s",
+            (new_synonyms, item_id, company_id),
+        )
+        print(f"AUTO SYNONYM SAVED: '{query_clean}' → '{resolved_name}'")
+    except Exception as e:
+        print(f"AUTO SYNONYM ERROR: {repr(e)}")
+    finally:
+        cur.close()
+
+
+def _gpt_catalog_fallback(conn, company_id: str, user_query: str) -> Optional[dict]:
+    """
+    Fallback GPT: recibe catálogo completo y resuelve queries coloquiales/ambiguos.
+    Solo se llama cuando fuzzy + semántico fallan.
+    Costo ~$0.001 por búsqueda fallida.
+    GPT responde solo el número de línea del catálogo o 'NO' — sin parseo frágil.
+    """
+    if not openai_client:
+        print("GPT FALLBACK: openai_client no disponible")
+        return None
+
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT name, sku, unit, price, vat_rate
+            FROM pricebook_items
+            WHERE company_id = %s
+            ORDER BY name ASC
+            LIMIT 500
+            """,
+            (company_id,),
+        )
+        rows = cur.fetchall()
+    finally:
+        cur.close()
+
+    if not rows:
+        return None
+
+    # Catálogo compacto: número + nombre + SKU + unidad
+    catalog_lines = []
+    for i, (name, sku, unit, price, vat_rate) in enumerate(rows):
+        sku_txt = f" [SKU:{sku}]" if sku else ""
+        unit_txt = f" ({unit})" if unit else ""
+        catalog_lines.append(f"{i + 1}. {name}{sku_txt}{unit_txt}")
+    catalog_str = "\n".join(catalog_lines)
+
+    try:
+        resp = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Eres asistente de ferretería mexicana especializado en materiales de "
+                        "construcción ligera (tablaroca, durock, plafones, perfiles, etc.). "
+                        "El cliente busca un producto usando lenguaje coloquial, abreviado o con errores. "
+                        "Tu tarea: identificar cuál producto del catálogo corresponde exactamente. "
+                        "Ejemplos de equivalencias comunes:\n"
+                        "  'placas' → Plafón 61x61\n"
+                        "  'T princ' o 'tee principal' → Tee principal\n"
+                        "  'pasta' → Redimix o Basecoat\n"
+                        "  'cinta' → Perfacinta\n"
+                        "  'k alambre #16' → Alambre galvanizado cal 16\n"
+                        "Si encuentras una coincidencia clara y única, responde SOLO con el número "
+                        "de línea (ej: '42'). "
+                        "Si no hay coincidencia clara o hay ambigüedad real, responde exactamente: NO. "
+                        "NUNCA expliques. NUNCA des opciones. Solo el número o 'NO'."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"Catálogo:\n{catalog_str}\n\n"
+                        f"El cliente busca: \"{user_query}\"\n\n"
+                        "¿Cuál número de línea corresponde? (solo el número o NO)"
+                    ),
+                },
+            ],
+            temperature=0.0,
+            max_tokens=10,
+        )
+        raw = (resp.choices[0].message.content or "").strip().upper()
+        print(f"GPT FALLBACK RAW: query='{user_query}' response='{raw}'")
+
+        if raw == "NO" or not raw.isdigit():
+            return None
+
+        idx = int(raw) - 1  # convertir a base 0
+        if idx < 0 or idx >= len(rows):
+            print(f"GPT FALLBACK: índice {raw} fuera de rango ({len(rows)} items)")
+            return None
+
+        name, sku, unit, price, vat_rate = rows[idx]
+        return {
+            "sku": sku,
+            "name": name,
+            "unit": unit,
+            "price": float(price) if price is not None else None,
+            "vat_rate": float(vat_rate) if vat_rate is not None else None,
+        }
+
+    except Exception as e:
+        print(f"GPT FALLBACK ERROR: query='{user_query}' error={repr(e)}")
+        return None
+
+
 def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict:
     try:
         from rapidfuzz import fuzz
@@ -353,7 +490,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict:
 
         q_medida, q_cal = _extract_specs(q)
 
-        # PASO -1: Sinónimo global
+        # ── PASO -1: Sinónimo global ──────────────────────────────────────────
         print(f"SMART SEARCH q='{q}' original='{user_query}'")
         q_resolved = resolve_global_synonym(conn, q)
         print(f"RESOLVED: q='{q}' → q_resolved='{q_resolved}'")
@@ -378,7 +515,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict:
 
             print(f"GLOBAL SYNONYM NO HIT: '{q_resolved}' → continuando con q original='{q}'")
 
-        # PASO 0: Sinónimo exacto en pricebook
+        # ── PASO 0: Sinónimo exacto en pricebook ─────────────────────────────
         cur0 = conn.cursor()
         try:
             cur0.execute(
@@ -405,7 +542,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict:
                 print(f"SYNONYM AMBIGUOUS: query='{user_query}' found={len(syn_rows)}")
                 return {"status": "ambiguous", "item": None, "candidates": [_make_item(r) for r in syn_rows]}
 
-        # PASO 1: ILIKE directo + ranking con bonus de specs
+        # ── PASO 1: ILIKE directo + ranking con bonus de specs ────────────────
         pool_rows = _name_search(q)
         if not pool_rows and q.endswith("s") and len(q) > 3:
             pool_rows = _name_search(q[:-1])
@@ -444,7 +581,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict:
             return {"status": "ambiguous", "item": None,
                     "candidates": [_make_item(r) for _, r in candidates]}
 
-        # PASO 2: tsvector + fuzzy sobre candidatos
+        # ── PASO 2: tsvector + fuzzy sobre candidatos ─────────────────────────
         _tokens = [t for t in q.split() if len(t) >= 3]
         _tsquery = " | ".join(_tokens) if _tokens else q
 
@@ -537,7 +674,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict:
             candidates = filtered if filtered else scored[:5]
             return {"status": "ambiguous", "item": None, "candidates": [item for _, item in candidates]}
 
-        # PASO 3: Semántico — solo si hay alta confianza
+        # ── PASO 3: Semántico ─────────────────────────────────────────────────
         words = user_query.strip().split()
         cand_threshold = 0.55 if len(words) == 1 else 0.60 if len(words) == 2 else 0.65
 
@@ -547,12 +684,23 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict:
             print(f"SEMANTIC CANDIDATES: query='{user_query}' found={len(candidates)}")
             return {"status": "ambiguous", "item": None, "candidates": candidates}
 
-        # Segunda pasada con threshold bajo — mostrar algo mejor que nada
+        # Segunda pasada semántica con threshold bajo
         candidates_low = semantic_search_candidates(conn, company_id, user_query,
                                                     threshold=0.35, limit=3)
         if candidates_low:
             print(f"SEMANTIC LOW THRESHOLD: query='{user_query}' found={len(candidates_low)}")
             return {"status": "ambiguous", "item": None, "candidates": candidates_low}
+
+        # ── PASO 4: Fallback GPT con catálogo completo ────────────────────────
+        gpt_result = _gpt_catalog_fallback(conn, company_id, user_query)
+        if gpt_result:
+            print(f"GPT FALLBACK HIT: query='{user_query}' → '{gpt_result['name']}'")
+            # Guardar el query como sinónimo para que la próxima vez no llegue hasta aquí
+            try:
+                _auto_save_synonym(conn, company_id, user_query, gpt_result["name"])
+            except Exception as e:
+                print(f"AUTO SYNONYM SAVE ERROR: {repr(e)}")
+            return {"status": "found", "item": gpt_result, "candidates": []}
 
         return {"status": "not_found", "item": None, "candidates": []}
 
