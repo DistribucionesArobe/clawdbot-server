@@ -2291,6 +2291,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 state = {}
             state.pop("pending_specs", None)
             missing = []
+            _pedido_raw = ", ".join(p for _, p in multi if p.strip() != "???")
             for qty, prod_raw in multi:
                 if not looks_like_product_phrase(prod_raw):
                     continue
@@ -2305,7 +2306,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                     continue
                 try:
                     result = smart_search(conn, company_id, prod_raw, qty,
-                                          cart_context=_build_cart_context(state))
+                                          cart_context=_build_cart_context(state) or _pedido_raw)  
                 except Exception as e:
                     print("SMART SEARCH ERROR:", repr(e))
                     result = {"status": "not_found", "item": None, "candidates": []}
