@@ -686,7 +686,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict:
 
         # Segunda pasada semántica con threshold bajo
         candidates_low = semantic_search_candidates(conn, company_id, user_query,
-                                                    threshold=0.35, limit=3)
+                                                    threshold=0.50, limit=3)
         if candidates_low:
             print(f"SEMANTIC LOW THRESHOLD: query='{user_query}' found={len(candidates_low)}")
             return {"status": "ambiguous", "item": None, "candidates": candidates_low}
