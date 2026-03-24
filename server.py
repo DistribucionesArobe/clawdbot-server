@@ -162,7 +162,8 @@ def looks_like_product_phrase(text: str) -> bool:
         return False
 
     tokens = [w for w in t.split() if len(w) >= 3]
-    if not tokens:
+    has_number = bool(re.search(r"\d", t))
+    if not tokens and not has_number:
         return False
 
     blacklist_tokens = {
