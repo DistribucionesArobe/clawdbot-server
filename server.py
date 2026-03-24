@@ -3244,7 +3244,6 @@ def pricebook_items(
         if cur: cur.close()
         if conn: conn.close()
 
-
 @app.post("/api/pricebook/items")
 def pricebook_item_create(request: Request, body: PricebookItemCreateBody):
     _ = get_user_from_session(request)
@@ -3255,7 +3254,7 @@ def pricebook_item_create(request: Request, body: PricebookItemCreateBody):
     name = normalize_display_name(body.name or "")
     if not name:
         raise HTTPException(status_code=400, detail="name requerido")
-    
+
     sku = (body.sku or "").strip() or None
     unit = (body.unit or "").strip() or None
     source = (body.source or "manual").strip() or "manual"
@@ -3273,6 +3272,16 @@ def pricebook_item_create(request: Request, body: PricebookItemCreateBody):
         if vat_rate < 0 or vat_rate > 1: raise HTTPException(status_code=400, detail="vat_rate debe estar entre 0 y 1")
 
     name_norm = norm_name(name)
+
+    # Auto-generar plurales/singulares como sinónimos
+    synonyms = (body.synonyms or "").strip()
+    _auto_vars = _auto_plural_singular(name)
+    if _auto_vars:
+        existing_set = {s.strip().lower() for s in synonyms.split(",") if s.strip()}
+        new_vars = [v for v in _auto_vars if v not in existing_set]
+        if new_vars:
+            synonyms = (synonyms + ", " + ", ".join(new_vars)).strip(", ")
+
     conn = None
     cur = None
     try:
@@ -3280,18 +3289,20 @@ def pricebook_item_create(request: Request, body: PricebookItemCreateBody):
         cur = conn.cursor()
         cur.execute(
             """
-            INSERT INTO pricebook_items (company_id, sku, name, name_norm, unit, price, vat_rate, source, updated_at, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, now(), now())
+            INSERT INTO pricebook_items (company_id, sku, name, name_norm, unit, price, vat_rate, synonyms, source, updated_at, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now())
             ON CONFLICT (company_id, name_norm)
             DO UPDATE SET sku=EXCLUDED.sku, name=EXCLUDED.name, unit=EXCLUDED.unit,
-                price=EXCLUDED.price, vat_rate=EXCLUDED.vat_rate, source=EXCLUDED.source, updated_at=now()
+                price=EXCLUDED.price, vat_rate=EXCLUDED.vat_rate,
+                synonyms=COALESCE(NULLIF(pricebook_items.synonyms,''), EXCLUDED.synonyms),
+                source=EXCLUDED.source, updated_at=now()
             RETURNING id
             """,
-            (company_id, sku, name, name_norm, unit, price, vat_rate, source),
+            (company_id, sku, name, name_norm, unit, price, vat_rate, synonyms, source),
         )
         new_id = cur.fetchone()[0]
         try:
-            upsert_single_embedding(conn, company_id, new_id, name, sku or "", unit or "")
+            upsert_single_embedding(conn, company_id, new_id, name, sku or "", unit or "", synonyms or "")
         except Exception as e:
             print("SINGLE EMBEDDING ERROR:", repr(e))
         return {"ok": True, "id": str(new_id)}
@@ -3339,6 +3350,7 @@ def pricebook_item_delete(request: Request, item_id: str):
 
 
 # ── PATCH actualizado: usa PricebookItemUpdateBody (todos los campos opcionales) ──
+
 @app.patch("/api/pricebook/items/{item_id}")
 def pricebook_item_update(request: Request, item_id: str, body: PricebookItemUpdateBody):
     _ = get_user_from_session(request)
@@ -3347,7 +3359,6 @@ def pricebook_item_update(request: Request, item_id: str, body: PricebookItemUpd
     conn = get_conn()
     cur = conn.cursor()
     try:
-        # 1) Leer valores actuales de la BD
         cur.execute(
             "SELECT name, sku, unit, price, vat_rate, synonyms FROM pricebook_items WHERE id=%s AND company_id=%s",
             (item_id, company_id),
@@ -3356,13 +3367,20 @@ def pricebook_item_update(request: Request, item_id: str, body: PricebookItemUpd
         if not row:
             raise HTTPException(status_code=404, detail="Producto no encontrado")
 
-        # 2) Merge: usar valor nuevo si viene, conservar el existente si no
         name     = (body.name.strip() if body.name is not None else None) or row[0]
         sku      = (body.sku.strip()  if body.sku  is not None else None) or row[1]
         unit     = (body.unit.strip() if body.unit is not None else None) or row[2]
         price    = body.price    if body.price    is not None else row[3]
         vat_rate = body.vat_rate if body.vat_rate is not None else row[4]
-        synonyms = (body.synonyms.strip() if body.synonyms is not None else None) or row[5]
+        synonyms = (body.synonyms.strip() if body.synonyms is not None else None) or row[5] or ""
+
+        # Auto-generar plurales/singulares como sinónimos
+        _auto_vars = _auto_plural_singular(name)
+        if _auto_vars:
+            existing_set = {s.strip().lower() for s in synonyms.split(",") if s.strip()}
+            new_vars = [v for v in _auto_vars if v not in existing_set]
+            if new_vars:
+                synonyms = (synonyms + ", " + ", ".join(new_vars)).strip(", ")
 
         name_norm = norm_name(name)
 
@@ -3387,8 +3405,6 @@ def pricebook_item_update(request: Request, item_id: str, body: PricebookItemUpd
     finally:
         cur.close()
         conn.close()
-# ─────────────────────────────────────────────────────────────────────────────
-
 
 @app.get("/api/pricebook/items/{item_id}/synonyms-suggestions")
 def synonyms_suggestions(request: Request, item_id: str):
