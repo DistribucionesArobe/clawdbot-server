@@ -2306,7 +2306,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                     continue
                 try:
                     result = smart_search(conn, company_id, prod_raw, qty,
-                                          cart_context=_build_cart_context(state) or _pedido_raw)  
+                                          cart_context=_pedido_raw)  
                 except Exception as e:
                     print("SMART SEARCH ERROR:", repr(e))
                     result = {"status": "not_found", "item": None, "candidates": []}
