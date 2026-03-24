@@ -1436,15 +1436,12 @@ def send_whatsapp_list_sections(wa_api_key: str, phone_number_id: str, to: str,
 
 
 def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", is_interactive: bool = False) -> str:
-     # ── Verificar si bot está silenciado para esta conversación ──
+    # ── Verificar si bot está silenciado para esta conversación ──
     if wa_from:
         _bot_state = get_quote_state(company_id, wa_from) or {}
         if _bot_state.get("bot_active") is False:
-            return ""  # Bot silenciado — el agente está atendiendo
+            return ""
 
-    # ... resto del código igual
-
-    
     if is_interactive:
         user_text = (user_text or "").strip()
     else:
@@ -1515,7 +1512,6 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         t = t.replace("PICK_", "")
         return [(m[0], int(m[1])) for m in re.findall(r"\b([A-Z])(\d+)\b", t)]
 
-
     def _is_greeting_like(tnorm: str) -> bool:
         t = (tnorm or "").strip()
         if not t:
@@ -1574,19 +1570,9 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         msg += (
             "\n\n¿Agregamos algo más?\n"
             "🧭 Comandos:\n"
-            "• 'nueva cotizacion' → empezar de cero\n"
-            "• 'salir' → cancelar"
-        )
-        return msg
-
-        msg = cart_render_quote(state, company_id=company_id, client_phone=wa_from) if (state.get("cart") or []) else ""
-
-        if wa_from and company_id:
-            upsert_quote_state(company_id, wa_from, state)
-        
-        msg += (
-            "\n\n¿Agregamos algo más?\n"
-            "🧭 Comandos:\n"
+            "• 'quitar [producto]' → ej: quitar cemento\n"
+            "• 'cambiar [cantidad] [producto]' → ej: cambiar 10 varilla\n"
+            "• 'ver carrito' → ver tu pedido actual\n"
             "• 'nueva cotizacion' → empezar de cero\n"
             "• 'salir' → cancelar"
         )
@@ -1594,6 +1580,66 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
 
     tnorm = norm_name(user_text).replace("cotización", "cotizacion")
 
+    # ── Editar carrito ────────────────────────────────────────────────────────
+    _edit_state = get_quote_state(company_id, wa_from) if wa_from else {}
+    _edit_state = _edit_state or {}
+    _cart = _edit_state.get("cart") or []
+
+    # VER CARRITO
+    ver_triggers = {"ver carrito", "mi carrito", "que llevo", "qué llevo", "ver pedido", "mi pedido"}
+    if tnorm in ver_triggers:
+        if not _cart:
+            return "Tu carrito está vacío. Mándame tu pedido, ej: 10 cemento, 5 varilla 3/8"
+        return cart_render_quote(_edit_state, company_id=company_id, client_phone=wa_from)
+
+    # QUITAR PRODUCTO
+    _quitar_match = re.match(r"^(quitar|eliminar|borrar|sacar)\s+(.+)$", tnorm)
+    if _quitar_match:
+        _prod_query = _quitar_match.group(2).strip()
+        if not _cart:
+            return "Tu carrito está vacío."
+        _matches = [it for it in _cart if _prod_query in norm_name(it.get("name", "")).lower()]
+        if not _matches:
+            _matches = [it for it in _cart if any(tok in norm_name(it.get("name", "")).lower() for tok in _prod_query.split() if len(tok) >= 3)]
+        if len(_matches) == 1:
+            _cart = [it for it in _cart if it != _matches[0]]
+            _edit_state["cart"] = _cart
+            if wa_from:
+                upsert_quote_state(company_id, wa_from, _edit_state)
+            if not _cart:
+                return f"✅ Eliminé *{_matches[0]['name']}*. Tu carrito quedó vacío."
+            return cart_render_quote(_edit_state, company_id=company_id, client_phone=wa_from) + "\n\n¿Agregamos o quitamos algo más?"
+        elif len(_matches) > 1:
+            lines = "\n".join([f"• {it['name']}" for it in _matches])
+            return f"Encontré varios con '{_prod_query}':\n{lines}\n\nEscribe el nombre más completo."
+        else:
+            return f"No encontré '{_prod_query}' en tu carrito.\n\nEscribe *ver carrito* para ver lo que llevas."
+
+    # CAMBIAR CANTIDAD
+    _cambiar_match = re.match(r"^(cambiar|cambia|modificar|modifica|actualizar)\s+(\d+)\s+(.+)$", tnorm)
+    if _cambiar_match:
+        _nueva_qty = int(_cambiar_match.group(2))
+        _prod_query = _cambiar_match.group(3).strip()
+        if not _cart:
+            return "Tu carrito está vacío."
+        _matches = [it for it in _cart if _prod_query in norm_name(it.get("name", "")).lower()]
+        if not _matches:
+            _matches = [it for it in _cart if any(tok in norm_name(it.get("name", "")).lower() for tok in _prod_query.split() if len(tok) >= 3)]
+        if len(_matches) == 1:
+            for it in _cart:
+                if it == _matches[0]:
+                    it["qty"] = _nueva_qty
+            _edit_state["cart"] = _cart
+            if wa_from:
+                upsert_quote_state(company_id, wa_from, _edit_state)
+            return cart_render_quote(_edit_state, company_id=company_id, client_phone=wa_from) + "\n\n¿Agregamos o quitamos algo más?"
+        elif len(_matches) > 1:
+            lines = "\n".join([f"• {it['name']}" for it in _matches])
+            return f"Encontré varios con '{_prod_query}':\n{lines}\n\nEscribe el nombre más completo."
+        else:
+            return f"No encontré '{_prod_query}' en tu carrito.\n\nEscribe *ver carrito* para ver lo que llevas."
+
+    # ── Pagar ─────────────────────────────────────────────────────────────────
     pagar_triggers = {"pagar", "pago", "como pago", "cómo pago", "quiero pagar", "datos de pago", "datos bancarios", "transferencia"}
     if any(pt == tnorm or pt in tnorm for pt in pagar_triggers):
         _plan = get_company_plan_code(company_id)
@@ -1645,10 +1691,9 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 + "\n\n📎 Cuando realices tu pago, *manda el comprobante* por aquí y avisamos a la empresa."
             )
         else:
-            return (
-                "Para recibir los datos de pago, escribe *asesor* y un representante te los enviará. 🙏"
-            )
+            return "Para recibir los datos de pago, escribe *asesor* y un representante te los enviará. 🙏"
 
+    # ── Reset ─────────────────────────────────────────────────────────────────
     reset_triggers = {
         "salir", "cancelar", "cancel", "reset", "reiniciar",
         "nueva cotizacion", "nuevo", "empezar de nuevo",
@@ -1678,7 +1723,6 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             "Ejemplo de cotización:\n"
             "👉 10 cemento, 5 varilla 3/8"
         )
-        
 
     thanks_triggers = {"gracias", "muchas gracias", "mil gracias", "thx", "thanks"}
     if tnorm in thanks_triggers:
@@ -1686,6 +1730,8 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             "¡Con gusto! 🙌\n"
             "Si quieres otra cotización, mándame: 10 cemento, 5 varilla 3/8\n\n"
             "🧭 Comandos:\n"
+            "• 'quitar [producto]' → ej: quitar cemento\n"
+            "• 'cambiar [cantidad] [producto]' → ej: cambiar 10 varilla\n"
             "• 'nueva cotizacion' → empezar de cero\n"
             "• 'salir' → cancelar"
         )
@@ -1717,7 +1763,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             "Mientras tanto puedes seguir agregando productos "
             "o esperar a que te contacten."
         )
-    
+
     if _is_greeting_like(tnorm):
         try:
             conn_co = get_conn()
@@ -1729,7 +1775,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             company_name = row_co[0] if row_co else "tu ferretería"
         except Exception:
             company_name = "tu ferretería"
-    
+
         if wa_from:
             st = get_quote_state(company_id, wa_from) or {}
             if (st.get("cart") or []) or (st.get("pending") or []):
