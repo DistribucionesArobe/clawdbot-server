@@ -435,7 +435,6 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict:
                 print(f"ILIKE RESOLVED: query='{user_query}' match='{r[1]}'")
                 return {"status": "found", "item": _make_item(r), "candidates": []}
 
-            # Filtrar candidatos: solo mostrar productos cuyo nombre empiece con el primer token
             q_first_token = q.split()[0] if q.split() else q
             filtered = [
                 (s, r) for s, r in scored[:5]
@@ -530,7 +529,6 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict:
                 return {"status": "found", "item": scored[0][1], "candidates": []}
             print(f"FUZZY AMBIGUOUS: query='{user_query}' found={len(scored)}")
 
-            # Filtrar candidatos por primer token
             q_first_token = q.split()[0] if q.split() else q
             filtered = [
                 (s, item) for s, item in scored[:5]
@@ -548,6 +546,13 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict:
         if candidates and candidates[0].get("similarity", 0) >= 0.60:
             print(f"SEMANTIC CANDIDATES: query='{user_query}' found={len(candidates)}")
             return {"status": "ambiguous", "item": None, "candidates": candidates}
+
+        # Segunda pasada con threshold bajo — mostrar algo mejor que nada
+        candidates_low = semantic_search_candidates(conn, company_id, user_query,
+                                                    threshold=0.35, limit=3)
+        if candidates_low:
+            print(f"SEMANTIC LOW THRESHOLD: query='{user_query}' found={len(candidates_low)}")
+            return {"status": "ambiguous", "item": None, "candidates": candidates_low}
 
         return {"status": "not_found", "item": None, "candidates": []}
 
