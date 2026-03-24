@@ -393,9 +393,12 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict:
             syn_rows = cur0.fetchall()
         finally:
             cur0.close()
+
         if len(syn_rows) == 1:
-            print(f"SYNONYM DIRECT HIT: query='{user_query}' match='{syn_rows[0][1]}'")
-            return {"status": "found", "item": _make_item(syn_rows[0]), "candidates": []}
+            name_score = fuzz.token_set_ratio(q, (syn_rows[0][1] or "").lower())
+            if name_score >= 60:
+                print(f"SYNONYM DIRECT HIT: query='{user_query}' match='{syn_rows[0][1]}'")
+                return {"status": "found", "item": _make_item(syn_rows[0]), "candidates": []}
         elif len(syn_rows) > 1:
             name_matches = [r for r in syn_rows if q in (r[1] or "").lower()]
             if not name_matches:
@@ -432,8 +435,15 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict:
                 print(f"ILIKE RESOLVED: query='{user_query}' match='{r[1]}'")
                 return {"status": "found", "item": _make_item(r), "candidates": []}
 
+            # Filtrar candidatos: solo mostrar productos cuyo nombre empiece con el primer token
+            q_first_token = q.split()[0] if q.split() else q
+            filtered = [
+                (s, r) for s, r in scored[:5]
+                if (r[1] or "").lower().startswith(q_first_token)
+            ]
+            candidates = filtered if filtered else scored[:5]
             return {"status": "ambiguous", "item": None,
-                    "candidates": [_make_item(r) for _, r in scored[:5]]}
+                    "candidates": [_make_item(r) for _, r in candidates]}
 
         # PASO 2: tsvector + fuzzy sobre candidatos
         _tokens = [t for t in q.split() if len(t) >= 3]
@@ -519,11 +529,17 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict:
                 print(f"FUZZY CLEAR WIN: query='{user_query}' match='{scored[0][1]['name']}' score={top_score}")
                 return {"status": "found", "item": scored[0][1], "candidates": []}
             print(f"FUZZY AMBIGUOUS: query='{user_query}' found={len(scored)}")
-            return {"status": "ambiguous", "item": None, "candidates": [s[1] for s in scored[:5]]}
 
-        # =========================================================
+            # Filtrar candidatos por primer token
+            q_first_token = q.split()[0] if q.split() else q
+            filtered = [
+                (s, item) for s, item in scored[:5]
+                if (item.get("name") or "").lower().startswith(q_first_token)
+            ]
+            candidates = filtered if filtered else scored[:5]
+            return {"status": "ambiguous", "item": None, "candidates": [item for _, item in candidates]}
+
         # PASO 3: Semántico — solo si hay alta confianza
-        # =========================================================
         words = user_query.strip().split()
         cand_threshold = 0.55 if len(words) == 1 else 0.60 if len(words) == 2 else 0.65
 
