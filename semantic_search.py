@@ -408,6 +408,10 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
 
         _stopwords = {"para", "de", "del", "la", "el", "un", "una", "con", "sin", "los", "las"}
         q_tokens = [t for t in q.split() if t not in _stopwords]
+        # Si quitar stopwords destruyó el query (ej: "t de 61" → solo "t"), preservar más
+        if not q_tokens or (len(q_tokens) == 1 and len(q_tokens[0]) <= 2 and not re.search(r"\d", q_tokens[0])):
+            _soft_stopwords = {"para", "del", "la", "el", "un", "una", "con", "sin", "los", "las"}
+            q_tokens = [t for t in q.split() if t not in _soft_stopwords]
         q = " ".join(q_tokens).strip() or q
 
         def _name_search(term):
