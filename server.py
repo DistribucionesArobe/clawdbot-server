@@ -220,9 +220,10 @@ def singularize_token(tok: str) -> str:
         return t[:-1]
     if t.endswith("illas"):
         return t[:-1]
+    # Solo quitar "es" si la base termina en consonante (canales→canal, postes→poste)
     if t.endswith("es"):
         base = t[:-2]
-        if len(base) >= 3:
+        if len(base) >= 3 and base[-1] not in "aeiouáéíóú":
             return base
     if t.endswith("s"):
         base = t[:-1]
