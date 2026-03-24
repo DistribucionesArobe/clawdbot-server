@@ -1434,6 +1434,278 @@ def send_whatsapp_list_sections(wa_api_key: str, phone_number_id: str, to: str,
     if r.status_code >= 300:
         raise RuntimeError(f"WA list sections failed {r.status_code}: {r.text[:400]}")
 
+# ── Módulo Construcción Ligera ────────────────────────────────────────────────
+
+import math
+
+CONSTRUCCION_TIPOS = {
+    "muro tablaroca": {
+        "label": "Muro Tablaroca",
+        "inputs": ["alto_muro", "largo_muro"],
+        "preguntas": {
+            "alto_muro": "📐 ¿Cuántos metros de *alto* tiene el muro? (ej: 2.44)",
+            "largo_muro": "📏 ¿Cuántos metros de *largo* tiene el muro? (ej: 10)",
+        },
+    },
+    "muro durock": {
+        "label": "Muro Durock",
+        "inputs": ["alto_muro", "largo_muro"],
+        "preguntas": {
+            "alto_muro": "📐 ¿Cuántos metros de *alto* tiene el muro? (ej: 2.44)",
+            "largo_muro": "📏 ¿Cuántos metros de *largo* tiene el muro? (ej: 10)",
+        },
+    },
+    "plafon tablaroca": {
+        "label": "Plafón Tablaroca",
+        "inputs": ["largo", "ancho"],
+        "preguntas": {
+            "largo": "📏 ¿Cuántos metros de *largo* tiene el plafón? (ej: 12)",
+            "ancho": "📐 ¿Cuántos metros de *ancho* tiene el plafón? (ej: 8)",
+        },
+    },
+    "plafon reticulado": {
+        "label": "Plafón Reticulado",
+        "inputs": ["largo", "ancho"],
+        "preguntas": {
+            "largo": "📏 ¿Cuántos metros de *largo* tiene el plafón? (ej: 12)",
+            "ancho": "📐 ¿Cuántos metros de *ancho* tiene el plafón? (ej: 5)",
+        },
+    },
+}
+
+
+def _calc_muro_tablaroca(alto: float, largo: float) -> list:
+    m2 = alto * largo
+    tablaroca = math.ceil(math.ceil(m2 / (1.22 * 2.44) * 2 * 1.03) * 1.03)
+    pijas = math.ceil(tablaroca * 30)
+    return [
+        ("Tablaroca ultralight USG",          tablaroca),
+        ("Canal 6.35 x 3.05 cal 26",          math.ceil((largo / 3) * 2)),
+        ("Poste 6.35 x 3.05 cal 26",          math.ceil(alto / 0.61) * math.ceil(largo / 3.05)),
+        ("Pija 6 x 1",                         pijas),
+        ('Pija framer 1/2" punta broca',       math.ceil(pijas / 2)),
+        ("Perfacinta USG",                     math.ceil((m2 / 2.44) / 20)),
+        ("Redimix 21.8 kg USG",                math.ceil(m2 / 14)),
+        ("Aislamiento rollo 9.29 m2",          math.ceil(m2 / 9.29)),
+    ]
+
+
+def _calc_muro_durock(alto: float, largo: float) -> list:
+    m2 = alto * largo
+    durock = math.ceil(math.ceil(m2 / (1.22 * 2.44) * 2 * 1.03) * 1.03)
+    pijas = math.ceil(durock * 30)
+    return [
+        ("Durock 1.22x2.44 m",                durock),
+        ("Canal 6.35 x 3.05 cal 22",          math.ceil((largo / 3) * 2)),
+        ("Poste 6.35 x 3.05 cal 20",          math.ceil(alto / 0.61) * math.ceil(largo / 3.05)),
+        ('Pija durock 1 1/4"',                 pijas),
+        ('Pija framer 1/2" punta broca',       math.ceil(pijas / 2)),
+        ("Cinta fibra de vidrio",              math.ceil((m2 / 2.44) / 20)),
+        ("Basecoat USG",                       math.ceil(m2 / 4)),
+        ("Aislante fibra de vidrio 9.29 m2",   math.ceil(m2 / 9.29)),
+    ]
+
+
+def _calc_plafon_tablaroca(largo: float, ancho: float) -> list:
+    m2 = largo * ancho
+    tablaroca = math.ceil(m2 / 2.9768 * 1.07)
+    pijas = math.ceil(tablaroca * 30)
+    return [
+        ("Tablaroca ultralight USG",           tablaroca),
+        ("Canal listón cal 26",                math.ceil(((m2 / 0.61) * 1.05) / 3.05) + 2),
+        ("Canaleta de carga cal 24",           math.ceil(((m2 / 1.22) * 1.05) / 3.05)),
+        ("Ángulo de amarre cal 26",            math.ceil(((largo * 2) + (ancho * 2)) / 3.05)),
+        ("Pija 6 x 1",                         pijas),
+        ('Pija framer 1/2" punta broca',       math.ceil(pijas / 2)),
+        ("Perfacinta USG",                     math.ceil((m2 * 0.8 * 1.05) / 75)),
+        ("Redimix 21.8 kg",                    math.ceil((m2 * 0.65 * 1.05) / 21.8)),
+        ("Aislante fibra de vidrio 9.29 m2",   math.ceil((m2 / 2) / 9.29)),
+        ("Alambre galvanizado x kg",           math.ceil(m2 / 20)),
+    ]
+
+
+def _calc_plafon_reticulado(largo: float, ancho: float) -> list:
+    m2 = largo * ancho
+    return [
+        ("Plafón 61x61",                       math.ceil(m2 / 0.36 * 1.03)),
+        ("Tee principal",                      math.ceil(m2 * 0.29)),
+        ("Tee 1.22",                           math.ceil(m2 * 1.4)),
+        ("Tee 61",                             math.ceil(m2 * 1.4)),
+        ("Ángulo perimetral",                  math.ceil(((largo * 2) + (ancho * 2)) / 3.05)),
+        ("Alambre galvanizado x kg",           math.ceil(m2 / 20)),
+    ]
+
+
+def _is_construccion_trigger(text: str) -> bool:
+    t = norm_name(text)
+    triggers = [
+        "construccion", "construcción", "construcion",
+        "calcular material", "calcular materiales",
+        "cuantos materiales", "cuántos materiales",
+        "material para", "materiales para",
+        "construccion ligera", "construcción ligera",
+        "drywall", "tablaroca construccion",
+        "muro tablaroca", "muro durock",
+        "plafon tablaroca", "plafon reticulado",
+        "cuanto material", "cuánto material",
+        "cuanto necesito", "cuánto necesito",
+    ]
+    return any(tr in t for tr in triggers)
+
+
+def _handle_construccion(company_id: str, user_text: str, wa_from: str):
+    state = get_quote_state(company_id, wa_from) or {}
+    cs = state.get("construccion_state") or {}
+    t = norm_name(user_text)
+
+    # ── Paso 0: elegir tipo ───────────────────────────────────────────────────
+    if not cs.get("tipo"):
+        # Detectar si ya mencionó el tipo en el mensaje
+        tipo_detectado = None
+        for key in CONSTRUCCION_TIPOS:
+            if key in t:
+                tipo_detectado = key
+                break
+        # También detectar variantes con tilde
+        if not tipo_detectado:
+            mapeo = {
+                "plafón tablaroca": "plafon tablaroca",
+                "plafón reticulado": "plafon reticulado",
+                "plafon tablaroca": "plafon tablaroca",
+                "plafon reticulado": "plafon reticulado",
+            }
+            for k, v in mapeo.items():
+                if k in t:
+                    tipo_detectado = v
+                    break
+
+        if not tipo_detectado:
+            state["construccion_state"] = {"step": "eligiendo_tipo"}
+            upsert_quote_state(company_id, wa_from, state)
+            return {
+                "type": "list",
+                "body": "🏗️ *Calculadora de Construcción Ligera*\n\n¿Qué tipo de construcción vas a hacer?",
+                "options": ["Muro tablaroca", "Muro durock", "Plafón tablaroca", "Plafón reticulado"],
+                "button_label": "Elegir tipo",
+            }
+        else:
+            cs["tipo"] = tipo_detectado
+            cs["datos"] = {}
+
+    # ── Paso 1: si estaban eligiendo tipo ────────────────────────────────────
+    if cs.get("step") == "eligiendo_tipo":
+        tipo_encontrado = None
+        for key in CONSTRUCCION_TIPOS:
+            label = CONSTRUCCION_TIPOS[key]["label"].lower()
+            if key in t or label in t:
+                tipo_encontrado = key
+                break
+        if not tipo_encontrado:
+            return {
+                "type": "list",
+                "body": "Por favor elige una opción 👇",
+                "options": ["Muro tablaroca", "Muro durock", "Plafón tablaroca", "Plafón reticulado"],
+                "button_label": "Elegir tipo",
+            }
+        cs["tipo"] = tipo_encontrado
+        cs["step"] = None
+        cs["datos"] = {}
+
+    tipo_key = cs.get("tipo")
+    tipo_cfg = CONSTRUCCION_TIPOS.get(tipo_key)
+    if not tipo_cfg:
+        state.pop("construccion_state", None)
+        upsert_quote_state(company_id, wa_from, state)
+        return "No reconocí el tipo. Escribe *construccion* para intentar de nuevo."
+
+    datos = cs.get("datos") or {}
+    inputs = tipo_cfg["inputs"]
+
+    # ── Detectar m2 directo ───────────────────────────────────────────────────
+    m2_match = re.search(r"(\d+(?:[.,]\d+)?)\s*m2", t)
+    if m2_match and not datos:
+        m2_val = float(m2_match.group(1).replace(",", "."))
+        if tipo_key in ("muro tablaroca", "muro durock"):
+            datos["alto_muro"] = 2.44
+            datos["largo_muro"] = round(m2_val / 2.44, 2)
+        else:
+            lado = round(m2_val ** 0.5, 2)
+            datos["largo"] = lado
+            datos["ancho"] = lado
+        cs["datos"] = datos
+
+    # ── Leer número si están esperando input ─────────────────────────────────
+    if cs.get("esperando_input") and not m2_match:
+        campo = cs["esperando_input"]
+        nums = re.findall(r"\d+(?:[.,]\d+)?", user_text.replace(",", "."))
+        if nums:
+            try:
+                val = float(nums[0].replace(",", "."))
+                datos[campo] = val
+                cs["datos"] = datos
+                cs.pop("esperando_input", None)
+            except Exception:
+                pass
+
+    # ── Verificar qué inputs faltan ───────────────────────────────────────────
+    faltantes = [inp for inp in inputs if inp not in datos]
+
+    if faltantes:
+        siguiente = faltantes[0]
+        cs["esperando_input"] = siguiente
+        state["construccion_state"] = cs
+        upsert_quote_state(company_id, wa_from, state)
+        pregunta = tipo_cfg["preguntas"][siguiente]
+        label = tipo_cfg["label"]
+        return f"🏗️ *{label}*\n\n{pregunta}"
+
+    # ── Todos los datos listos → calcular ─────────────────────────────────────
+    try:
+        if tipo_key == "muro tablaroca":
+            materiales = _calc_muro_tablaroca(datos["alto_muro"], datos["largo_muro"])
+            m2 = datos["alto_muro"] * datos["largo_muro"]
+            dim_txt = f"Alto: {datos['alto_muro']}m × Largo: {datos['largo_muro']}m = *{m2:.1f} m²*"
+        elif tipo_key == "muro durock":
+            materiales = _calc_muro_durock(datos["alto_muro"], datos["largo_muro"])
+            m2 = datos["alto_muro"] * datos["largo_muro"]
+            dim_txt = f"Alto: {datos['alto_muro']}m × Largo: {datos['largo_muro']}m = *{m2:.1f} m²*"
+        elif tipo_key == "plafon tablaroca":
+            materiales = _calc_plafon_tablaroca(datos["largo"], datos["ancho"])
+            m2 = datos["largo"] * datos["ancho"]
+            dim_txt = f"Largo: {datos['largo']}m × Ancho: {datos['ancho']}m = *{m2:.1f} m²*"
+        elif tipo_key == "plafon reticulado":
+            materiales = _calc_plafon_reticulado(datos["largo"], datos["ancho"])
+            m2 = datos["largo"] * datos["ancho"]
+            dim_txt = f"Largo: {datos['largo']}m × Ancho: {datos['ancho']}m = *{m2:.1f} m²*"
+        else:
+            raise ValueError(f"tipo desconocido: {tipo_key}")
+    except Exception as e:
+        print("CALC ERROR:", repr(e))
+        state.pop("construccion_state", None)
+        upsert_quote_state(company_id, wa_from, state)
+        return "Error calculando materiales. Escribe *construccion* para intentar de nuevo."
+
+    label = tipo_cfg["label"]
+    lines = [
+        f"🏗️ *{label}*",
+        dim_txt,
+        "",
+        "📦 *Materiales necesarios:*",
+    ]
+    for nombre, cantidad in materiales:
+        lines.append(f"• {cantidad} × {nombre}")
+
+    lines.append("")
+    lines.append("¿Quieres cotizar estos materiales?\nEscribe *si* para agregarlos al carrito.")
+
+    cs["resultado"] = materiales
+    cs["step"] = "esperando_cotizar"
+    state["construccion_state"] = cs
+    upsert_quote_state(company_id, wa_from, state)
+
+    return "\n".join(lines)
+
+
 def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", is_interactive: bool = False) -> str:
     if wa_from:
         _bot_state = get_quote_state(company_id, wa_from) or {}
@@ -1902,6 +2174,57 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 "button_label": "Ver opciones",
             }
 
+    # ── Construcción Ligera ───────────────────────────────────────────────────
+    try:
+        conn_cl = get_conn()
+        cur_cl = conn_cl.cursor()
+        cur_cl.execute("SELECT construccion_ligera_enabled FROM companies WHERE id=%s", (company_id,))
+        row_cl = cur_cl.fetchone()
+        cur_cl.close()
+        conn_cl.close()
+        _cl_enabled = bool(row_cl[0]) if row_cl else False
+    except Exception:
+        _cl_enabled = False
+
+    if _cl_enabled:
+        _cs_state = get_quote_state(company_id, wa_from) if wa_from else {}
+        _cs_state = _cs_state or {}
+
+        if _cs_state.get("construccion_state"):
+            cs = _cs_state["construccion_state"]
+            if cs.get("step") == "esperando_cotizar":
+                if tnorm in {"si", "sí", "yes", "s", "dale", "va", "ok", "listo", "cotiza", "cotizar"}:
+                    materiales = cs.get("resultado") or []
+                    state = _cs_state
+                    conn = get_conn()
+                    try:
+                        for nombre, cantidad in materiales:
+                            result = smart_search(conn, company_id, nombre, cantidad)
+                            if result["status"] == "found":
+                                state = cart_add_item(state, {
+                                    "sku": result["item"].get("sku"),
+                                    "name": result["item"].get("name"),
+                                    "unit": result["item"].get("unit") or "unidad",
+                                    "price": float(result["item"].get("price") or 0.0),
+                                    "vat_rate": result["item"].get("vat_rate"),
+                                    "qty": cantidad,
+                                })
+                    finally:
+                        conn.close()
+                    state.pop("construccion_state", None)
+                    upsert_quote_state(company_id, wa_from, state)
+                    return _build_reply_with_pending(state, company_id=company_id, wa_from=wa_from)
+                else:
+                    _cs_state.pop("construccion_state", None)
+                    upsert_quote_state(company_id, wa_from, _cs_state)
+                    return "Entendido, cancelado. ¿En qué más te ayudo?"
+            return _handle_construccion(company_id, user_text, wa_from)
+
+        if _is_construccion_trigger(tnorm):
+            return _handle_construccion(company_id, user_text, wa_from)
+
+    # ── Picks múltiples A1 B2 C3 ─────────────────────────────────────────────
+    
     _quick_picks = _parse_pending_picks(user_text)
     _state_picks = get_quote_state(company_id, wa_from) if wa_from else {}
     _state_picks = _state_picks or {}
