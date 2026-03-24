@@ -29,17 +29,11 @@ def build_product_text(name: str, sku: str = "", unit: str = "", synonyms: str =
 
 def build_query_text(user_input: str) -> str:
     t = (user_input or "").lower().strip()
-
-    # Proteger fracciones ANTES de quitar números (ej: 3/8, 1/2, 5/8)
     t = re.sub(r"(\d+)\s*/\s*(\d+)", r"\1/\2", t)
-
     noise_intent = r"\b(cotiza|cotizame|dame|quiero|necesito|por favor|porfa|pls|precio|precios)\b"
     t = re.sub(noise_intent, " ", t)
-
     noise_units = r"\b(cubeta|cubetas|bulto|bultos|bolsa|bolsas|rollo|rollos|pieza|piezas|metro|metros|kilo|kilos|kilogramo|kilogramos|litro|litros|par|pares|juego|juegos|caja|cajas|saco|sacos|bote|botes|lata|latas|tubo|tubos|tira|tiras|hoja|hojas)\b"
     t = re.sub(noise_units, " ", t)
-
-    # Quitar números sueltos pero NO los que forman parte de una fracción
     t = re.sub(r"\b\d+\b(?!/\d)", " ", t)
     t = re.sub(r"\s+", " ", t).strip()
     if not t:
@@ -282,7 +276,7 @@ def resolve_global_synonym(conn, q: str) -> str:
         cur.close()
 
 
-def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict:  # noqa
+def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict:
     try:
         from rapidfuzz import fuzz
         import re as _re
@@ -290,23 +284,16 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict: 
         q = user_query.lower().strip()
         q = build_query_text(q)
 
-        # Limpiar stopwords
         _stopwords = {"para", "de", "del", "la", "el", "un", "una", "con", "sin", "los", "las"}
         q_tokens = [t for t in q.split() if t not in _stopwords]
         q = " ".join(q_tokens).strip() or q
 
-        # =========================================================
-        # HELPERS
-        # =========================================================
-
         def _name_search(term):
             c = conn.cursor()
             try:
-                # DEBUG: verificar company_id y total de productos
                 c.execute("SELECT count(*) FROM pricebook_items WHERE company_id = %s", (company_id,))
                 cnt = c.fetchone()[0]
                 print(f">>> DEBUG: company_id='{company_id}' total_rows={cnt}")
-
                 c.execute(
                     """
                     SELECT sku, name, unit, price, vat_rate
@@ -360,9 +347,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict: 
 
         q_medida, q_cal = _extract_specs(q)
 
-        # =========================================================
         # PASO -1: Sinónimo global
-        # =========================================================
         print(f"SMART SEARCH q='{q}' original='{user_query}'")
         q_resolved = resolve_global_synonym(conn, q)
         print(f"RESOLVED: q='{q}' → q_resolved='{q_resolved}'")
@@ -387,9 +372,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict: 
 
             print(f"GLOBAL SYNONYM NO HIT: '{q_resolved}' → continuando con q original='{q}'")
 
-        # =========================================================
-        # PASO 0: Sinónimo exacto en pricebook (campo synonyms)
-        # =========================================================
+        # PASO 0: Sinónimo exacto en pricebook
         cur0 = conn.cursor()
         try:
             cur0.execute(
@@ -413,9 +396,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict: 
                 print(f"SYNONYM AMBIGUOUS: query='{user_query}' found={len(syn_rows)}")
                 return {"status": "ambiguous", "item": None, "candidates": [_make_item(r) for r in syn_rows]}
 
-        # =========================================================
         # PASO 1: ILIKE directo + ranking con bonus de specs
-        # =========================================================
         pool_rows = _name_search(q)
         if not pool_rows and q.endswith("s") and len(q) > 3:
             pool_rows = _name_search(q[:-1])
@@ -448,9 +429,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict: 
             return {"status": "ambiguous", "item": None,
                     "candidates": [_make_item(r) for _, r in scored[:5]]}
 
-        # =========================================================
-        # PASO 2: tsvector (GIN index) + fuzzy sobre candidatos
-        # =========================================================
+        # PASO 2: tsvector + fuzzy sobre candidatos
         _tokens = [t for t in q.split() if len(t) >= 3]
         _tsquery = " | ".join(_tokens) if _tokens else q
 
@@ -537,14 +516,14 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict: 
             return {"status": "ambiguous", "item": None, "candidates": [s[1] for s in scored[:5]]}
 
         # =========================================================
-        # PASO 3: Semántico
+        # PASO 3: Semántico — solo si hay alta confianza
         # =========================================================
         words = user_query.strip().split()
-        cand_threshold = 0.20 if len(words) == 1 else 0.30 if len(words) == 2 else 0.40
+        cand_threshold = 0.55 if len(words) == 1 else 0.60 if len(words) == 2 else 0.65
 
         candidates = semantic_search_candidates(conn, company_id, user_query,
                                                 threshold=cand_threshold, limit=5)
-        if candidates:
+        if candidates and candidates[0].get("similarity", 0) >= 0.60:
             print(f"SEMANTIC CANDIDATES: query='{user_query}' found={len(candidates)}")
             return {"status": "ambiguous", "item": None, "candidates": candidates}
 
