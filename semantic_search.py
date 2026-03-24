@@ -1,9 +1,9 @@
 """
-semantic_search.py — Búsqueda semántica para CotizaBot v5
-Novedades vs v4.1:
-  - GPT devuelve números separados por coma cuando hay ambigüedad
-  - Elimina last resort semántico (que ofrecía productos irrelevantes)
-  - GPT dice NO = not_found limpio, sin puertas ni megapaneles
+semantic_search.py — Búsqueda semántica para CotizaBot v7
+Novedades vs v5:
+  - smart_search acepta cart_context
+  - _gpt_catalog_fallback recibe cart_context y lo pasa al prompt
+  - GPT entiende "placas" como plafón cuando el pedido tiene "Tee 61"
 """
 
 import re
@@ -38,7 +38,8 @@ def build_query_text(user_input: str) -> str:
     t = re.sub(noise_intent, " ", t)
     noise_units = r"\b(cubeta|cubetas|bulto|bultos|bolsa|bolsas|rollo|rollos|pieza|piezas|metro|metros|kilo|kilos|kilogramo|kilogramos|litro|litros|par|pares|juego|juegos|caja|cajas|saco|sacos|bote|botes|lata|latas|tubo|tubos|tira|tiras|hoja|hojas)\b"
     t = re.sub(noise_units, " ", t)
-    t = re.sub(r"(?<!\d)(?<!\.)(\b\d+\b)(?!\.\d)(?!/\d)", " ", t)
+    t = re.sub(r"^\s*\d+\s+", "", t)
+    t = re.sub(r"(?<![/\d])(\b\d\b)(?![/\d])", " ", t)
     t = re.sub(r"\s+", " ", t).strip()
     if not t:
         t = (user_input or "").lower().strip()
@@ -290,17 +291,13 @@ def _auto_save_synonym(conn, company_id: str, user_query: str, resolved_name: st
         cur.close()
 
 
-def _gpt_catalog_fallback(conn, company_id: str, user_query: str) -> list:
+def _gpt_catalog_fallback(conn, company_id: str, user_query: str,
+                           cart_context: str = "") -> list:
     """
-    Fallback GPT v2: devuelve lista de items del catálogo.
+    Fallback GPT v3: recibe cart_context para inferir categoría del producto.
     - 1 resultado  → found directo + auto-save sinónimo
     - 2-5 resultados → ambiguous, cliente elige A1/B2
-    - lista vacía  → not_found limpio (sin productos irrelevantes)
-
-    GPT responde:
-    - Un número: coincidencia única clara (ej: '42')
-    - Números separados por coma: varias opciones del mismo tipo (ej: '42,43,44')
-    - 'NO': no hay nada relevante en el catálogo
+    - lista vacía  → not_found limpio
     """
     if not openai_client:
         print("GPT FALLBACK: openai_client no disponible")
@@ -326,6 +323,13 @@ def _gpt_catalog_fallback(conn, company_id: str, user_query: str) -> list:
         catalog_lines.append(f"{i + 1}. {name}{sku_txt}{unit_txt}")
     catalog_str = "\n".join(catalog_lines)
 
+    context_block = ""
+    if cart_context:
+        context_block = (
+            f"CONTEXTO: Este producto es parte de un pedido que también incluye: {cart_context}. "
+            f"Usa ese contexto para inferir la categoría del producto buscado.\n\n"
+        )
+
     try:
         resp = openai_client.chat.completions.create(
             model="gpt-4o-mini",
@@ -333,24 +337,27 @@ def _gpt_catalog_fallback(conn, company_id: str, user_query: str) -> list:
                 {
                     "role": "system",
                     "content": (
-                        "Eres asistente de ferretería mexicana especializado en materiales de "
-                        "construcción ligera (tablaroca, durock, plafones, perfiles, etc.). "
+                        "Eres asistente de ferretería mexicana con amplio conocimiento de materiales "
+                        "de construcción, plomería, electricidad, herrería y acabados. "
                         "El cliente busca un producto usando lenguaje coloquial, abreviado o con errores. "
-                        "Tu tarea: identificar qué productos del catálogo corresponden a lo que busca.\n\n"
-                        "Reglas estrictas:\n"
-                        "- Si hay UNA coincidencia clara, responde SOLO ese número (ej: '42').\n"
-                        "- Si hay VARIAS opciones del MISMO tipo de producto, responde los números "
-                        "separados por coma (ej: '42,43,44'). Máximo 5.\n"
-                        "- Si no hay nada relevante en el catálogo, responde exactamente: NO\n"
-                        "- NUNCA incluyas productos de tipo diferente al buscado. "
-                        "Ejemplo: si buscan 'placas' NO incluyas puertas ni paneles de fachada, "
-                        "solo plafones o tablaroca.\n"
-                        "- NUNCA expliques. NUNCA uses texto. Solo números separados por coma o NO."
+                        "Usa el contexto del pedido completo para entender a qué categoría pertenece "
+                        "el producto buscado — igual que lo haría un ferretero experimentado.\n\n"
+                        "Ejemplos:\n"
+                        "- Pedido con 'tee principal, tee 61' → 'placas' = plafón reticulado\n"
+                        "- Pedido con 'tablaroca, poste, canal' → 'pasta' = redimix/basecoat\n"
+                        "- Pedido con 'tubo conduit, clavija' → 'cinta' = cinta aislante\n\n"
+                        "Reglas:\n"
+                        "- UNA coincidencia clara → responde SOLO ese número (ej: '42')\n"
+                        "- VARIAS opciones del MISMO tipo → números por coma (ej: '42,43,44'). Máximo 5.\n"
+                        "- Nada relevante → responde exactamente: NO\n"
+                        "- NUNCA incluyas productos de tipo diferente al inferido\n"
+                        "- NUNCA expliques. Solo números o NO."
                     ),
                 },
                 {
                     "role": "user",
                     "content": (
+                        f"{context_block}"
                         f"Catálogo:\n{catalog_str}\n\n"
                         f"El cliente busca: \"{user_query}\"\n\n"
                         "¿Qué números corresponden? (números separados por coma, o NO)"
@@ -361,7 +368,7 @@ def _gpt_catalog_fallback(conn, company_id: str, user_query: str) -> list:
             max_tokens=20,
         )
         raw = (resp.choices[0].message.content or "").strip().upper()
-        print(f"GPT FALLBACK RAW: query='{user_query}' response='{raw}'")
+        print(f"GPT FALLBACK RAW: query='{user_query}' context='{cart_context[:50]}' response='{raw}'")
 
         if raw == "NO" or not raw:
             return []
@@ -390,7 +397,8 @@ def _gpt_catalog_fallback(conn, company_id: str, user_query: str) -> list:
         return []
 
 
-def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict:
+def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
+                 cart_context: str = "") -> dict:
     try:
         from rapidfuzz import fuzz
         import re as _re
@@ -456,7 +464,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict:
         q_medida, q_cal = _extract_specs(q)
 
         # ── PASO -1: Sinónimo global ──────────────────────────────────────────
-        print(f"SMART SEARCH q='{q}' original='{user_query}'")
+        print(f"SMART SEARCH q='{q}' original='{user_query}' context='{cart_context[:50]}'")
         q_resolved = resolve_global_synonym(conn, q)
         print(f"RESOLVED: q='{q}' → q_resolved='{q_resolved}'")
         if q_resolved != q:
@@ -622,8 +630,9 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict:
             print(f"SEMANTIC LOW THRESHOLD: query='{user_query}' found={len(candidates_low)}")
             return {"status": "ambiguous", "item": None, "candidates": candidates_low}
 
-        # ── PASO 4: Fallback GPT con catálogo completo ────────────────────────
-        gpt_results = _gpt_catalog_fallback(conn, company_id, user_query)
+        # ── PASO 4: Fallback GPT con catálogo completo + contexto del pedido ──
+        gpt_results = _gpt_catalog_fallback(conn, company_id, user_query,
+                                             cart_context=cart_context)
 
         if len(gpt_results) == 1:
             print(f"GPT FALLBACK FOUND: query='{user_query}' → '{gpt_results[0]['name']}'")
@@ -637,7 +646,6 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict:
             print(f"GPT FALLBACK AMBIGUOUS: query='{user_query}' options={[r['name'] for r in gpt_results]}")
             return {"status": "ambiguous", "item": None, "candidates": gpt_results}
 
-        # GPT dijo NO — producto genuinamente no existe en el catálogo
         print(f"GPT FALLBACK NO: query='{user_query}' → not_found")
         return {"status": "not_found", "item": None, "candidates": []}
 
