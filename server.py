@@ -1658,14 +1658,26 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
     if any(rt == tnorm or rt in tnorm for rt in reset_triggers):
         if wa_from:
             clear_quote_state(company_id, wa_from)
+        try:
+            conn_co = get_conn()
+            cur_co = conn_co.cursor()
+            cur_co.execute("SELECT name FROM companies WHERE id=%s LIMIT 1", (company_id,))
+            row_co = cur_co.fetchone()
+            cur_co.close()
+            conn_co.close()
+            company_name = row_co[0] if row_co else "tu ferretería"
+        except Exception:
+            company_name = "tu ferretería"
         return (
-            "✅ Listo. Empezamos de cero.\n\n"
-            "Mándame tu cotización así:\n"
-            "Ej: 10 cemento, 5 varilla 3/8\n\n"
-            "🧭 Comandos:\n"
-            "• 'nueva cotizacion' → empezar de cero\n"
-            "• 'salir' → cancelar"
+            f"👋 ¡Hola! Soy el Cotizabot de *{company_name}*\n\n"
+            "¿En qué te puedo ayudar?\n"
+            "🔨 Cotizar materiales → mándame tu pedido\n"
+            "🕐 Horarios y ubicación → escribe *horario* o *ubicación*\n"
+            "👤 Hablar con alguien → escribe *asesor*\n\n"
+            "Ejemplo de cotización:\n"
+            "👉 10 cemento, 5 varilla 3/8"
         )
+        
 
     thanks_triggers = {"gracias", "muchas gracias", "mil gracias", "thx", "thanks"}
     if tnorm in thanks_triggers:
