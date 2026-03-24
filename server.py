@@ -1578,13 +1578,24 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             if wa_from and company_id:
                 upsert_quote_state(company_id, wa_from, state)
 
+
             if section_rows:
+                if len(body_text) > 1024:
+                    return {
+                        "type": "text_then_list_sections",
+                        "text": body_text,
+                        "body": "👆 Elige una opción por cada letra:",
+                        "sections": [{"title": "Opciones", "rows": section_rows[:10]}],
+                        "button_label": "Ver opciones",
+                    }
                 return {
                     "type": "list_sections",
                     "body": body_text,
                     "sections": [{"title": "Elige una opción por letra", "rows": section_rows[:10]}],
                     "button_label": "Ver opciones",
                 }
+            
+            
             else:
                 return body_text
 
