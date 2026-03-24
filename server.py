@@ -2621,14 +2621,33 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
 
     return "¿Me repites eso? No entendí bien tu pedido 🤔"
 
-@app.post("/api/admin/rebuild-embeddings-public")
-def rebuild_embeddings_public(company_id: str = "aa743e3f-1496-491d-99eb-02fcc5a839d5"):
+
+@app.post("/api/admin/rebuild-synonyms-public")
+def rebuild_synonyms_public(company_id: str = "30208e3c-70c6-4203-97d9-172fad7d3c75"):
     conn = get_conn()
+    cur = conn.cursor()
     try:
-        result = rebuild_embeddings_for_company(conn, company_id)
-        return {"ok": True, **result}
+        cur.execute("SELECT id, name, synonyms FROM pricebook_items WHERE company_id=%s", (company_id,))
+        rows = cur.fetchall()
+        updated = 0
+        for item_id, name, synonyms in rows:
+            existing = (synonyms or "").strip()
+            auto_vars = _auto_plural_singular(name)
+            if auto_vars:
+                existing_set = {s.strip().lower() for s in existing.split(",") if s.strip()}
+                new_vars = [v for v in auto_vars if v not in existing_set]
+                if new_vars:
+                    new_synonyms = (existing + ", " + ", ".join(new_vars)).strip(", ")
+                    cur.execute(
+                        "UPDATE pricebook_items SET synonyms=%s, updated_at=now() WHERE id=%s",
+                        (new_synonyms, item_id)
+                    )
+                    updated += 1
+        return {"ok": True, "total": len(rows), "updated": updated}
     finally:
+        cur.close()
         conn.close()
+
 
 @app.get("/api/_version")
 def _version():
