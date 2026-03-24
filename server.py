@@ -1706,6 +1706,13 @@ def _handle_construccion(company_id: str, user_text: str, wa_from: str):
     return "\n".join(lines)
 
 
+def _build_cart_context(st: dict) -> str:
+    cart = (st or {}).get("cart") or []
+    if not cart:
+        return ""
+    return ", ".join(it["name"] for it in cart if it.get("name"))
+
+
 def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", is_interactive: bool = False) -> str:
     if wa_from:
         _bot_state = get_quote_state(company_id, wa_from) or {}
@@ -2113,7 +2120,8 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 full_query = build_spec_query(current["raw"], current["resolved"])
                 conn = get_conn()
                 try:
-                    result = smart_search(conn, company_id, full_query, current["qty"])
+                    result = smart_search(conn, company_id, full_query, current["qty"],
+                                          cart_context=_build_cart_context(_state_specs))
                 finally:
                     conn.close()
 
@@ -2199,7 +2207,8 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                     conn = get_conn()
                     try:
                         for nombre, cantidad in materiales:
-                            result = smart_search(conn, company_id, nombre, cantidad)
+                            result = smart_search(conn, company_id, nombre, cantidad,
+                                                  cart_context=_build_cart_context(state))
                             if result["status"] == "found":
                                 state = cart_add_item(state, {
                                     "sku": result["item"].get("sku"),
@@ -2224,7 +2233,6 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             return _handle_construccion(company_id, user_text, wa_from)
 
     # ── Picks múltiples A1 B2 C3 ─────────────────────────────────────────────
-    
     _quick_picks = _parse_pending_picks(user_text)
     _state_picks = get_quote_state(company_id, wa_from) if wa_from else {}
     _state_picks = _state_picks or {}
@@ -2296,7 +2304,8 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                     state["pending_specs"] = specs_pending
                     continue
                 try:
-                    result = smart_search(conn, company_id, prod_raw, qty)
+                    result = smart_search(conn, company_id, prod_raw, qty,
+                                          cart_context=_build_cart_context(state))
                 except Exception as e:
                     print("SMART SEARCH ERROR:", repr(e))
                     result = {"status": "not_found", "item": None, "candidates": []}
@@ -2350,15 +2359,17 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
 
         conn = get_conn()
         try:
+            _single_state = get_quote_state(company_id, wa_from) if wa_from else {}
+            _single_state = _single_state or {}
             try:
-                result = smart_search(conn, company_id, prod_query, qty)
+                result = smart_search(conn, company_id, prod_query, qty,
+                                      cart_context=_build_cart_context(_single_state))
             except Exception as e:
                 print("SMART SEARCH ERROR:", repr(e))
                 result = {"status": "not_found", "item": None, "candidates": []}
 
             if result["status"] == "found":
-                state = get_quote_state(company_id, wa_from) if wa_from else {}
-                state = state or {}
+                state = _single_state
                 state = cart_add_item(state, {
                     "sku": result["item"].get("sku"),
                     "name": result["item"].get("name"),
@@ -2374,8 +2385,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
 
             elif result["status"] == "ambiguous":
                 pending = [{"qty": qty, "raw": prod_query, "candidates": result["candidates"]}]
-                state = get_quote_state(company_id, wa_from) if wa_from else {}
-                state = state or {}
+                state = _single_state
                 state["pending"] = pending
                 if wa_from:
                     upsert_quote_state(company_id, wa_from, state)
@@ -2422,7 +2432,8 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                     if is_specs_only(prod_raw):
                         prod_raw = f"{raw} {prod_raw}"
                     try:
-                        result = smart_search(conn, company_id, prod_raw, qty)
+                        result = smart_search(conn, company_id, prod_raw, qty,
+                                              cart_context=_build_cart_context(state))
                     except Exception as e:
                         print("SMART SEARCH ERROR:", repr(e))
                         result = {"status": "not_found", "item": None, "candidates": []}
@@ -2456,15 +2467,17 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
     if re.search(r"\b\d+\b", user_text):
         qty, prod_query = extract_qty_and_product(user_text)
         if qty and prod_query:
+            _fallback_state = get_quote_state(company_id, wa_from) if wa_from else {}
+            _fallback_state = _fallback_state or {}
             conn = get_conn()
             try:
-                result = smart_search(conn, company_id, prod_query, qty)
+                result = smart_search(conn, company_id, prod_query, qty,
+                                      cart_context=_build_cart_context(_fallback_state))
             finally:
                 conn.close()
 
             if result["status"] == "found":
-                state = get_quote_state(company_id, wa_from) if wa_from else {}
-                state = state or {}
+                state = _fallback_state
                 state = cart_add_item(state, {
                     "sku": result["item"].get("sku"),
                     "name": result["item"].get("name"),
@@ -2479,8 +2492,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 return _build_reply_with_pending(state, company_id=company_id, wa_from=wa_from)
 
             elif result["status"] == "ambiguous":
-                state = get_quote_state(company_id, wa_from) if wa_from else {}
-                state = state or {}
+                state = _fallback_state
                 state["pending"] = [{"qty": qty, "raw": prod_query, "candidates": result["candidates"]}]
                 if wa_from:
                     upsert_quote_state(company_id, wa_from, state)
@@ -2579,7 +2591,8 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                     prod = (it.get("product") or "").strip()
                     if not qty or not prod:
                         continue
-                    result = smart_search(conn, company_id, prod, qty)
+                    result = smart_search(conn, company_id, prod, qty,
+                                          cart_context=_build_cart_context(state))
                     if result["status"] == "found":
                         state = cart_add_item(state, {
                             "sku": result["item"].get("sku"),
