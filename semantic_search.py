@@ -1,8 +1,9 @@
 """
-semantic_search.py — Búsqueda semántica para CotizaBot v4
-Novedades vs v3:
+semantic_search.py — Búsqueda semántica para CotizaBot v4.1
+Novedades vs v4:
   - PASO 4: Fallback GPT con catálogo completo cuando fuzzy+semántico fallan
   - Auto-save de sinónimos cuando GPT resuelve (evita costo futuro)
+  - Last resort candidates cuando GPT dice NO (evita silencio total)
 """
 
 import re
@@ -695,12 +696,19 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0) -> dict:
         gpt_result = _gpt_catalog_fallback(conn, company_id, user_query)
         if gpt_result:
             print(f"GPT FALLBACK HIT: query='{user_query}' → '{gpt_result['name']}'")
-            # Guardar el query como sinónimo para que la próxima vez no llegue hasta aquí
             try:
                 _auto_save_synonym(conn, company_id, user_query, gpt_result["name"])
             except Exception as e:
                 print(f"AUTO SYNONYM SAVE ERROR: {repr(e)}")
             return {"status": "found", "item": gpt_result, "candidates": []}
+
+        # GPT también falló → dar candidatos semánticos de último recurso
+        # Así el cliente ve opciones A1/B2 en lugar de silencio total
+        last_candidates = semantic_search_candidates(conn, company_id, user_query,
+                                                     threshold=0.30, limit=3)
+        if last_candidates:
+            print(f"LAST RESORT CANDIDATES: query='{user_query}' found={len(last_candidates)}")
+            return {"status": "ambiguous", "item": None, "candidates": last_candidates}
 
         return {"status": "not_found", "item": None, "candidates": []}
 
