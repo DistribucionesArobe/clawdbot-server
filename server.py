@@ -1434,9 +1434,7 @@ def send_whatsapp_list_sections(wa_api_key: str, phone_number_id: str, to: str,
     if r.status_code >= 300:
         raise RuntimeError(f"WA list sections failed {r.status_code}: {r.text[:400]}")
 
-
 def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", is_interactive: bool = False) -> str:
-    # ── Verificar si bot está silenciado para esta conversación ──
     if wa_from:
         _bot_state = get_quote_state(company_id, wa_from) or {}
         if _bot_state.get("bot_active") is False:
@@ -1538,68 +1536,59 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             con_opciones = [(i, p) for i, p in enumerate(pending) if p.get("candidates")]
             sin_opciones = [(i, p) for i, p in enumerate(pending) if not p.get("candidates")]
 
-            lines = []
-            if cart_count > 0:
-                lines.append(f"✅ Cotizamos *{cart_count} producto(s)* automáticamente.\n")
-
-            if con_opciones or sin_opciones:
-                lines.append(f"❓ Necesito confirmar *{pending_count}*:\n")
-
             section_rows = []
             for idx, (i, p) in enumerate(con_opciones[:10]):
                 tag = letters[idx]
                 qty = int(p.get("qty") or 0)
                 raw = (p.get("raw") or "").strip()
                 cands = p.get("candidates") or []
-
-                cand_lines = []
                 for j, it in enumerate(cands[:5], start=1):
                     price = float(it.get("price") or 0.0)
-                    cand_lines.append(f"  {tag}{j}) {it['name']} — ${price:,.0f}")
                     section_rows.append({
                         "id": f"pick_{tag}{j}",
                         "title": f"{tag}{j}) {it['name']}"[:24],
                         "description": f"${price:,.0f} / {it.get('unit') or 'unidad'}",
                     })
 
-                lines.append(f"*{tag}) {qty}x {raw}*")
-                lines.extend(cand_lines)
-
-            for i, p in sin_opciones:
-                qty = int(p.get("qty") or 0)
-                raw = (p.get("raw") or "").strip()
-                lines.append(f"❌ *{qty}x {raw}* — no encontrado, escríbelo diferente")
-
-            if con_opciones:
-                lines.append("\n✅ Responde con los códigos, ej: *A1 B2 C3*")
-
-            body_text = "\n".join(lines)
-
             if wa_from and company_id:
                 upsert_quote_state(company_id, wa_from, state)
 
-
             if section_rows:
-                if len(body_text) > 1024:
-                    return {
-                        "type": "text_then_list_sections",
-                        "text": body_text,
-                        "body": "👆 Elige una opción por cada letra:",
-                        "sections": [{"title": "Opciones", "rows": section_rows[:10]}],
-                        "button_label": "Ver opciones",
-                    }
+                resumen_lines = []
+                if cart_count > 0:
+                    resumen_lines.append(f"✅ Cotizamos *{cart_count} producto(s)* automáticamente.")
+                resumen_lines.append(f"❓ Necesito confirmar *{pending_count}* — elige una opción por letra:")
+                resumen_txt = "\n".join(resumen_lines)
+
+                list_body_lines = []
+                for idx, (i, p) in enumerate(con_opciones[:10]):
+                    tag = letters[idx]
+                    qty = int(p.get("qty") or 0)
+                    raw = (p.get("raw") or "").strip()
+                    list_body_lines.append(f"*{tag})* {qty}x {raw}")
+                for i, p in sin_opciones:
+                    qty = int(p.get("qty") or 0)
+                    raw = (p.get("raw") or "").strip()
+                    list_body_lines.append(f"❌ {qty}x {raw} — no encontrado")
+                list_body = "\n".join(list_body_lines) or "Elige una opción:"
+
                 return {
-                    "type": "list_sections",
-                    "body": body_text,
-                    "sections": [{"title": "Elige una opción por letra", "rows": section_rows[:10]}],
+                    "type": "text_then_list_sections",
+                    "text": resumen_txt,
+                    "body": list_body[:1024],
+                    "sections": [{"title": "Elige por letra", "rows": section_rows[:10]}],
                     "button_label": "Ver opciones",
                 }
-            
-            
             else:
-                return body_text
+                lines = []
+                if cart_count > 0:
+                    lines.append(f"✅ Cotizamos *{cart_count} producto(s)* automáticamente.\n")
+                for i, p in sin_opciones:
+                    qty = int(p.get("qty") or 0)
+                    raw = (p.get("raw") or "").strip()
+                    lines.append(f"❌ *{qty}x {raw}* — no encontrado, escríbelo diferente")
+                return "\n".join(lines)
 
-        # Sin pendientes — mostrar cotización completa
         msg = cart_render_quote(state, company_id=company_id, client_phone=wa_from) if (state.get("cart") or []) else ""
 
         if wa_from and company_id:
@@ -1618,7 +1607,6 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
 
     tnorm = norm_name(user_text).replace("cotización", "cotizacion")
 
-    # ── Editar carrito ────────────────────────────────────────────────────────
     _edit_state = get_quote_state(company_id, wa_from) if wa_from else {}
     _edit_state = _edit_state or {}
     _cart = _edit_state.get("cart") or []
@@ -1674,7 +1662,6 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         else:
             return f"No encontré '{_prod_query}' en tu carrito.\n\nEscribe *ver carrito* para ver lo que llevas."
 
-    # ── Pagar ─────────────────────────────────────────────────────────────────
     pagar_triggers = {"pagar", "pago", "como pago", "cómo pago", "quiero pagar", "datos de pago", "datos bancarios", "transferencia"}
     if any(pt == tnorm or pt in tnorm for pt in pagar_triggers):
         _plan = get_company_plan_code(company_id)
@@ -1703,7 +1690,6 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             bank_clabe = (row[2] or "").strip()
             bank_acc_num = (row[3] or "").strip()
             mp_url = (row[4] or "").strip()
-
             if bank_clabe or bank_acc_num:
                 lines = ["🏦 *Datos bancarios:*"]
                 if bank_name: lines.append(f"Banco: {bank_name}")
@@ -1711,7 +1697,6 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 if bank_clabe: lines.append(f"CLABE: {bank_clabe}")
                 if bank_acc_num: lines.append(f"Cuenta: {bank_acc_num}")
                 parts.append("\n".join(lines))
-
             if mp_url:
                 parts.append(f"💳 *Pago con tarjeta:*\n{mp_url}")
 
@@ -1728,14 +1713,12 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         else:
             return "Para recibir los datos de pago, escribe *asesor* y un representante te los enviará. 🙏"
 
-    # ── Reset ─────────────────────────────────────────────────────────────────
     reset_triggers = {
         "salir", "cancelar", "cancel", "reset", "reiniciar",
         "nueva cotizacion", "nuevo", "empezar de nuevo",
         "borrar", "borrar carrito", "vaciar carrito",
         "limpiar", "limpiar carrito",
     }
-
     if any(rt == tnorm or rt in tnorm for rt in reset_triggers):
         if wa_from:
             clear_quote_state(company_id, wa_from)
@@ -1919,7 +1902,6 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 "button_label": "Ver opciones",
             }
 
-    # ── Picks múltiples A1 B2 C3 ─────────────────────────────────────────────
     _quick_picks = _parse_pending_picks(user_text)
     _state_picks = get_quote_state(company_id, wa_from) if wa_from else {}
     _state_picks = _state_picks or {}
@@ -2116,13 +2098,11 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                     prod_raw = clarifs[i] if i < len(clarifs) else raw
                     if is_specs_only(prod_raw):
                         prod_raw = f"{raw} {prod_raw}"
-
                     try:
                         result = smart_search(conn, company_id, prod_raw, qty)
                     except Exception as e:
                         print("SMART SEARCH ERROR:", repr(e))
                         result = {"status": "not_found", "item": None, "candidates": []}
-
                     if result["status"] == "found":
                         state = cart_add_item(state, {
                             "sku": result["item"].get("sku"),
@@ -2137,15 +2117,12 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                             "qty": qty, "raw": prod_raw,
                             "candidates": result["candidates"],
                         })
-
                 if still:
                     state["pending"] = still
                 else:
                     state.pop("pending", None)
-
                 if wa_from:
                     upsert_quote_state(company_id, wa_from, state)
-
                 return _build_reply_with_pending(state, company_id=company_id, wa_from=wa_from)
             finally:
                 conn.close()
@@ -2274,7 +2251,6 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 state = get_quote_state(company_id, wa_from) if wa_from else {}
                 state = state or {}
                 missing = []
-
                 for it in items_gpt:
                     qty = int(it.get("qty") or 0)
                     prod = (it.get("product") or "").strip()
@@ -2292,15 +2268,12 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                         })
                     else:
                         missing.append({"qty": qty, "raw": prod, "candidates": result.get("candidates") or []})
-
                 if missing:
                     state["pending"] = missing
                 else:
                     state.pop("pending", None)
-
                 if wa_from:
                     upsert_quote_state(company_id, wa_from, state)
-
                 return _build_reply_with_pending(state, company_id=company_id, wa_from=wa_from)
             finally:
                 conn.close()
@@ -2309,7 +2282,6 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         print("GPT FALLBACK ERROR:", repr(e))
 
     return "¿Me repites eso? No entendí bien tu pedido 🤔"
-
 
 @app.post("/api/admin/rebuild-embeddings-public")
 def rebuild_embeddings_public(company_id: str = "aa743e3f-1496-491d-99eb-02fcc5a839d5"):
@@ -3244,6 +3216,23 @@ def pricebook_items(
         if cur: cur.close()
         if conn: conn.close()
 
+def _auto_plural_singular(name: str) -> list:
+    """Genera variantes plural/singular para los tokens del nombre."""
+    extras = set()
+    tokens = norm_name(name).split()
+    for tok in tokens:
+        if len(tok) < 4 or re.search(r"\d", tok):
+            continue
+        if tok[-1] not in "aeiouáéíóús":
+            extras.add(tok + "es")
+        elif tok[-1] in "aeiouáéíóú":
+            extras.add(tok + "s")
+        elif tok.endswith("es") and len(tok) > 4 and tok[-3] not in "aeiouáéíóú":
+            extras.add(tok[:-2])
+        elif tok.endswith("s") and len(tok) > 3:
+            extras.add(tok[:-1])
+    return list(extras)
+    
 @app.post("/api/pricebook/items")
 def pricebook_item_create(request: Request, body: PricebookItemCreateBody):
     _ = get_user_from_session(request)
