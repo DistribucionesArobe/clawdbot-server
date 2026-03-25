@@ -1,9 +1,9 @@
 """
-semantic_search.py — Búsqueda semántica para CotizaBot v7
-Novedades vs v5:
-  - smart_search acepta cart_context
-  - _gpt_catalog_fallback recibe cart_context y lo pasa al prompt
-  - GPT entiende "placas" como plafón cuando el pedido tiene "Tee 61"
+semantic_search.py — Búsqueda semántica para CotizaBot v8
+Novedades vs v7:
+  - Tiebreak en PASO 1 y PASO 2: nombre que EMPIEZA con el query gana sobre el que solo lo contiene
+  - durock → Durock usg (no Pija para durock)
+  - tablaroca → Tablaroca ultralight (no Pija para tablaroca)
 """
 
 import re
@@ -293,12 +293,6 @@ def _auto_save_synonym(conn, company_id: str, user_query: str, resolved_name: st
 
 def _gpt_catalog_fallback(conn, company_id: str, user_query: str,
                            cart_context: str = "") -> list:
-    """
-    Fallback GPT v3: recibe cart_context para inferir categoría del producto.
-    - 1 resultado  → found directo + auto-save sinónimo
-    - 2-5 resultados → ambiguous, cliente elige A1/B2
-    - lista vacía  → not_found limpio
-    """
     if not openai_client:
         print("GPT FALLBACK: openai_client no disponible")
         return []
@@ -458,6 +452,19 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                     bonus += 15
             return bonus
 
+        def _tiebreak(s, row_or_item):
+            # Funciona tanto con row (tuple) como con item (dict)
+            if isinstance(row_or_item, dict):
+                name = (row_or_item.get("name") or "").lower()
+            else:
+                name = (row_or_item[1] or "").lower()
+            q_first = q.split()[0] if q.split() else q
+            if name.startswith(q + " ") or name == q:
+                return s + 50
+            if name.startswith(q_first + " ") or name.split()[0] == q_first:
+                return s + 25
+            return s
+
         def _make_item(r):
             return {
                 "sku": r[0], "name": r[1], "unit": r[2],
@@ -512,7 +519,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                 print(f"SYNONYM AMBIGUOUS: query='{user_query}' found={len(syn_rows)}")
                 return {"status": "ambiguous", "item": None, "candidates": [_make_item(r) for r in syn_rows]}
 
-        # ── PASO 1: ILIKE directo + ranking con bonus de specs ────────────────
+        # ── PASO 1: ILIKE directo + ranking con bonus de specs + tiebreak ─────
         pool_rows = _name_search(q)
         if not pool_rows and q.endswith("s") and len(q) > 3:
             pool_rows = _name_search(q[:-1])
@@ -526,6 +533,9 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                 base = max(fuzz.token_set_ratio(q, name), fuzz.partial_ratio(q, name))
                 bonus = _spec_bonus(r[1], q_medida, q_cal)
                 scored.append((base + bonus, r))
+
+            # Tiebreak: nombre que EMPIEZA con el query gana
+            scored = [(_tiebreak(s, r), r) for s, r in scored]
             scored.sort(key=lambda x: x[0], reverse=True)
             top = scored[0][0]
             second = scored[1][0] if len(scored) > 1 else 0
@@ -542,7 +552,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
             candidates = filtered if filtered else scored[:5]
             return {"status": "ambiguous", "item": None, "candidates": [_make_item(r) for _, r in candidates]}
 
-        # ── PASO 2: tsvector + fuzzy sobre candidatos ─────────────────────────
+        # ── PASO 2: tsvector + fuzzy sobre candidatos + tiebreak ─────────────
         _tokens = [t for t in q.split() if len(t) >= 3]
         _tsquery = " | ".join(_tokens) if _tokens else q
 
@@ -589,12 +599,15 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
             bonus = _spec_bonus(r[1], q_medida, q_cal)
             total = base + bonus
             if total >= 80:
-                scored.append((total, {
+                item = {
                     "sku": r[0], "name": r[1], "unit": r[2],
                     "price": float(r[3]) if r[3] is not None else None,
                     "vat_rate": float(r[4]) if r[4] is not None else None,
-                }))
+                }
+                scored.append((total, item))
 
+        # Tiebreak: nombre que EMPIEZA con el query gana
+        scored = [(_tiebreak(s, item), item) for s, item in scored]
         scored.sort(key=lambda x: x[0], reverse=True)
 
         if len(scored) == 1:
