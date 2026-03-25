@@ -1826,7 +1826,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                     price = float(it.get("price") or 0.0)
                     section_rows.append({
                         "id": f"pick_{tag}{j}",
-                        "title": f"{tag}{j}) {it['name']}"[:24],
+                        "title": f"{tag}{j}) {it['name']}"[:72],
                         "description": f"${price:,.0f} / {it.get('unit') or 'unidad'}",
                     })
 
