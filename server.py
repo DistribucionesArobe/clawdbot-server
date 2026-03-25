@@ -1603,6 +1603,7 @@ def _calc_plafon_reticulado(largo: float, ancho: float) -> list:
 def _is_construccion_trigger(text: str) -> bool:
     t = norm_name(text)
     triggers = [
+        "calcula", "calcular",
         "construccion", "construcción", "construcion",
         "calcular material", "calcular materiales",
         "cuantos materiales", "cuántos materiales",
@@ -1796,7 +1797,13 @@ def _handle_construccion(company_id: str, user_text: str, wa_from: str):
 
     if total_estimado > 0:
         lines.append("")
-        lines.append(f"💰 *Total estimado: ${total_estimado:,.0f}* (IVA incluido)")
+        total_final = total_estimado
+        threshold, percent = _get_company_discount(company_id)
+        if threshold and percent and total_estimado >= threshold:
+            descuento = round(total_estimado * percent / 100)
+            total_final = total_estimado - descuento
+            lines.append(f"🏷️ Descuento {percent:.0f}% por volumen: -*${descuento:,.0f}*")
+        lines.append(f"💰 *Total estimado: ${total_final:,.0f}* (IVA incluido)")
 
     lines.append("")
     lines.append("¿Quieres cotizar estos materiales?\nEscribe *si* para agregarlos al carrito.")
@@ -2118,6 +2125,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             f"👋 ¡Hola! Soy el Cotizabot de *{company_name}*\n\n"
             "¿En qué te puedo ayudar?\n"
             "🔨 Cotizar materiales → mándame tu pedido\n"
+            "🏗️ Calcular materiales m2 de muros o plafones → escribe *Calcula*\n"
             "🕐 Horarios y ubicación → escribe *horario* o *ubicación*\n"
             "👤 Hablar con alguien → escribe *asesor*\n\n"
             "Ejemplo de cotización:\n"
@@ -2184,6 +2192,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                     f"👋 ¡Hola! Soy el Cotizabot de *{company_name}*\n\n"
                     "¿En qué te puedo ayudar?\n"
                     "🔨 Cotizar materiales → mándame tu pedido\n"
+                    "🏗️ Calcular m2 de muros o plafones → escribe *calcula*\n"
                     "🕐 Horarios y ubicación → escribe *horario* o *ubicación*\n"
                     "👤 Hablar con alguien → escribe *asesor*\n\n"
                     "Ejemplo de cotización:\n"
@@ -2193,6 +2202,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             f"👋 ¡Hola! Soy el Cotizabot de *{company_name}*\n\n"
             "¿En qué te puedo ayudar?\n"
             "🔨 Cotizar materiales → mándame tu pedido\n"
+            "🏗️ Calcular m2 de muros o plafones → escribe *calcula*\n"
             "🕐 Horarios y ubicación → escribe *horario* o *ubicación*\n"
             "👤 Hablar con alguien → escribe *asesor*\n\n"
             "Ejemplo de cotización:\n"
