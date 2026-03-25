@@ -1550,8 +1550,19 @@ def _is_construccion_trigger(text: str) -> bool:
         "plafon tablaroca", "plafon reticulado",
         "cuanto material", "cuánto material",
         "cuanto necesito", "cuánto necesito",
+        "m2 muro", "m2 plafon", "m2 tablaroca", "m2 durock",
+        "metros muro", "metros plafon",
+        "m2 de muro", "m2 de plafon",
+        "metros de muro", "metros de plafon",
+        "metros cuadrados",
     ]
-    return any(tr in t for tr in triggers)
+    if any(tr in t for tr in triggers):
+        return True
+    # Detectar patrón: número + m2 + palabra clave
+    if re.search(r"\d+\s*m2", t):
+        if any(w in t for w in ["muro", "plafon", "tablaroca", "durock", "pared", "techo"]):
+            return True
+    return False
 
 
 def _handle_construccion(company_id: str, user_text: str, wa_from: str):
