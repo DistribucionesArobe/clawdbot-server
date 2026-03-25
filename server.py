@@ -1806,7 +1806,7 @@ def _handle_construccion(company_id: str, user_text: str, wa_from: str):
         lines.append(f"💰 *Total estimado: ${total_final:,.0f}* (IVA incluido)")
 
     lines.append("")
-    lines.append("¿Quieres cotizar estos materiales?\nEscribe *si* para agregarlos al carrito.")
+    lines.append("¿Quieres cotizar estos materiales?\nEscribe *si* para agregar al carrito, o *pagar* para datos de pago directo.")
 
     cs["resultado"] = materiales_con_precio
     cs["step"] = "esperando_cotizar"
@@ -1988,7 +1988,6 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             "🧭 Comandos:\n"
             "• 'quitar [producto]' → ej: quitar cemento\n"
             "• 'cambiar [cantidad] [producto]' → ej: cambiar 10 varilla\n"
-            "• 'ver carrito' → ver tu pedido actual\n"
             "• 'nueva cotizacion' → empezar de cero\n"
             "• 'salir' → cancelar"
         )
