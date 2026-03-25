@@ -1437,6 +1437,9 @@ def send_whatsapp_list_sections(wa_api_key: str, phone_number_id: str, to: str,
 
 # ── Módulo Construcción Ligera ────────────────────────────────────────────────
 
+
+# ── Módulo Construcción Ligera ────────────────────────────────────────────────
+
 import math
 
 CONSTRUCCION_TIPOS = {
@@ -1474,20 +1477,82 @@ CONSTRUCCION_TIPOS = {
     },
 }
 
+CONSTRUCCION_PRODUCTOS = {
+    "muro tablaroca": [
+        "Tablaroca ultralight usg",
+        "Poste 6.35 x 3.05 cal 26",
+        "Canal 6.35 x 3.05 cal 26",
+        "Redimix 21.8 kg usg",
+        "Pija 6 x 1",
+        "Pija framer",
+        "Perfacinta",
+    ],
+    "muro durock": [
+        "Durock usg",
+        "Poste 6.35 x 3.05 cal 20",
+        "Canal 6.35 x 3.05 cal 22",
+        "Basecoat usg",
+        "Pija para durock",
+        "Pija framer",
+        "Cinta fibra de vidrio",
+    ],
+    "plafon tablaroca": [
+        "Tablaroca ultralight usg",
+        "Canal listón cal 26",
+        "Ángulo de amarre cal 26",
+        "Canaleta de carga cal 24",
+        "Redimix 21.8 kg usg",
+        "Pija 6 x 1",
+        "Pija framer",
+        "Perfacinta",
+        "Alambre galvanizado liso cal 12.5",
+    ],
+    "plafon reticulado": [
+        "Plafón radar 61 x 61",
+        "Tee principal",
+        "Tee 1.22",
+        "Tee 61",
+        "Ángulo perimetral",
+        "Alambre galvanizado liso cal 12.5",
+    ],
+}
+
+
+def _buscar_precio_exacto(conn, company_id: str, nombre: str):
+    nombre_norm = norm_name(nombre)
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT sku, name, unit, price, vat_rate
+            FROM pricebook_items
+            WHERE company_id = %s AND name_norm = %s
+            LIMIT 1
+            """,
+            (company_id, nombre_norm),
+        )
+        row = cur.fetchone()
+        if row:
+            return {"sku": row[0], "name": row[1], "unit": row[2],
+                    "price": float(row[3]) if row[3] else None,
+                    "vat_rate": float(row[4]) if row[4] else None}
+        return None
+    finally:
+        cur.close()
+
 
 def _calc_muro_tablaroca(alto: float, largo: float) -> list:
     m2 = alto * largo
     tablaroca = math.ceil(math.ceil(m2 / (1.22 * 2.44) * 2 * 1.03) * 1.03)
     pijas = math.ceil(tablaroca * 30)
     return [
-        ("Tablaroca ultralight USG",          tablaroca),
+        ("Tablaroca ultralight usg",          tablaroca),
         ("Canal 6.35 x 3.05 cal 26",          math.ceil((largo / 3) * 2)),
         ("Poste 6.35 x 3.05 cal 26",          math.ceil(alto / 0.61) * math.ceil(largo / 3.05)),
-        ("Pija 6 x 1",                         pijas),
-        ('Pija framer 1/2" punta broca',       math.ceil(pijas / 2)),
-        ("Perfacinta USG",                     math.ceil((m2 / 2.44) / 20)),
-        ("Redimix 21.8 kg USG",                math.ceil(m2 / 14)),
-        ("Aislamiento rollo 9.29 m2",          math.ceil(m2 / 9.29)),
+        ("Pija 6 x 1",                        pijas),
+        ("Pija framer",                       math.ceil(pijas / 2)),
+        ("Perfacinta",                        math.ceil((m2 / 2.44) / 20)),
+        ("Redimix 21.8 kg usg",               math.ceil(m2 / 14)),
     ]
 
 
@@ -1496,14 +1561,13 @@ def _calc_muro_durock(alto: float, largo: float) -> list:
     durock = math.ceil(math.ceil(m2 / (1.22 * 2.44) * 2 * 1.03) * 1.03)
     pijas = math.ceil(durock * 30)
     return [
-        ("Durock 1.22x2.44 m",                durock),
+        ("Durock usg",                        durock),
         ("Canal 6.35 x 3.05 cal 22",          math.ceil((largo / 3) * 2)),
         ("Poste 6.35 x 3.05 cal 20",          math.ceil(alto / 0.61) * math.ceil(largo / 3.05)),
-        ('Pija durock 1 1/4"',                 pijas),
-        ('Pija framer 1/2" punta broca',       math.ceil(pijas / 2)),
-        ("Cinta fibra de vidrio",              math.ceil((m2 / 2.44) / 20)),
-        ("Basecoat USG",                       math.ceil(m2 / 4)),
-        ("Aislante fibra de vidrio 9.29 m2",   math.ceil(m2 / 9.29)),
+        ("Pija para durock",                  pijas),
+        ("Pija framer",                       math.ceil(pijas / 2)),
+        ("Cinta fibra de vidrio",             math.ceil((m2 / 2.44) / 20)),
+        ("Basecoat usg",                      math.ceil(m2 / 4)),
     ]
 
 
@@ -1512,28 +1576,27 @@ def _calc_plafon_tablaroca(largo: float, ancho: float) -> list:
     tablaroca = math.ceil(m2 / 2.9768 * 1.07)
     pijas = math.ceil(tablaroca * 30)
     return [
-        ("Tablaroca ultralight USG",           tablaroca),
-        ("Canal listón cal 26",                math.ceil(((m2 / 0.61) * 1.05) / 3.05) + 2),
-        ("Canaleta de carga cal 24",           math.ceil(((m2 / 1.22) * 1.05) / 3.05)),
-        ("Ángulo de amarre cal 26",            math.ceil(((largo * 2) + (ancho * 2)) / 3.05)),
-        ("Pija 6 x 1",                         pijas),
-        ('Pija framer 1/2" punta broca',       math.ceil(pijas / 2)),
-        ("Perfacinta USG",                     math.ceil((m2 * 0.8 * 1.05) / 75)),
-        ("Redimix 21.8 kg",                    math.ceil((m2 * 0.65 * 1.05) / 21.8)),
-        ("Aislante fibra de vidrio 9.29 m2",   math.ceil((m2 / 2) / 9.29)),
-        ("Alambre galvanizado x kg",           math.ceil(m2 / 20)),
+        ("Tablaroca ultralight usg",          tablaroca),
+        ("Canal listón cal 26",               math.ceil(((m2 / 0.61) * 1.05) / 3.05) + 2),
+        ("Canaleta de carga cal 24",          math.ceil(((m2 / 1.22) * 1.05) / 3.05)),
+        ("Ángulo de amarre cal 26",           math.ceil(((largo * 2) + (ancho * 2)) / 3.05)),
+        ("Pija 6 x 1",                        pijas),
+        ("Pija framer",                       math.ceil(pijas / 2)),
+        ("Perfacinta",                        math.ceil((m2 * 0.8 * 1.05) / 75)),
+        ("Redimix 21.8 kg usg",               math.ceil((m2 * 0.65 * 1.05) / 21.8)),
+        ("Alambre galvanizado liso cal 12.5", math.ceil(m2 / 20)),
     ]
 
 
 def _calc_plafon_reticulado(largo: float, ancho: float) -> list:
     m2 = largo * ancho
     return [
-        ("Plafón 61x61",                       math.ceil(m2 / 0.36 * 1.03)),
-        ("Tee principal",                      math.ceil(m2 * 0.29)),
-        ("Tee 1.22",                           math.ceil(m2 * 1.4)),
-        ("Tee 61",                             math.ceil(m2 * 1.4)),
-        ("Ángulo perimetral",                  math.ceil(((largo * 2) + (ancho * 2)) / 3.05)),
-        ("Alambre galvanizado x kg",           math.ceil(m2 / 20)),
+        ("Plafón radar 61 x 61",              math.ceil(m2 / 0.36 * 1.03)),
+        ("Tee principal",                     math.ceil(m2 * 0.29)),
+        ("Tee 1.22",                          math.ceil(m2 * 1.4)),
+        ("Tee 61",                            math.ceil(m2 * 1.4)),
+        ("Ángulo perimetral",                 math.ceil(((largo * 2) + (ancho * 2)) / 3.05)),
+        ("Alambre galvanizado liso cal 12.5", math.ceil(m2 / 20)),
     ]
 
 
@@ -1558,7 +1621,6 @@ def _is_construccion_trigger(text: str) -> bool:
     ]
     if any(tr in t for tr in triggers):
         return True
-    # Detectar patrón: número + m2 + palabra clave
     if re.search(r"\d+\s*m2", t):
         if any(w in t for w in ["muro", "plafon", "tablaroca", "durock", "pared", "techo"]):
             return True
@@ -1572,13 +1634,11 @@ def _handle_construccion(company_id: str, user_text: str, wa_from: str):
 
     # ── Paso 0: elegir tipo ───────────────────────────────────────────────────
     if not cs.get("tipo"):
-        # Detectar si ya mencionó el tipo en el mensaje
         tipo_detectado = None
         for key in CONSTRUCCION_TIPOS:
             if key in t:
                 tipo_detectado = key
                 break
-        # También detectar variantes con tilde
         if not tipo_detectado:
             mapeo = {
                 "plafón tablaroca": "plafon tablaroca",
@@ -1697,7 +1757,6 @@ def _handle_construccion(company_id: str, user_text: str, wa_from: str):
         upsert_quote_state(company_id, wa_from, state)
         return "Error calculando materiales. Escribe *construccion* para intentar de nuevo."
 
-    
     label = tipo_cfg["label"]
     lines = [
         f"🏗️ *{label}*",
@@ -1708,24 +1767,29 @@ def _handle_construccion(company_id: str, user_text: str, wa_from: str):
 
     total_estimado = 0.0
     materiales_con_precio = []
+    nombres_exactos = CONSTRUCCION_PRODUCTOS.get(tipo_key, [])
+    nombre_map = {norm_name(n): n for n in nombres_exactos}
+
     conn_precio = get_conn()
     try:
         for nombre, cantidad in materiales:
-            try:
-                result = smart_search(conn_precio, company_id, nombre, cantidad,
-                                      cart_context="")
-                if result["status"] == "found":
-                    precio = float(result["item"].get("price") or 0.0)
-                    subtotal = precio * cantidad
-                    total_estimado += subtotal
-                    unit = result["item"].get("unit") or "pza"
-                    lines.append(f"• {cantidad} × {result['item']['name']} — ${precio:,.2f}/{unit} = *${subtotal:,.0f}*")
-                    materiales_con_precio.append((result["item"]["name"], cantidad))
-                else:
-                    lines.append(f"• {cantidad} × {nombre} — (sin precio en catálogo)")
-                    materiales_con_precio.append((nombre, cantidad))
-            except Exception:
-                lines.append(f"• {cantidad} × {nombre}")
+            nombre_n = norm_name(nombre)
+            nombre_catalogo = nombre_map.get(nombre_n)
+            if not nombre_catalogo:
+                for key in nombre_map:
+                    if key in nombre_n or nombre_n in key:
+                        nombre_catalogo = nombre_map[key]
+                        break
+            item = _buscar_precio_exacto(conn_precio, company_id, nombre_catalogo) if nombre_catalogo else None
+            if item and item.get("price"):
+                precio = float(item["price"])
+                subtotal = precio * cantidad
+                total_estimado += subtotal
+                unit = item.get("unit") or "pza"
+                lines.append(f"• {cantidad} × {item['name']} — ${precio:,.2f}/{unit} = *${subtotal:,.0f}*")
+                materiales_con_precio.append((item["name"], cantidad))
+            else:
+                lines.append(f"• {cantidad} × {nombre} — (sin precio en catálogo)")
                 materiales_con_precio.append((nombre, cantidad))
     finally:
         conn_precio.close()
@@ -1742,8 +1806,9 @@ def _handle_construccion(company_id: str, user_text: str, wa_from: str):
     state["construccion_state"] = cs
     upsert_quote_state(company_id, wa_from, state)
     return "\n".join(lines)
+                                     
 
-
+   
 def _build_cart_context(st: dict) -> str:
     cart = (st or {}).get("cart") or []
     if not cart:
