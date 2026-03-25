@@ -1697,6 +1697,7 @@ def _handle_construccion(company_id: str, user_text: str, wa_from: str):
         upsert_quote_state(company_id, wa_from, state)
         return "Error calculando materiales. Escribe *construccion* para intentar de nuevo."
 
+    
     label = tipo_cfg["label"]
     lines = [
         f"🏗️ *{label}*",
@@ -1704,17 +1705,42 @@ def _handle_construccion(company_id: str, user_text: str, wa_from: str):
         "",
         "📦 *Materiales necesarios:*",
     ]
-    for nombre, cantidad in materiales:
-        lines.append(f"• {cantidad} × {nombre}")
+
+    total_estimado = 0.0
+    materiales_con_precio = []
+    conn_precio = get_conn()
+    try:
+        for nombre, cantidad in materiales:
+            try:
+                result = smart_search(conn_precio, company_id, nombre, cantidad,
+                                      cart_context="")
+                if result["status"] == "found":
+                    precio = float(result["item"].get("price") or 0.0)
+                    subtotal = precio * cantidad
+                    total_estimado += subtotal
+                    unit = result["item"].get("unit") or "pza"
+                    lines.append(f"• {cantidad} × {result['item']['name']} — ${precio:,.2f}/{unit} = *${subtotal:,.0f}*")
+                    materiales_con_precio.append((result["item"]["name"], cantidad))
+                else:
+                    lines.append(f"• {cantidad} × {nombre} — (sin precio en catálogo)")
+                    materiales_con_precio.append((nombre, cantidad))
+            except Exception:
+                lines.append(f"• {cantidad} × {nombre}")
+                materiales_con_precio.append((nombre, cantidad))
+    finally:
+        conn_precio.close()
+
+    if total_estimado > 0:
+        lines.append("")
+        lines.append(f"💰 *Total estimado: ${total_estimado:,.0f}* (IVA incluido)")
 
     lines.append("")
     lines.append("¿Quieres cotizar estos materiales?\nEscribe *si* para agregarlos al carrito.")
 
-    cs["resultado"] = materiales
+    cs["resultado"] = materiales_con_precio
     cs["step"] = "esperando_cotizar"
     state["construccion_state"] = cs
     upsert_quote_state(company_id, wa_from, state)
-
     return "\n".join(lines)
 
 
