@@ -2140,16 +2140,12 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             company_name = row_co[0] if row_co else "tu ferretería"
         except Exception:
             company_name = "tu ferretería"
-        return (
-            f"👋 ¡Hola! Soy el Cotizabot de *{company_name}*\n\n"
-            "¿En qué te puedo ayudar?\n"
-            "🔨 Cotizar materiales → mándame tu pedido\n"
-            "🏗️ Calcular materiales m2 de muros o plafones → escribe *Calcula*\n"
-            "🕐 Horarios y ubicación → escribe *horario* o *ubicación*\n"
-            "👤 Hablar con alguien → escribe *asesor*\n\n"
-            "Ejemplo de cotización:\n"
-            "👉 10 cemento, 5 varilla 3/8"
-        )
+        return {
+            "type": "list",
+            "body": f"👋 ¡Hola! Soy el Cotizabot de *{company_name}*\n\n¿En qué te puedo ayudar?",
+            "options": ["🔨 Cotizar materiales", "🏗️ Calcular m2 de muros o plafones", "🕐 Horarios y ubicación", "👤 Hablar con alguien"],
+            "button_label": "Ver opciones",
+        }
 
     thanks_triggers = {"gracias", "muchas gracias", "mil gracias", "thx", "thanks"}
     if tnorm in thanks_triggers:
@@ -2207,26 +2203,18 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             st = get_quote_state(company_id, wa_from) or {}
             if (st.get("cart") or []) or (st.get("pending") or []):
                 clear_quote_state(company_id, wa_from)
-                return (
-                    f"👋 ¡Hola! Soy el Cotizabot de *{company_name}*\n\n"
-                    "¿En qué te puedo ayudar?\n"
-                    "🔨 Cotizar materiales → mándame tu pedido\n"
-                    "🏗️ Calcular m2 de muros o plafones → escribe *calcula*\n"
-                    "🕐 Horarios y ubicación → escribe *horario* o *ubicación*\n"
-                    "👤 Hablar con alguien → escribe *asesor*\n\n"
-                    "Ejemplo de cotización:\n"
-                    "👉 10 cemento, 5 varilla 3/8"
-                )
-        return (
-            f"👋 ¡Hola! Soy el Cotizabot de *{company_name}*\n\n"
-            "¿En qué te puedo ayudar?\n"
-            "🔨 Cotizar materiales → mándame tu pedido\n"
-            "🏗️ Calcular m2 de muros o plafones → escribe *calcula*\n"
-            "🕐 Horarios y ubicación → escribe *horario* o *ubicación*\n"
-            "👤 Hablar con alguien → escribe *asesor*\n\n"
-            "Ejemplo de cotización:\n"
-            "👉 10 cemento, 5 varilla 3/8, 2 martillos"
-        )
+                return {
+                    "type": "list",
+                    "body": f"👋 ¡Hola! Soy el Cotizabot de *{company_name}*\n\n¿En qué te puedo ayudar?",
+                    "options": ["🔨 Cotizar materiales", "🏗️ Calcular m2 de muros o plafones", "🕐 Horarios y ubicación", "👤 Hablar con alguien"],
+                    "button_label": "Ver opciones",
+                }
+        return {
+            "type": "list",
+            "body": f"👋 ¡Hola! Soy el Cotizabot de *{company_name}*\n\n¿En qué te puedo ayudar?",
+            "options": ["🔨 Cotizar materiales", "🏗️ Calcular m2 de muros o plafones", "🕐 Horarios y ubicación", "👤 Hablar con alguien"],
+            "button_label": "Ver opciones",
+        }
 
     _state_specs = get_quote_state(company_id, wa_from) if wa_from else {}
     _state_specs = _state_specs or {}
