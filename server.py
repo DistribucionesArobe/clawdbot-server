@@ -1568,7 +1568,7 @@ def _calc_muro_tablaroca(alto: float, largo: float) -> list:
     return [
         ("Tablaroca ultralight usg",          tablaroca),
         ("Canal 6.35 x 3.05 cal 26",          math.ceil((largo / 3) * 2)),
-        ("Poste 6.35 x 3.05 cal 26",          math.ceil(alto / 0.61) * math.ceil(largo / 3.05)),
+        ("Poste 6.35 x 3.05 cal 26",          (math.ceil(largo / 0.61) + 1) * (math.ceil(alto / 3.05) + 1)),
         ("Pija 6 x 1",                        pijas),
         ("Pija framer",                       math.ceil(pijas / 2)),
         ("Perfacinta",                        math.ceil((m2 / 2.44) / 20)),
@@ -1583,7 +1583,7 @@ def _calc_muro_durock(alto: float, largo: float) -> list:
     return [
         ("Durock usg",                        durock),
         ("Canal 6.35 x 3.05 cal 22",          math.ceil((largo / 3) * 2)),
-        ("Poste 6.35 x 3.05 cal 20",          math.ceil(alto / 0.61) * math.ceil(largo / 3.05)),
+        ("Poste 6.35 x 3.05 cal 20",          (math.ceil(largo / 0.406) + 1) * (math.ceil(alto / 3.05) + 1)),
         ("Pija para durock",                  pijas),
         ("Pija framer",                       math.ceil(pijas / 2)),
         ("Cinta fibra de vidrio",             math.ceil((m2 / 2.44) / 20)),
