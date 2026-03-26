@@ -599,6 +599,26 @@ def api_key_hash(token: str) -> str:
 # -------------------------
 # DB
 # -------------------------
+def save_search_miss(company_id: str, term: str):
+    """Guarda términos que el bot no encontró para aprendizaje continuo."""
+    if not company_id or not term or len(term.strip()) < 3:
+        return
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO search_misses (company_id, term, created_at)
+            VALUES (%s, %s, now())
+            ON CONFLICT DO NOTHING
+            """,
+            (company_id, term.strip().lower()),
+        )
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print("SAVE_MISS ERROR:", repr(e))
+
 def get_conn():
     dsn = (os.getenv("DATABASE_URL") or "").strip()
     if not dsn:
@@ -2422,6 +2442,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 except Exception as e:
                     print("SMART SEARCH ERROR:", repr(e))
                     result = {"status": "not_found", "item": None, "candidates": []}
+                    save_search_miss(company_id, prod_raw)
                 if result["status"] == "found":
                     state = cart_add_item(state, {
                         "sku": result["item"].get("sku"),
@@ -2480,6 +2501,8 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             except Exception as e:
                 print("SMART SEARCH ERROR:", repr(e))
                 result = {"status": "not_found", "item": None, "candidates": []}
+                save_search_miss(company_id, prod_query)
+
 
             if result["status"] == "found":
                 state = _single_state
@@ -2550,6 +2573,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                     except Exception as e:
                         print("SMART SEARCH ERROR:", repr(e))
                         result = {"status": "not_found", "item": None, "candidates": []}
+                        save_search_miss(company_id, prod_raw)
                     if result["status"] == "found":
                         state = cart_add_item(state, {
                             "sku": result["item"].get("sku"),
