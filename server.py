@@ -2350,8 +2350,10 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             return _handle_construccion(company_id, user_text, wa_from)
 
         if _is_construccion_trigger(tnorm):
+            _cs_state.pop("construccion_state", None)
+            upsert_quote_state(company_id, wa_from, _cs_state)
             return _handle_construccion(company_id, user_text, wa_from)
-
+        
     # ── Picks múltiples A1 B2 C3 ─────────────────────────────────────────────
     _quick_picks = _parse_pending_picks(user_text)
     _state_picks = get_quote_state(company_id, wa_from) if wa_from else {}
