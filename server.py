@@ -2143,7 +2143,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         return {
             "type": "list",
             "body": f"👋 ¡Hola! Soy el Cotizabot de *{company_name}*\n\n¿En qué te puedo ayudar?",
-            "options": ["🔨 Cotizar materiales", "🏗️ Calcular m2 de muros o plafones", "🕐 Horarios y ubicación", "👤 Hablar con alguien"],
+            "options": ["🔨 Cotizar materiales", "🏗️ Calcular m2", "🕐 Horarios y ubicación", "👤 Hablar con alguien"],
             "button_label": "Ver opciones",
         }
 
@@ -2206,13 +2206,13 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 return {
                     "type": "list",
                     "body": f"👋 ¡Hola! Soy el Cotizabot de *{company_name}*\n\n¿En qué te puedo ayudar?",
-                    "options": ["🔨 Cotizar materiales", "🏗️ Calcular m2 de muros o plafones", "🕐 Horarios y ubicación", "👤 Hablar con alguien"],
+                    "options": ["🔨 Cotizar materiales", "🏗️ Calcular m2", "🕐 Horarios y ubicación", "👤 Hablar con alguien"],
                     "button_label": "Ver opciones",
                 }
         return {
             "type": "list",
             "body": f"👋 ¡Hola! Soy el Cotizabot de *{company_name}*\n\n¿En qué te puedo ayudar?",
-            "options": ["🔨 Cotizar materiales", "🏗️ Calcular m2 de muros o plafones", "🕐 Horarios y ubicación", "👤 Hablar con alguien"],
+            "options": ["🔨 Cotizar materiales", "🏗️ Calcular m2", "🕐 Horarios y ubicación", "👤 Hablar con alguien"],
             "button_label": "Ver opciones",
         }
 
