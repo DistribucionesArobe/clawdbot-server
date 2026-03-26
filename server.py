@@ -1625,7 +1625,7 @@ def _is_construccion_trigger(text: str) -> bool:
     triggers = [
         "calcula", "calcular",
         "construccion", "construcción", "construcion",
-        "calcular material", "calcular materiales",
+        "calcular material", "calcular materiales", "calcular m2", "calcular m", "🏗️ calcular m2", "cotizar materiales", "🔨 cotizar materiales", "calcular m2", "calcular m", "🏗️ calcular m2", "cotizar materiales", "🔨 cotizar materiales",
         "cuantos materiales", "cuántos materiales",
         "material para", "materiales para",
         "construccion ligera", "construcción ligera",
