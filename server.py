@@ -1656,6 +1656,9 @@ def _calc_plafon_reticulado(largo: float, ancho: float) -> list:
 
 def _is_construccion_trigger(text: str) -> bool:
     t = norm_name(text)
+    # Exclusiones explícitas del menú principal
+    if t in {"cotizar materiales", "🔨 cotizar materiales"}:
+        return False
     triggers = [
         "calcula", "calcular",
         "construccion", "construcción", "construcion",
