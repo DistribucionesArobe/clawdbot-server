@@ -1684,7 +1684,6 @@ def _is_construccion_trigger(text: str) -> bool:
             return True
     return False
 
-
 def _handle_construccion(company_id: str, user_text: str, wa_from: str):
     state = get_quote_state(company_id, wa_from) or {}
     cs = state.get("construccion_state") or {}
