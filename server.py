@@ -1285,6 +1285,36 @@ async def whatsapp_webhook(request: Request):
             options=reply.get("options") or [],
             button_label=reply.get("button_label", "Ver opciones"),
         )
+
+    elif isinstance(reply, dict) and reply.get("type") == "text_then_buttons":
+        send_whatsapp_text(
+            wa_api_key=company["wa_api_key"],
+            phone_number_id=company["wa_phone_number_id"],
+            to=from_phone,
+            text=(reply.get("text") or "")[:4096],
+        )
+        btn_payload = {
+            "messaging_product": "whatsapp",
+            "to": from_phone,
+            "type": "interactive",
+            "interactive": {
+                "type": "button",
+                "body": {"text": reply.get("body") or "¿Qué deseas hacer?"},
+                "action": {
+                    "buttons": [
+                        {"type": "reply", "reply": {"id": f"btn_{i}", "title": btn[:20]}}
+                        for i, btn in enumerate(reply.get("buttons") or [])
+                    ]
+                }
+            }
+        }
+        requests.post(
+            f"https://graph.facebook.com/v19.0/{company['wa_phone_number_id']}/messages",
+            headers={"Authorization": f"Bearer {company['wa_api_key']}", "Content-Type": "application/json"},
+            json=btn_payload,
+            timeout=20,
+        )
+
     elif isinstance(reply, dict) and reply.get("type") == "text_then_list_sections":
         send_whatsapp_text(
             wa_api_key=company["wa_api_key"],
@@ -1320,6 +1350,8 @@ async def whatsapp_webhook(request: Request):
         )
 
     return {"ok": True}
+
+# ── Conversation logging ──────────────────────────────────────────────────────
 
 # ── Conversation logging ──────────────────────────────────────────────────────
 
@@ -1830,13 +1862,19 @@ def _handle_construccion(company_id: str, user_text: str, wa_from: str):
     lines.append("")
     lines.append("¿Quieres cotizar estos materiales?\nEscribe *si* para agregar al carrito, o *pagar* para datos de pago directo.")
 
+                                     
     cs["resultado"] = materiales_con_precio
     cs["step"] = "esperando_cotizar"
     state["construccion_state"] = cs
     upsert_quote_state(company_id, wa_from, state)
-    return "\n".join(lines)
-                                     
-
+    
+    detalle = "\n".join(lines)
+    return {
+        "type": "text_then_buttons",
+        "text": detalle,
+        "body": "¿Qué deseas hacer?",
+        "buttons": ["🛒 Agregar al carrito", "💳 Pagar"],
+    }
    
 def _build_cart_context(st: dict) -> str:
     cart = (st or {}).get("cart") or []
