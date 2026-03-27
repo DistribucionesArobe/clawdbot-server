@@ -1560,17 +1560,19 @@ def _buscar_precio_exacto(conn, company_id: str, nombre: str):
     finally:
         cur.close()
 
+def _ceil_hundreds(n: int) -> int:
+    return math.ceil(n / 100) * 100
 
 def _calc_muro_tablaroca(alto: float, largo: float) -> list:
     m2 = alto * largo
     tablaroca = math.ceil(math.ceil(m2 / (1.22 * 2.44) * 2 * 1.03) * 1.03)
-    pijas = math.ceil(tablaroca * 30)
+    pijas = _ceil_hundreds(math.ceil(tablaroca * 30))
     return [
         ("Tablaroca ultralight usg",          tablaroca),
         ("Canal 6.35 x 3.05 cal 26",          math.ceil((largo / 3) * 2)),
         ("Poste 6.35 x 3.05 cal 26",          (math.ceil(largo / 0.61) + 1) * (math.ceil(alto / 3.05) + 1)),
         ("Pija 6 x 1",                        pijas),
-        ("Pija framer",                       math.ceil(pijas / 2)),
+        ("Pija framer",                       _ceil_hundreds(math.ceil(pijas / 2))),
         ("Perfacinta",                        math.ceil((m2 / 2.44) / 20)),
         ("Redimix 21.8 kg usg",               math.ceil(m2 / 14)),
     ]
@@ -1579,13 +1581,13 @@ def _calc_muro_tablaroca(alto: float, largo: float) -> list:
 def _calc_muro_durock(alto: float, largo: float) -> list:
     m2 = alto * largo
     durock = math.ceil(math.ceil(m2 / (1.22 * 2.44) * 2 * 1.03) * 1.03)
-    pijas = math.ceil(durock * 30)
+    pijas = _ceil_hundreds(math.ceil(durock * 30))
     return [
         ("Durock usg",                        durock),
         ("Canal 6.35 x 3.05 cal 22",          math.ceil((largo / 3) * 2)),
         ("Poste 6.35 x 3.05 cal 20",          (math.ceil(largo / 0.406) + 1) * (math.ceil(alto / 3.05) + 1)),
         ("Pija para durock",                  pijas),
-        ("Pija framer",                       math.ceil(pijas / 2)),
+        ("Pija framer",                       _ceil_hundreds(math.ceil(pijas / 2))),
         ("Cinta fibra de vidrio",             math.ceil((m2 / 2.44) / 20)),
         ("Basecoat usg",                      math.ceil(m2 / 4)),
     ]
@@ -1594,14 +1596,14 @@ def _calc_muro_durock(alto: float, largo: float) -> list:
 def _calc_plafon_tablaroca(largo: float, ancho: float) -> list:
     m2 = largo * ancho
     tablaroca = math.ceil(m2 / 2.9768 * 1.07)
-    pijas = math.ceil(tablaroca * 30)
+    pijas = _ceil_hundreds(math.ceil(tablaroca * 30))
     return [
         ("Tablaroca ultralight usg",          tablaroca),
         ("Canal listón cal 26",               math.ceil(((m2 / 0.61) * 1.05) / 3.05) + 2),
         ("Canaleta de carga cal 24",          math.ceil(((m2 / 1.22) * 1.05) / 3.05)),
         ("Ángulo de amarre cal 26",           math.ceil(((largo * 2) + (ancho * 2)) / 3.05)),
         ("Pija 6 x 1",                        pijas),
-        ("Pija framer",                       math.ceil(pijas / 2)),
+        ("Pija framer",                       _ceil_hundreds(math.ceil(pijas / 2))),
         ("Perfacinta",                        math.ceil((m2 * 0.8 * 1.05) / 75)),
         ("Redimix 21.8 kg usg",               math.ceil((m2 * 0.65 * 1.05) / 21.8)),
         ("Alambre galvanizado liso cal 12.5", math.ceil(m2 / 20)),
