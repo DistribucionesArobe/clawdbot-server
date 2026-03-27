@@ -2229,6 +2229,24 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             "o esperar a que te contacten."
         )
 
+    # Opción "Cotizar materiales" del menú principal
+    if tnorm in {"cotizar materiales", "🔨 cotizar materiales"}:
+        try:
+            conn_wh = get_conn()
+            cur_wh = conn_wh.cursor()
+            cur_wh.execute("SELECT welcome_products_hint FROM companies WHERE id=%s", (company_id,))
+            row_wh = cur_wh.fetchone()
+            cur_wh.close()
+            conn_wh.close()
+            hint = (row_wh[0] or "").strip() if row_wh else ""
+        except Exception:
+            hint = ""
+        if hint:
+            ejemplos = "\n".join(f"10 {p.strip()}" for p in hint.split(",") if p.strip())
+            hint_txt = f"\n\nEj:\n{ejemplos}"
+        else:
+            hint_txt = "\n\nEj:\n10 cemento\n5 varilla 3/8\n20 block 15x20"
+        return f"📋 Mándame tu lista de materiales con cantidades:{hint_txt}\n\nO todo en una línea separado por comas."
     if _is_greeting_like(tnorm):
         try:
             conn_co = get_conn()
@@ -2831,6 +2849,7 @@ class CompanySettingsBody(BaseModel):
     bank_account_number: Optional[str] = None
     owner_phone: Optional[str] = None
     email: Optional[str] = None
+    welcome_products_hint: Optional[str] = None
     rfc: Optional[str] = None
     brand_color: Optional[str] = None
     discount_threshold: Optional[float] = None
@@ -2866,8 +2885,8 @@ def company_settings_update(request: Request, body: CompanySettingsBody):
     brand_color = (body.brand_color or "").strip() or None
     discount_threshold = float(body.discount_threshold) if body.discount_threshold is not None and body.discount_threshold > 0 else None
     discount_percent   = float(body.discount_percent)   if body.discount_percent   is not None and 0 < body.discount_percent <= 100 else None
+    welcome_hint = (body.welcome_products_hint or "").strip() or None
 
-    
     conn = None
     cur = None
     try:
@@ -2879,12 +2898,12 @@ def company_settings_update(request: Request, body: CompanySettingsBody):
             SET hours_text=%s, address_text=%s, google_maps_url=%s, mercadopago_url=%s,
                 bank_name=%s, bank_account_name=%s, bank_clabe=%s, bank_account_number=%s,
                 owner_phone=%s, email=%s, rfc=%s, brand_color=%s,
-                discount_threshold=%s, discount_percent=%s, updated_at=now()
+                discount_threshold=%s, discount_percent=%s, welcome_products_hint=%s, updated_at=now()
             WHERE id=%s
             RETURNING id
             """,
             (hours, addr, maps, mp_url, bank_name, bank_acc_name, bank_clabe, bank_acc_num,
-             owner_phone, email, rfc, brand_color, discount_threshold, discount_percent, company_id),
+             owner_phone, email, rfc, brand_color, discount_threshold, discount_percent, welcome_hint, company_id),
         )
         row = cur.fetchone()
         if not row:
@@ -2908,7 +2927,7 @@ def company_settings_get(request: Request):
             SELECT hours_text, address_text, google_maps_url,
                    mercadopago_url, bank_name, bank_account_name, bank_clabe, bank_account_number,
                    owner_phone, email, rfc, brand_color, logo_url,
-                   discount_threshold, discount_percent
+                   discount_threshold, discount_percent, welcome_products_hint
             FROM companies WHERE id=%s LIMIT 1
             """,
             (company_id,),
@@ -2925,6 +2944,7 @@ def company_settings_get(request: Request):
                 "email": row[9], "rfc": row[10], "brand_color": row[11], "logo_url": row[12],
                 "discount_threshold": float(row[13]) if row[13] else None,
                 "discount_percent":   float(row[14]) if row[14] else None,
+                "welcome_products_hint": row[15] or None,
             },
         }
     finally:
