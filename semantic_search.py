@@ -4,6 +4,7 @@ Novedades vs v7:
   - Tiebreak en PASO 1 y PASO 2: nombre que EMPIEZA con el query gana sobre el que solo lo contiene
   - durock → Durock usg (no Pija para durock)
   - tablaroca → Tablaroca ultralight (no Pija para tablaroca)
+  - PASO 0: búsqueda por primer token si frase completa no da resultado (fix "pijas tablaroca")
 """
 
 import re
@@ -505,6 +506,24 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                 (company_id, f"%{q}%"),
             )
             syn_rows = cur0.fetchall()
+
+            # Si no encontró frase completa, buscar por primer token significativo
+            # Ej: "pijas tablaroca" → busca "pijas" en sinónimos, filtra por nombre relevante
+            if not syn_rows and q_tokens:
+                first_token = q_tokens[0]
+                cur0.execute(
+                    "SELECT sku, name, unit, price, vat_rate FROM pricebook_items WHERE company_id = %s AND lower(synonyms) LIKE lower(%s) LIMIT 5",
+                    (company_id, f"%{first_token}%"),
+                )
+                syn_rows = cur0.fetchall()
+                # Filtrar: solo productos cuyo nombre sea relevante al resto del query
+                if len(syn_rows) > 1 and len(q_tokens) > 1:
+                    rest_tokens = q_tokens[1:]
+                    syn_rows = [
+                        r for r in syn_rows
+                        if any(t in (r[1] or "").lower() for t in rest_tokens)
+                        or fuzz.token_set_ratio(q, (r[1] or "").lower()) >= 50
+                    ]
         finally:
             cur0.close()
 
