@@ -2045,6 +2045,14 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         if wa_from and company_id:
             upsert_quote_state(company_id, wa_from, state)
 
+        if state.get("cart"):
+            return {
+                "type": "text_then_buttons",
+                "text": msg,
+                "body": "¿Qué deseas hacer?",
+                "buttons": ["💳 Pagar", "➕ Agregar más"],
+            }
+
         msg += (
             "\n\n¿Agregamos algo más?\n"
             "🧭 Comandos:\n"
@@ -2054,6 +2062,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             "• 'salir' → cancelar"
         )
         return msg
+    
 
     tnorm = norm_name(user_text).replace("cotización", "cotizacion")
 
@@ -2201,6 +2210,8 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             "• 'salir' → cancelar"
         )
 
+    if tnorm in {"➕ agregar más", "agregar más", "agregar mas"}:
+        return "📋 Mándame más productos con cantidades:\nEj: 5 varilla 3/8, 10 cemento"
     escalation_triggers = {
         "asesor", "asesor humano", "humano", "persona", "agente",
         "hablar con alguien", "hablar con una persona", "quiero hablar",
