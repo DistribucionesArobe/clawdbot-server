@@ -4187,14 +4187,16 @@ def extract_qty_items_robust(text: str):
     for line in lines:
         parts = [p.strip() for p in line.split(",") if p.strip()]
         for part in parts:
-            m = re.match(r"^\s*(\d+)\s+(.+)$", part.strip())
-            if m:
-                qty = int(m.group(1))
-                prod = m.group(2).replace("_", "/").strip()
-                prod = re.sub(r"\b(de|hojas|hoja|piezas|pieza|rollos|rollo|bultos|bulto|sacos|saco|atados|atado|paquetes|paquete)\b", "", prod, flags=re.IGNORECASE).strip()
-                prod = re.sub(r"\s+", " ", prod).strip()
-                if prod and qty > 0:
-                    items.append((qty, prod))
+            sub_parts = re.split(r'(?<=\S)\s+(?=\d+\s)', part.strip())
+            for sub in sub_parts:
+                m = re.match(r"^\s*(\d+)\s+(.+)$", sub.strip())
+                if m:
+                    qty = int(m.group(1))
+                    prod = m.group(2).replace("_", "/").strip()
+                    prod = re.sub(r"\b(de|hojas|hoja|piezas|pieza|rollos|rollo|bultos|bulto|sacos|saco|atados|atado|paquetes|paquete)\b", "", prod, flags=re.IGNORECASE).strip()
+                    prod = re.sub(r"\s+", " ", prod).strip()
+                    if prod and qty > 0:
+                        items.append((qty, prod))
     return items
 
 @app.post("/api/chat")
