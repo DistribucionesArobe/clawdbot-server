@@ -2473,9 +2473,18 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
 
         return _build_reply_with_pending(state, company_id=company_id, wa_from=wa_from)
 
-    multi = extract_qty_items_robust(user_text)
-    if not multi:
+    # Para mensajes largos o con lenguaje natural, usar NER directo
+    _words = user_text.split()
+    _looks_long = len(_words) > 12 or "\n" in user_text
+    
+    if _looks_long:
         multi = ner_extract_items(user_text)
+        if not multi:
+            multi = extract_qty_items_robust(user_text)
+    else:
+        multi = extract_qty_items_robust(user_text)
+        if not multi:
+            multi = ner_extract_items(user_text)
     if multi:
         conn = get_conn()
         try:
@@ -4158,6 +4167,9 @@ def ner_extract_items(user_text: str):
                 {"role": "system", "content": (
                     "Eres asistente de ferretería mexicana. Extrae productos y cantidades "
                     "de mensajes con posibles errores ortográficos o lenguaje informal. "
+                    "Interpreta cantidades escritas en texto: 'una'=1, 'dos'=2, 'media'=0.5. "
+                    "Normaliza nombres: 'tabla roca'='tablaroca', 'redemix'='redimix', "
+                    "'takete'='taquete', 'flamer'='framer', 'durok'='durock'. "
                     "Responde SOLO JSON sin explicación: "
                     '[{"qty": 10, "product": "cemento"}, {"qty": 5, "product": "varilla 3/8"}] '
                     "Si no hay productos claros, responde: []"
