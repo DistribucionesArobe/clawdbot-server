@@ -1875,7 +1875,7 @@ def _handle_construccion(company_id: str, user_text: str, wa_from: str):
         "type": "text_then_buttons",
         "text": detalle,
         "body": "¿Qué deseas hacer?",
-        "buttons": ["🛒 Agregar al carrito", "💳 Pagar"],
+        "buttons": ["🛒 Agregar productos", "💳 Pagar"],
     }
    
 def _build_cart_context(st: dict) -> str:
@@ -2392,7 +2392,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         if _cs_state.get("construccion_state"):
             cs = _cs_state["construccion_state"]
             if cs.get("step") == "esperando_cotizar":
-                if tnorm in {"si", "sí", "yes", "s", "dale", "va", "ok", "listo", "cotiza", "cotizar"}:
+                if tnorm in {"si", "sí", "yes", "s", "dale", "va", "ok", "listo", "cotiza", "cotizar", "agregar productos", "🛒 agregar productos"}:                
                     materiales = cs.get("resultado") or []
                     state = _cs_state
                     conn = get_conn()
