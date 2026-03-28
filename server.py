@@ -2050,8 +2050,9 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 "type": "text_then_buttons",
                 "text": msg,
                 "body": "¿Qué deseas hacer?",
-                "buttons": ["💳 Pagar", "➕ Agregar más"],
+                "buttons": ["💳 Pagar", "➕ Agregar más", "🗑️ Quitar producto"],
             }
+    
 
         msg += (
             "\n\n¿Agregamos algo más?\n"
@@ -2210,8 +2211,12 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             "• 'salir' → cancelar"
         )
 
-    if tnorm in {"➕ agregar más", "agregar más", "agregar mas"}:
-        return "📋 Mándame más productos con cantidades:\nEj: 5 varilla 3/8, 10 cemento"
+    if tnorm in {"🗑️ quitar producto", "quitar producto"}:
+        _cart_q = (_edit_state.get("cart") or [])
+        if not _cart_q:
+            return "Tu carrito está vacío."
+        lines = "\n".join(f"• {it['name']}" for it in _cart_q)
+        return f"¿Cuál producto quieres quitar?\n\n{lines}\n\nEscribe el nombre, ej: *quitar cemento*"
     escalation_triggers = {
         "asesor", "asesor humano", "humano", "persona", "agente",
         "hablar con alguien", "hablar con una persona", "quiero hablar",
