@@ -666,27 +666,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
             print(f"SEMANTIC LOW THRESHOLD: query='{user_query}' found={len(candidates_low)}")
             return {"status": "ambiguous", "item": None, "candidates": candidates_low}
 
-        # ── PASO 4: Fallback GPT con catálogo completo + contexto del pedido ──
-        gpt_results = _gpt_catalog_fallback(conn, company_id, user_query,
-                                             cart_context=cart_context)
-
-        if len(gpt_results) == 1:
-            print(f"GPT FALLBACK FOUND: query='{user_query}' → '{gpt_results[0]['name']}'")
-            try:
-                _auto_save_synonym(conn, company_id, user_query, gpt_results[0]["name"])
-            except Exception as e:
-                print(f"AUTO SYNONYM SAVE ERROR: {repr(e)}")
-            return {"status": "found", "item": gpt_results[0], "candidates": []}
-
-        if len(gpt_results) > 1:
-            print(f"GPT FALLBACK AMBIGUOUS: query='{user_query}' options={[r['name'] for r in gpt_results]}")
-            return {"status": "ambiguous", "item": None, "candidates": gpt_results}
-
-        print(f"GPT FALLBACK NO: query='{user_query}' → not_found")
+        # ── PASO 4: no encontrado → guardar para aprendizaje ──────────────
+        print(f"NOT FOUND: query='{user_query}' → guardado en search_misses")
         return {"status": "not_found", "item": None, "candidates": []}
-
-    except Exception as e:
-        print(f"SMART SEARCH EXCEPTION: query='{user_query}' error={repr(e)}")
-        import traceback
-        traceback.print_exc()
-        return {"status": "not_found", "item": None, "candidates": []}
+       
