@@ -2088,20 +2088,34 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
 
     _quitar_match = re.match(r"^(quitar|eliminar|borrar|sacar)\s+(.+)$", tnorm)
     if _quitar_match:
-        _prod_query = _quitar_match.group(2).strip()
+        _prod_raw = _quitar_match.group(2).strip()
+        # Detectar cantidad: "quitar 3 durock" → qty=3, prod="durock"
+        _qty_match = re.match(r"^(\d+)\s+(.+)$", _prod_raw)
+        _remove_qty = int(_qty_match.group(1)) if _qty_match else None
+        _prod_query = _qty_match.group(2).strip() if _qty_match else _prod_raw
         if not _cart:
             return "Tu carrito está vacío."
         _matches = [it for it in _cart if _prod_query in norm_name(it.get("name", "")).lower()]
         if not _matches:
             _matches = [it for it in _cart if any(tok in norm_name(it.get("name", "")).lower() for tok in _prod_query.split() if len(tok) >= 3)]
         if len(_matches) == 1:
-            _cart = [it for it in _cart if it != _matches[0]]
-            _edit_state["cart"] = _cart
-            if wa_from:
-                upsert_quote_state(company_id, wa_from, _edit_state)
-            if not _cart:
-                return f"✅ Eliminé *{_matches[0]['name']}*. Tu carrito quedó vacío."
-            return cart_render_quote(_edit_state, company_id=company_id, client_phone=wa_from) + "\n\n¿Agregamos o quitamos algo más?"
+            _item = _matches[0]
+            _current_qty = int(_item.get("qty") or 0)
+            if _remove_qty and _remove_qty < _current_qty:
+                # Quitar parcial: reducir cantidad
+                _item["qty"] = _current_qty - _remove_qty
+                if wa_from:
+                    upsert_quote_state(company_id, wa_from, _edit_state)
+                return cart_render_quote(_edit_state, company_id=company_id, client_phone=wa_from) + f"\n\n✅ Quité {_remove_qty} de *{_item['name']}* (quedan {_item['qty']})"
+            else:
+                # Quitar todo
+                _cart = [it for it in _cart if it != _item]
+                _edit_state["cart"] = _cart
+                if wa_from:
+                    upsert_quote_state(company_id, wa_from, _edit_state)
+                if not _cart:
+                    return f"✅ Eliminé *{_item['name']}*. Tu carrito quedó vacío."
+                return cart_render_quote(_edit_state, company_id=company_id, client_phone=wa_from) + "\n\n¿Agregamos o quitamos algo más?"
         elif len(_matches) > 1:
             lines = "\n".join([f"• {it['name']}" for it in _matches])
             return f"Encontré varios con '{_prod_query}':\n{lines}\n\nEscribe el nombre más completo."
