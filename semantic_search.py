@@ -39,7 +39,7 @@ def build_query_text(user_input: str) -> str:
     noise_units = r"\b(cubeta|cubetas|bulto|bultos|bolsa|bolsas|rollo|rollos|pieza|piezas|metro|metros|kilo|kilos|kilogramo|kilogramos|litro|litros|par|pares|juego|juegos|caja|cajas|saco|sacos|bote|botes|lata|latas|tubo|tubos|tira|tiras|hoja|hojas)\b"
     t = re.sub(noise_units, " ", t)
     t = re.sub(r"^\s*\d+\s+", "", t)
-    t = re.sub(r"(?<![/\d])(\b\d\b)(?![/\d])", " ", t)
+    t = re.sub(r"(?<![/\d.])(\b\d\b)(?![/\d.])", " ", t)
     t = re.sub(r"\s+", " ", t).strip()
     if not t:
         t = (user_input or "").lower().strip()
@@ -660,6 +660,21 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
         elif len(syn_rows) > 1:
             name_matches = [r for r in syn_rows if q in (r[1] or "").lower()]
             if not name_matches:
+                # Filtrar por specs si el cliente especificó medida/calibre
+                if q_medida or q_cal:
+                    spec_filtered = []
+                    for r in syn_rows:
+                        n = (r[1] or "").lower()
+                        if q_medida and q_medida not in n:
+                            continue
+                        if q_cal and not _re.search(rf"\bcal(?:ibre)?\s*{q_cal}\b", n):
+                            continue
+                        spec_filtered.append(r)
+                    if len(spec_filtered) == 1:
+                        print(f"SYNONYM SPEC RESOLVED: query='{user_query}' match='{spec_filtered[0][1]}'")
+                        return {"status": "found", "item": _make_item(spec_filtered[0]), "candidates": []}
+                    elif spec_filtered:
+                        syn_rows = spec_filtered
                 print(f"SYNONYM AMBIGUOUS: query='{user_query}' found={len(syn_rows)}")
                 return {"status": "ambiguous", "item": None, "candidates": [_make_item(r) for r in syn_rows]}
 
