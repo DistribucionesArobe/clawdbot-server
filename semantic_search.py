@@ -695,8 +695,10 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                     if top_s >= 75 and (top_s - second_s) >= 10:
                         print(f"SYNONYM SCORED RESOLVED: query='{user_query}' match='{scored_syns[0][1][1]}' score={top_s} gap={top_s - second_s}")
                         return {"status": "found", "item": _make_item(scored_syns[0][1]), "candidates": []}
-                print(f"SYNONYM AMBIGUOUS: query='{user_query}' found={len(syn_rows)}")
-                return {"status": "ambiguous", "item": None, "candidates": [_make_item(r) for r in syn_rows]}
+                if syn_rows:
+                    print(f"SYNONYM AMBIGUOUS: query='{user_query}' found={len(syn_rows)}")
+                    return {"status": "ambiguous", "item": None, "candidates": [_make_item(r) for r in syn_rows]}
+                # syn_rows vacío (specs no coincidieron) → seguir a ILIKE/catalog fallback
 
         # ── PASO 1: ILIKE directo + ranking con bonus de specs + tiebreak ─────
         pool_rows = _name_search(q)
