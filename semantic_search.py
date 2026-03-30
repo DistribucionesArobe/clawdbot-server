@@ -1,10 +1,9 @@
 """
-semantic_search.py — Búsqueda semántica para CotizaBot v8
-Novedades vs v7:
-  - Tiebreak en PASO 1 y PASO 2: nombre que EMPIEZA con el query gana sobre el que solo lo contiene
-  - durock → Durock usg (no Pija para durock)
-  - tablaroca → Tablaroca ultralight (no Pija para tablaroca)
-  - PASO 0: búsqueda por primer token si frase completa no da resultado (fix "pijas tablaroca")
+semantic_search.py — Búsqueda semántica para CotizaBot v9
+Novedades vs v8:
+  - PASO 0.5: Normalización LLM de jerga (llm_normalize_query)
+  - Diccionario de jerga global y local con caché en DB
+  - tenant_context por empresa para mejorar normalización
 """
 
 import re
@@ -261,6 +260,7 @@ def resolve_global_synonym(conn, q: str) -> str:
     finally:
         cur.close()
 
+
 def llm_normalize_query(conn, company_id: str, user_query: str, tenant_context: str = "") -> str:
     q = (user_query or "").strip().lower()
     if not q or len(q) < 2:
@@ -350,6 +350,7 @@ def llm_normalize_query(conn, company_id: str, user_query: str, tenant_context: 
     except Exception as e:
         print(f"LLM NORMALIZE ERROR: {repr(e)}")
         return user_query
+
 
 def _auto_save_synonym(conn, company_id: str, user_query: str, resolved_name: str):
     query_clean = (user_query or "").strip().lower()
@@ -492,7 +493,6 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
 
         _stopwords = {"para", "de", "del", "la", "el", "un", "una", "con", "sin", "los", "las"}
         q_tokens = [t for t in q.split() if t not in _stopwords]
-        # Si quitar stopwords destruyó el query (ej: "t de 61" → solo "t"), preservar más
         if not q_tokens or (len(q_tokens) == 1 and len(q_tokens[0]) <= 2 and not re.search(r"\d", q_tokens[0])):
             _soft_stopwords = {"para", "del", "la", "el", "un", "una", "con", "sin", "los", "las"}
             q_tokens = [t for t in q.split() if t not in _soft_stopwords]
@@ -543,7 +543,6 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
             return bonus
 
         def _tiebreak(s, row_or_item):
-            # Funciona tanto con row (tuple) como con item (dict)
             if isinstance(row_or_item, dict):
                 name = (row_or_item.get("name") or "").lower()
             else:
@@ -564,11 +563,9 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
 
         q_medida, q_cal = _extract_specs(q)
 
-        
-        # ── PASO -1: Sinónimo global ──────────────────────────────────────────
+        # ── PASO -1 + 0.5: Normalización LLM de jerga ────────────────────────
         print(f"SMART SEARCH q='{q}' original='{user_query}' context='{cart_context[:50]}'")
 
-        # ── PASO 0.5: Normalización LLM de jerga ─────────────────────────
         try:
             cur_ctx = conn.cursor()
             cur_ctx.execute("SELECT tenant_context FROM companies WHERE id = %s LIMIT 1", (company_id,))
@@ -582,6 +579,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
         if q_llm != q:
             q = q_llm
 
+        # ── PASO -1: Sinónimo global ──────────────────────────────────────────
         q_resolved = resolve_global_synonym(conn, q)
         print(f"RESOLVED: q='{q}' → q_resolved='{q_resolved}'")
         if q_resolved != q:
@@ -612,8 +610,6 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
             )
             syn_rows = cur0.fetchall()
 
-            # Si no encontró frase completa, buscar por primer token significativo
-            # Ej: "pijas tablaroca" → busca "pijas" en sinónimos, filtra por nombre relevante
             if not syn_rows and q_tokens:
                 first_token = q_tokens[0]
                 cur0.execute(
@@ -621,7 +617,6 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                     (company_id, f"%{first_token}%"),
                 )
                 syn_rows = cur0.fetchall()
-                # Filtrar: solo productos cuyo nombre sea relevante al resto del query
                 if len(syn_rows) > 1 and len(q_tokens) > 1:
                     rest_tokens = q_tokens[1:]
                     syn_rows = [
@@ -658,7 +653,6 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                 bonus = _spec_bonus(r[1], q_medida, q_cal)
                 scored.append((base + bonus, r))
 
-            # Tiebreak: nombre que EMPIEZA con el query gana
             scored = [(_tiebreak(s, r), r) for s, r in scored]
             scored.sort(key=lambda x: x[0], reverse=True)
             top = scored[0][0]
@@ -730,7 +724,6 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                 }
                 scored.append((total, item))
 
-        # Tiebreak: nombre que EMPIEZA con el query gana
         scored = [(_tiebreak(s, item), item) for s, item in scored]
         scored.sort(key=lambda x: x[0], reverse=True)
 
@@ -771,7 +764,10 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
             print(f"SEMANTIC LOW THRESHOLD: query='{user_query}' found={len(candidates_low)}")
             return {"status": "ambiguous", "item": None, "candidates": candidates_low}
 
-        # ── PASO 4: no encontrado → guardar para aprendizaje ──────────────
+        # ── PASO 4: no encontrado → guardar para aprendizaje ──────────────────
         print(f"NOT FOUND: query='{user_query}' → guardado en search_misses")
         return {"status": "not_found", "item": None, "candidates": []}
-       
+
+    except Exception as e:
+        print(f"SMART SEARCH FATAL ERROR: {repr(e)}")
+        return {"status": "not_found", "item": None, "candidates": []}
