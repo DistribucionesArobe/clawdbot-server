@@ -3619,6 +3619,8 @@ def auth_me(request: Request):
         cur = None
         try:
             conn = get_conn()
+            # Ensure onboarding columns exist before querying
+            _run_onboarding_migrations(conn)
             cur = conn.cursor()
             cur.execute(
                 "SELECT name, onboarding_completed FROM companies WHERE id = %s LIMIT 1",
