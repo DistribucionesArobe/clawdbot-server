@@ -3619,18 +3619,26 @@ def auth_me(request: Request):
         cur = None
         try:
             conn = get_conn()
-            # Ensure onboarding columns exist before querying
-            _run_onboarding_migrations(conn)
             cur = conn.cursor()
-            cur.execute(
-                "SELECT name, onboarding_completed FROM companies WHERE id = %s LIMIT 1",
-                (company_id,),
-            )
-            row = cur.fetchone()
-            if row:
-                u["empresa_nombre"] = row[0]
-                u["onboarding_completed"] = bool(row[1]) if row[1] is not None else False
-            else:
+            # Try with onboarding_completed first; fall back to without if column doesn't exist yet
+            try:
+                cur.execute(
+                    "SELECT name, onboarding_completed FROM companies WHERE id = %s LIMIT 1",
+                    (company_id,),
+                )
+                row = cur.fetchone()
+                if row:
+                    u["empresa_nombre"] = row[0]
+                    u["onboarding_completed"] = bool(row[1]) if row[1] is not None else False
+                else:
+                    u["onboarding_completed"] = False
+            except Exception:
+                # Column doesn't exist yet — just get name
+                cur.close()
+                cur = conn.cursor()
+                cur.execute("SELECT name FROM companies WHERE id = %s LIMIT 1", (company_id,))
+                row = cur.fetchone()
+                u["empresa_nombre"] = row[0] if row else None
                 u["onboarding_completed"] = False
         except Exception as e:
             print(f"AUTH ME ENRICH ERROR: {repr(e)}")
