@@ -675,6 +675,21 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                         return {"status": "found", "item": _make_item(spec_filtered[0]), "candidates": []}
                     elif spec_filtered:
                         syn_rows = spec_filtered
+                # Fuzzy scoring con query completa para desempatar
+                # (usa palabras como "gris", "framer", "1/2" que diferencian)
+                scored_syns = []
+                for r in syn_rows:
+                    name = (r[1] or "").lower()
+                    base = max(fuzz.token_set_ratio(q, name), fuzz.partial_ratio(q, name))
+                    bonus = _spec_bonus(r[1], q_medida, q_cal)
+                    scored_syns.append((base + bonus, r))
+                scored_syns.sort(key=lambda x: x[0], reverse=True)
+                if len(scored_syns) >= 2:
+                    top_s = scored_syns[0][0]
+                    second_s = scored_syns[1][0]
+                    if top_s >= 75 and (top_s - second_s) >= 10:
+                        print(f"SYNONYM SCORED RESOLVED: query='{user_query}' match='{scored_syns[0][1][1]}' score={top_s} gap={top_s - second_s}")
+                        return {"status": "found", "item": _make_item(scored_syns[0][1]), "candidates": []}
                 print(f"SYNONYM AMBIGUOUS: query='{user_query}' found={len(syn_rows)}")
                 return {"status": "ambiguous", "item": None, "candidates": [_make_item(r) for r in syn_rows]}
 
