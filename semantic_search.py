@@ -382,6 +382,30 @@ def _auto_save_synonym(conn, company_id: str, user_query: str, resolved_name: st
         cur.close()
 
 
+def _cache_local_mapping(conn, company_id: str, term_original: str, product_name: str):
+    """
+    Guarda en diccionario_jerga_local para que la próxima vez
+    llm_normalize_query() devuelva el nombre del producto directamente.
+    """
+    t_orig = (term_original or "").strip().lower()
+    t_norm = (product_name or "").strip().lower()
+    if not t_orig or not t_norm or t_orig == t_norm:
+        return
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO diccionario_jerga_local "
+            "(company_id, termino_original, termino_normalizado) "
+            "VALUES (%s, %s, %s) "
+            "ON CONFLICT (company_id, termino_original) DO NOTHING",
+            (company_id, t_orig, t_norm),
+        )
+        cur.close()
+        print(f"CACHE LOCAL SAVED: '{t_orig}' → '{t_norm}' (tenant={company_id[:8]})")
+    except Exception as e:
+        print(f"CACHE LOCAL ERROR: {repr(e)}")
+
+
 def _gpt_catalog_fallback(conn, company_id: str, user_query: str,
                            cart_context: str = "") -> list:
     if not openai_client:
@@ -575,6 +599,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
         except Exception:
             tenant_context = ""
 
+        q_pre_llm = q  # guardar query antes de normalizar para cachear después
         q_llm = llm_normalize_query(conn, company_id, q, tenant_context)
         if q_llm != q:
             q = q_llm
@@ -763,6 +788,24 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
         if candidates_low:
             print(f"SEMANTIC LOW THRESHOLD: query='{user_query}' found={len(candidates_low)}")
             return {"status": "ambiguous", "item": None, "candidates": candidates_low}
+
+        # ── PASO 3.5: GPT Catalog Fallback — el LLM ve el catálogo real ────────
+        try:
+            fallback_results = _gpt_catalog_fallback(conn, company_id, q, cart_context)
+            if fallback_results:
+                if len(fallback_results) == 1:
+                    matched = fallback_results[0]
+                    print(f"GPT CATALOG FOUND: query='{user_query}' match='{matched['name']}'")
+                    _cache_local_mapping(conn, company_id, q_pre_llm, matched["name"])
+                    if q != q_pre_llm:
+                        _cache_local_mapping(conn, company_id, q, matched["name"])
+                    _auto_save_synonym(conn, company_id, q, matched["name"])
+                    return {"status": "found", "item": matched, "candidates": []}
+                else:
+                    print(f"GPT CATALOG AMBIGUOUS: query='{user_query}' found={len(fallback_results)}")
+                    return {"status": "ambiguous", "item": None, "candidates": fallback_results}
+        except Exception as e:
+            print(f"GPT CATALOG FALLBACK ERROR: {repr(e)}")
 
         # ── PASO 4: no encontrado → guardar para aprendizaje ──────────────────
         print(f"NOT FOUND: query='{user_query}' → guardado en search_misses")
