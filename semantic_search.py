@@ -278,7 +278,10 @@ _PROTECTED_TERMS = {
     "tablaroca hr": "tablaroca anti-moho",
     "tr hr": "tablaroca anti-moho",
     "tablaroca anti moho": "tablaroca anti-moho",
-    "tornillos pa taquete": "tornillo para taquete",
+    "tornillos pa taquete": "pija para taquete",
+    "tornillo para taquete": "pija para taquete",
+    "tornillo pa taquete": "pija para taquete",
+    "tornillos para taquete": "pija para taquete",
 }
 
 
@@ -297,7 +300,9 @@ def seed_jerga_global(conn):
         ("tr rh", "tablaroca anti-moho"),
         ("tablaroca hr", "tablaroca anti-moho"),
         ("tr hr", "tablaroca anti-moho"),
-        ("tornillos pa taquete", "tornillo para taquete"),
+        ("tornillos pa taquete", "pija para taquete"),
+        ("tornillo para taquete", "pija para taquete"),
+        ("tornillos para taquete", "pija para taquete"),
     ]
     try:
         cur = conn.cursor()
