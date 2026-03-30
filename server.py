@@ -2077,6 +2077,15 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             return "Tu carrito está vacío. Mándame tu pedido, ej: 10 cemento, 5 varilla 3/8"
         return cart_render_quote(_edit_state, company_id=company_id, client_phone=wa_from)
 
+    # Si estamos esperando que el usuario escriba qué quitar, tratar su mensaje como remoción
+    if _edit_state.get("awaiting_removal"):
+        _edit_state.pop("awaiting_removal", None)
+        if wa_from:
+            upsert_quote_state(company_id, wa_from, _edit_state)
+        # Si no escribió "quitar X", agregamos el prefijo para que lo procese la regex
+        if not re.match(r"^(quitar|eliminar|borrar|sacar)\s+", tnorm):
+            tnorm = f"quitar {tnorm}"
+
     _quitar_match = re.match(r"^(quitar|eliminar|borrar|sacar)\s+(.+)$", tnorm)
     if _quitar_match:
         _prod_query = _quitar_match.group(2).strip()
@@ -2215,8 +2224,11 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         _cart_q = (_edit_state.get("cart") or [])
         if not _cart_q:
             return "Tu carrito está vacío."
+        _edit_state["awaiting_removal"] = True
+        if wa_from:
+            upsert_quote_state(company_id, wa_from, _edit_state)
         lines = "\n".join(f"• {it['name']}" for it in _cart_q)
-        return f"¿Cuál producto quieres quitar?\n\n{lines}\n\nEscribe el nombre, ej: *quitar cemento*"
+        return f"¿Cuál producto quieres quitar?\n\n{lines}\n\nEscribe el nombre del producto:"
     escalation_triggers = {
         "asesor", "asesor humano", "humano", "persona", "agente",
         "hablar con alguien", "hablar con una persona", "quiero hablar",
