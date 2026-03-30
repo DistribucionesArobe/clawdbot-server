@@ -261,62 +261,105 @@ def resolve_global_synonym(conn, q: str) -> str:
         cur.close()
 
 
-# Diccionario de protección: estos términos NUNCA deben ser modificados por el LLM.
-# Se revisa antes de cualquier otra cosa. Clave = input, valor = output correcto.
-_PROTECTED_TERMS = {
-    "framer": "framer",
-    "pija framer": "pija framer",
-    "pija durock": "pija durock",
-    "pija para durock": "pija para durock",
-    "pija para tablaroca": "pija para tablaroca",
-    "pija pada tablaroca": "pija para tablaroca",
-    "durock": "durock",
-    "basecoat": "basecoat",
-    "redimix": "redimix",
-    "tablaroca rh": "tablaroca anti-moho",
-    "tr rh": "tablaroca anti-moho",
-    "tablaroca hr": "tablaroca anti-moho",
-    "tr hr": "tablaroca anti-moho",
-    "tablaroca anti moho": "tablaroca anti-moho",
-    "tornillos pa taquete": "pija para taquete",
-    "tornillo para taquete": "pija para taquete",
-    "tornillo pa taquete": "pija para taquete",
-    "tornillos para taquete": "pija para taquete",
-}
+def _run_migrations(conn):
+    """
+    Ejecuta migraciones necesarias de forma idempotente.
+    Se llama una vez al inicio del servidor.
+    """
+    cur = conn.cursor()
+    try:
+        # Agregar columna is_protected si no existe
+        cur.execute("""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'diccionario_jerga_global'
+                    AND column_name = 'is_protected'
+                ) THEN
+                    ALTER TABLE diccionario_jerga_global
+                    ADD COLUMN is_protected BOOLEAN NOT NULL DEFAULT FALSE;
+                END IF;
+            END $$;
+        """)
+        print("MIGRATION: is_protected column ensured on diccionario_jerga_global")
+    except Exception as e:
+        print(f"MIGRATION ERROR: {repr(e)}")
+    finally:
+        cur.close()
 
 
 def seed_jerga_global(conn):
     """
-    Inserta/actualiza términos críticos en diccionario_jerga_global.
+    Inserta/actualiza términos críticos en diccionario_jerga_global con is_protected=TRUE.
     Se llama una vez al inicio del servidor.
-    Usa ON CONFLICT UPDATE para corregir entradas erróneas anteriores.
+    Entradas protegidas no pueden ser sobreescritas por el LLM.
+    Los datos semilla vienen de la DB — esto es solo bootstrap inicial.
     """
-    entries = [
+    _run_migrations(conn)
+
+    # Bootstrap: entradas protegidas iniciales.
+    # En el futuro estas se administran desde el panel admin, no desde código.
+    _SEED_ENTRIES = [
         ("framer", "framer"),
         ("pija framer", "pija framer"),
         ("pija durock", "pija durock"),
+        ("pija para durock", "pija para durock"),
+        ("pija para tablaroca", "pija para tablaroca"),
         ("pija pada tablaroca", "pija para tablaroca"),
+        ("durock", "durock"),
+        ("basecoat", "basecoat"),
+        ("redimix", "redimix"),
         ("tablaroca rh", "tablaroca anti-moho"),
         ("tr rh", "tablaroca anti-moho"),
         ("tablaroca hr", "tablaroca anti-moho"),
         ("tr hr", "tablaroca anti-moho"),
+        ("tablaroca anti moho", "tablaroca anti-moho"),
         ("tornillos pa taquete", "pija para taquete"),
         ("tornillo para taquete", "pija para taquete"),
+        ("tornillo pa taquete", "pija para taquete"),
         ("tornillos para taquete", "pija para taquete"),
     ]
     try:
         cur = conn.cursor()
-        for orig, norm in entries:
+        for orig, norm in _SEED_ENTRIES:
             cur.execute(
-                "INSERT INTO diccionario_jerga_global (termino_original, termino_normalizado) "
-                "VALUES (%s, %s) "
-                "ON CONFLICT (termino_original) DO UPDATE SET termino_normalizado = EXCLUDED.termino_normalizado",
+                "INSERT INTO diccionario_jerga_global (termino_original, termino_normalizado, is_protected) "
+                "VALUES (%s, %s, TRUE) "
+                "ON CONFLICT (termino_original) DO UPDATE "
+                "SET termino_normalizado = EXCLUDED.termino_normalizado, is_protected = TRUE",
                 (orig, norm),
             )
         cur.close()
-        print(f"SEED JERGA GLOBAL: {len(entries)} entries upserted")
+        print(f"SEED JERGA GLOBAL: {len(_SEED_ENTRIES)} protected entries upserted")
     except Exception as e:
         print(f"SEED JERGA GLOBAL ERROR: {repr(e)}")
+
+
+def _validate_term_in_catalog(conn, normalized: str) -> bool:
+    """
+    Verifica que el término normalizado exista como nombre o sinónimo
+    en al menos un producto de cualquier tenant.
+    Evita que el LLM guarde basura como 'framer' → 'estructura'.
+    """
+    n = (normalized or "").strip().lower()
+    if not n or len(n) < 2:
+        return False
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT 1 FROM pricebook_items "
+            "WHERE lower(name) LIKE lower(%s) "
+            "   OR lower(synonyms) LIKE lower(%s) "
+            "LIMIT 1",
+            (f"%{n}%", f"%{n}%"),
+        )
+        found = cur.fetchone() is not None
+        return found
+    except Exception:
+        return True  # En caso de error, permitir el guardado
+    finally:
+        cur.close()
 
 
 def llm_normalize_query(conn, company_id: str, user_query: str, tenant_context: str = "") -> str:
@@ -324,14 +367,7 @@ def llm_normalize_query(conn, company_id: str, user_query: str, tenant_context: 
     if not q or len(q) < 2:
         return user_query
 
-    # 0. Diccionario de protección (hardcoded, instantáneo)
-    if q in _PROTECTED_TERMS:
-        result = _PROTECTED_TERMS[q]
-        if result != q:
-            print(f"PROTECTED TERM: '{q}' → '{result}'")
-        return result
-
-    # 1. Buscar en diccionario local
+    # 1. Buscar en diccionario local (per-tenant, máxima prioridad)
     try:
         cur = conn.cursor()
         cur.execute(
@@ -346,22 +382,23 @@ def llm_normalize_query(conn, company_id: str, user_query: str, tenant_context: 
     except Exception as e:
         print(f"JERGA LOCAL ERROR: {repr(e)}")
 
-    # 2. Buscar en diccionario global
+    # 2. Buscar en diccionario global (compartido, incluye entradas protegidas)
     try:
         cur = conn.cursor()
         cur.execute(
-            "SELECT termino_normalizado FROM diccionario_jerga_global WHERE termino_original = %s LIMIT 1",
+            "SELECT termino_normalizado, is_protected FROM diccionario_jerga_global WHERE termino_original = %s LIMIT 1",
             (q,),
         )
         row = cur.fetchone()
         cur.close()
         if row:
-            print(f"JERGA GLOBAL HIT: '{q}' → '{row[0]}'")
+            label = "JERGA GLOBAL PROTECTED" if row[1] else "JERGA GLOBAL HIT"
+            print(f"{label}: '{q}' → '{row[0]}'")
             return row[0]
     except Exception as e:
         print(f"JERGA GLOBAL ERROR: {repr(e)}")
 
-    # 3. Llamar LLM y guardar en global
+    # 3. Llamar LLM y guardar en global (solo si validado contra catálogo)
     if not openai_client:
         return user_query
     try:
@@ -409,16 +446,26 @@ def llm_normalize_query(conn, company_id: str, user_query: str, tenant_context: 
 
         print(f"LLM NORMALIZE: '{q}' → '{normalized}'")
 
-        # Guardar en global para la próxima vez
-        try:
-            cur = conn.cursor()
-            cur.execute(
-                "INSERT INTO diccionario_jerga_global (termino_original, termino_normalizado) VALUES (%s, %s) ON CONFLICT DO NOTHING",
-                (q, normalized),
-            )
-            cur.close()
-        except Exception as e:
-            print(f"JERGA GLOBAL SAVE ERROR: {repr(e)}")
+        # Validar que el término normalizado exista en algún catálogo
+        # antes de guardarlo — evita guardar basura como "framer" → "estructura"
+        if _validate_term_in_catalog(conn, normalized):
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    "INSERT INTO diccionario_jerga_global "
+                    "(termino_original, termino_normalizado, is_protected) "
+                    "VALUES (%s, %s, FALSE) "
+                    "ON CONFLICT (termino_original) DO UPDATE "
+                    "SET termino_normalizado = EXCLUDED.termino_normalizado "
+                    "WHERE NOT diccionario_jerga_global.is_protected",
+                    (q, normalized),
+                )
+                cur.close()
+                print(f"JERGA GLOBAL SAVED: '{q}' → '{normalized}' (validated)")
+            except Exception as e:
+                print(f"JERGA GLOBAL SAVE ERROR: {repr(e)}")
+        else:
+            print(f"JERGA GLOBAL REJECTED: '{q}' → '{normalized}' (not found in any catalog)")
 
         return normalized
 
