@@ -754,8 +754,14 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
 
         if len(scored) == 1:
             if scored[0][0] >= 92:
-                print(f"FUZZY UNIQUE: query='{user_query}' match='{scored[0][1]['name']}' score={scored[0][0]}")
-                return {"status": "found", "item": scored[0][1], "candidates": []}
+                # Si query fue LLM-normalizada, el término genérico matchea
+                # vagamente con cualquier producto de la misma categoría.
+                # No confiar en fuzzy único → dejar que catalog fallback decida.
+                if q != q_pre_llm:
+                    print(f"FUZZY UNIQUE SKIPPED (LLM-normalized): query='{user_query}' match='{scored[0][1]['name']}' score={scored[0][0]} → continuando a catalog fallback")
+                else:
+                    print(f"FUZZY UNIQUE: query='{user_query}' match='{scored[0][1]['name']}' score={scored[0][0]}")
+                    return {"status": "found", "item": scored[0][1], "candidates": []}
             else:
                 print(f"FUZZY UNIQUE LOW SCORE: query='{user_query}' match='{scored[0][1]['name']}' score={scored[0][0]} → semántico")
 
