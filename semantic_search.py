@@ -707,7 +707,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
         cur0 = conn.cursor()
         try:
             cur0.execute(
-                "SELECT sku, name, unit, price, vat_rate FROM pricebook_items WHERE company_id = %s AND lower(synonyms) LIKE lower(%s) LIMIT 5",
+                "SELECT sku, name, unit, price, vat_rate, synonyms FROM pricebook_items WHERE company_id = %s AND lower(synonyms) LIKE lower(%s) LIMIT 5",
                 (company_id, f"%{q}%"),
             )
             syn_rows = cur0.fetchall()
@@ -715,7 +715,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
             if not syn_rows and q_tokens:
                 first_token = q_tokens[0]
                 cur0.execute(
-                    "SELECT sku, name, unit, price, vat_rate FROM pricebook_items WHERE company_id = %s AND lower(synonyms) LIKE lower(%s) LIMIT 5",
+                    "SELECT sku, name, unit, price, vat_rate, synonyms FROM pricebook_items WHERE company_id = %s AND lower(synonyms) LIKE lower(%s) LIMIT 5",
                     (company_id, f"%{first_token}%"),
                 )
                 syn_rows = cur0.fetchall()
@@ -729,10 +729,25 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
         finally:
             cur0.close()
 
+        def _best_syn_score(row, query):
+            """Score considerando nombre Y sinónimos del producto."""
+            name = (row[1] or "").lower()
+            name_score = max(fuzz.token_set_ratio(query, name), fuzz.partial_ratio(query, name))
+            # También comparar contra cada sinónimo individual
+            syns_raw = row[5] if len(row) > 5 else ""
+            if syns_raw:
+                for s in (syns_raw or "").split(","):
+                    s = s.strip().lower()
+                    if s:
+                        syn_score = max(fuzz.token_set_ratio(query, s), fuzz.partial_ratio(query, s))
+                        if syn_score > name_score:
+                            name_score = syn_score
+            return name_score
+
         if len(syn_rows) == 1:
-            name_score = fuzz.token_set_ratio(q, (syn_rows[0][1] or "").lower())
-            if name_score >= 60:
-                print(f"SYNONYM DIRECT HIT: query='{user_query}' match='{syn_rows[0][1]}'")
+            best_score = _best_syn_score(syn_rows[0], q)
+            if best_score >= 60:
+                print(f"SYNONYM DIRECT HIT: query='{user_query}' match='{syn_rows[0][1]}' score={best_score}")
                 return {"status": "found", "item": _make_item(syn_rows[0]), "candidates": []}
         elif len(syn_rows) > 1:
             name_matches = [r for r in syn_rows if q in (r[1] or "").lower()]
@@ -759,10 +774,11 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                         syn_rows = []
                 # Fuzzy scoring con query completa para desempatar
                 # (usa palabras como "gris", "framer", "1/2" que diferencian)
+                # Compara contra nombre Y sinónimos para no penalizar productos
+                # cuyo nombre es diferente al sinónimo que matcheó.
                 scored_syns = []
                 for r in syn_rows:
-                    name = (r[1] or "").lower()
-                    base = max(fuzz.token_set_ratio(q, name), fuzz.partial_ratio(q, name))
+                    base = _best_syn_score(r, q)
                     bonus = _spec_bonus(r[1], q_medida, q_cal)
                     scored_syns.append((base + bonus, r))
                 scored_syns.sort(key=lambda x: x[0], reverse=True)
