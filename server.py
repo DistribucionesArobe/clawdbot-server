@@ -1995,10 +1995,12 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 cands = p.get("candidates") or []
                 for j, it in enumerate(cands[:5], start=1):
                     price = float(it.get("price") or 0.0)
+                    unit = it.get("unit") or "unidad"
+                    full_name = it["name"]
                     section_rows.append({
                         "id": f"pick_{tag}{j}",
-                        "title": f"{tag}{j}) {it['name']}"[:24],
-                        "description": f"${price:,.0f} / {it.get('unit') or 'unidad'}",
+                        "title": f"{tag}{j}) ${price:,.0f}/{unit}"[:24],
+                        "description": full_name[:72],
                     })
 
             if wa_from and company_id:
