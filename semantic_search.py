@@ -261,6 +261,95 @@ def resolve_global_synonym(conn, q: str) -> str:
     finally:
         cur.close()
 
+def llm_normalize_query(conn, company_id: str, user_query: str, tenant_context: str = "") -> str:
+    q = (user_query or "").strip().lower()
+    if not q or len(q) < 2:
+        return user_query
+
+    # 1. Buscar en diccionario local
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT termino_normalizado FROM diccionario_jerga_local WHERE company_id = %s AND termino_original = %s LIMIT 1",
+            (company_id, q),
+        )
+        row = cur.fetchone()
+        cur.close()
+        if row:
+            print(f"JERGA LOCAL HIT: '{q}' → '{row[0]}'")
+            return row[0]
+    except Exception as e:
+        print(f"JERGA LOCAL ERROR: {repr(e)}")
+
+    # 2. Buscar en diccionario global
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT termino_normalizado FROM diccionario_jerga_global WHERE termino_original = %s LIMIT 1",
+            (q,),
+        )
+        row = cur.fetchone()
+        cur.close()
+        if row:
+            print(f"JERGA GLOBAL HIT: '{q}' → '{row[0]}'")
+            return row[0]
+    except Exception as e:
+        print(f"JERGA GLOBAL ERROR: {repr(e)}")
+
+    # 3. Llamar LLM y guardar en global
+    if not openai_client:
+        return user_query
+    try:
+        system = (
+            "Eres un normalizador de lenguaje para materiales de construcción en México. "
+            "Convierte jerga, abreviaciones o errores a términos técnicos estándar de la industria. "
+            "NO inventes productos. NO expliques. "
+            "Responde SOLO con el término normalizado en minúsculas, sin puntuación extra.\n\n"
+            "Ejemplos:\n"
+            "- 'tr hr' → 'tablaroca resistente a humedad'\n"
+            "- 'tr std' → 'tablaroca estandar'\n"
+            "- 'tablarock' → 'tablaroca'\n"
+            "- 'durok' → 'durock'\n"
+            "- 'pste 6.35' → 'poste 6.35'\n"
+            "- 'base coat' → 'basecoat'\n"
+            "- 'cancel' → 'canal'\n"
+            "- 'redimix' → 'redimix'\n"
+            "Si ya es un término estándar, regrésalo igual."
+        )
+        if tenant_context:
+            system += f"\n\nContexto del negocio: {tenant_context}"
+
+        resp = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": q},
+            ],
+            temperature=0.0,
+            max_tokens=30,
+        )
+        normalized = (resp.choices[0].message.content or "").strip().lower()
+        if not normalized or normalized == q:
+            return user_query
+
+        print(f"LLM NORMALIZE: '{q}' → '{normalized}'")
+
+        # Guardar en global para la próxima vez
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "INSERT INTO diccionario_jerga_global (termino_original, termino_normalizado) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                (q, normalized),
+            )
+            cur.close()
+        except Exception as e:
+            print(f"JERGA GLOBAL SAVE ERROR: {repr(e)}")
+
+        return normalized
+
+    except Exception as e:
+        print(f"LLM NORMALIZE ERROR: {repr(e)}")
+        return user_query
 
 def _auto_save_synonym(conn, company_id: str, user_query: str, resolved_name: str):
     query_clean = (user_query or "").strip().lower()
@@ -475,8 +564,24 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
 
         q_medida, q_cal = _extract_specs(q)
 
+        
         # ── PASO -1: Sinónimo global ──────────────────────────────────────────
         print(f"SMART SEARCH q='{q}' original='{user_query}' context='{cart_context[:50]}'")
+
+        # ── PASO 0.5: Normalización LLM de jerga ─────────────────────────
+        try:
+            cur_ctx = conn.cursor()
+            cur_ctx.execute("SELECT tenant_context FROM companies WHERE id = %s LIMIT 1", (company_id,))
+            row_ctx = cur_ctx.fetchone()
+            cur_ctx.close()
+            tenant_context = (row_ctx[0] or "") if row_ctx else ""
+        except Exception:
+            tenant_context = ""
+
+        q_llm = llm_normalize_query(conn, company_id, q, tenant_context)
+        if q_llm != q:
+            q = q_llm
+
         q_resolved = resolve_global_synonym(conn, q)
         print(f"RESOLVED: q='{q}' → q_resolved='{q_resolved}'")
         if q_resolved != q:
