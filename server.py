@@ -3538,6 +3538,30 @@ def login(body: LoginBody, response: Response):
 @app.get("/api/auth/me")
 def auth_me(request: Request):
     u = get_user_from_session(request)
+    # Enrich with company data for frontend (onboarding status, company name, etc.)
+    company_id = u.get("company_id")
+    if company_id:
+        conn = None
+        cur = None
+        try:
+            conn = get_conn()
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT name, onboarding_completed FROM companies WHERE id = %s LIMIT 1",
+                (company_id,),
+            )
+            row = cur.fetchone()
+            if row:
+                u["empresa_nombre"] = row[0]
+                u["onboarding_completed"] = bool(row[1]) if row[1] is not None else False
+            else:
+                u["onboarding_completed"] = False
+        except Exception as e:
+            print(f"AUTH ME ENRICH ERROR: {repr(e)}")
+            u["onboarding_completed"] = False
+        finally:
+            if cur: cur.close()
+            if conn: conn.close()
     return {"ok": True, "user": u}
 
 @app.post("/api/auth/logout")
@@ -3917,6 +3941,71 @@ def pricebook_item_create(request: Request, body: PricebookItemCreateBody):
         print("PRICEBOOK CREATE ERROR:", repr(e))
         traceback.print_exc()
         raise HTTPException(status_code=500, detail="pricebook_item_create failed")
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
+
+
+class PricebookBulkBody(BaseModel):
+    items: list  # list of {name, price, unit, category}
+
+
+@app.post("/api/pricebook/bulk")
+def pricebook_bulk_create(request: Request, body: PricebookBulkBody):
+    """Bulk create products (used by onboarding wizard)."""
+    company_id = require_company_id(request)
+    if not body.items:
+        raise HTTPException(status_code=400, detail="items vacío")
+    if len(body.items) > 50:
+        raise HTTPException(status_code=400, detail="Máximo 50 productos por lote")
+
+    conn = None
+    cur = None
+    created = 0
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        for item in body.items:
+            name = normalize_display_name((item.get("name") or "").strip())
+            if not name:
+                continue
+            price = item.get("price")
+            try:
+                price = float(price) if price is not None else None
+            except (ValueError, TypeError):
+                price = None
+            unit = (item.get("unit") or "Pieza").strip()
+            name_n = norm_name(name)
+
+            # Auto-generate plural/singular synonyms
+            synonyms_list = _auto_plural_singular(name)
+            synonyms = ", ".join(synonyms_list) if synonyms_list else ""
+
+            cur.execute(
+                """
+                INSERT INTO pricebook_items (company_id, name, name_norm, unit, price, vat_rate, synonyms, source, updated_at, created_at)
+                VALUES (%s, %s, %s, %s, %s, 0.16, %s, 'onboarding', now(), now())
+                ON CONFLICT (company_id, name_norm)
+                DO UPDATE SET price = EXCLUDED.price, unit = EXCLUDED.unit, updated_at = now()
+                RETURNING id
+                """,
+                (company_id, name, name_n, unit, price, synonyms),
+            )
+            row = cur.fetchone()
+            if row:
+                created += 1
+                try:
+                    upsert_single_embedding(conn, company_id, row[0], name, "", unit, synonyms)
+                except Exception as e:
+                    print(f"BULK EMBEDDING ERROR for '{name}': {repr(e)}")
+        conn.commit()
+        return {"ok": True, "created": created}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"PRICEBOOK BULK ERROR: {repr(e)}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail="Error en carga masiva")
     finally:
         if cur: cur.close()
         if conn: conn.close()
@@ -4556,3 +4645,203 @@ def toggle_bot(
     upsert_quote_state(company_id, client_phone, state)
 
     return {"ok": True, "bot_active": body.bot_active}
+
+
+# ─────────────────────────────────────────────────────────────
+# ONBOARDING endpoints
+# ─────────────────────────────────────────────────────────────
+
+def _run_onboarding_migrations(conn):
+    """Add onboarding columns to companies table (idempotent)."""
+    cur = conn.cursor()
+    try:
+        for col, col_type in [
+            ("giro", "TEXT"),
+            ("ciudad", "TEXT"),
+            ("descripcion", "TEXT"),
+            ("onboarding_completed", "BOOLEAN DEFAULT FALSE"),
+        ]:
+            cur.execute(f"""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'companies'
+                        AND column_name = '{col}'
+                    ) THEN
+                        ALTER TABLE companies ADD COLUMN {col} {col_type};
+                    END IF;
+                END $$;
+            """)
+        print("ONBOARDING MIGRATIONS: OK")
+    except Exception as e:
+        print(f"ONBOARDING MIGRATION ERROR: {repr(e)}")
+    finally:
+        cur.close()
+
+
+def _generate_tenant_context(giro, ciudad, descripcion, hours_semana, hours_sabado, hours_domingo):
+    """Auto-generate tenant_context string from onboarding data."""
+    parts = []
+
+    if giro:
+        parts.append(giro.strip())
+    if ciudad:
+        parts.append(f"en {ciudad.strip()}")
+    if descripcion:
+        parts.append(descripcion.strip().rstrip("."))
+
+    horario_parts = []
+    if hours_semana:
+        horario_parts.append(f"L-V {hours_semana}")
+    if hours_sabado and hours_sabado.lower() != "cerrado":
+        horario_parts.append(f"Sáb {hours_sabado}")
+    elif hours_sabado and hours_sabado.lower() == "cerrado":
+        horario_parts.append("Sáb cerrado")
+    if hours_domingo and hours_domingo.lower() != "cerrado":
+        horario_parts.append(f"Dom {hours_domingo}")
+    elif hours_domingo and hours_domingo.lower() == "cerrado":
+        horario_parts.append("Dom cerrado")
+
+    if horario_parts:
+        parts.append("Horario: " + ", ".join(horario_parts))
+
+    return ". ".join(parts) + "." if parts else ""
+
+
+class EmpresaPerfilBody(BaseModel):
+    giro: Optional[str] = None
+    ciudad: Optional[str] = None
+    descripcion: Optional[str] = None
+    whatsapp: Optional[str] = None
+    empresa_nombre: Optional[str] = None
+    horario_semana: Optional[str] = None
+    horario_sabado: Optional[str] = None
+    horario_domingo: Optional[str] = None
+
+
+@app.put("/api/empresa/perfil")
+def empresa_perfil_update(request: Request, body: EmpresaPerfilBody):
+    """Save onboarding business profile and auto-generate tenant_context."""
+    company_id = require_company_id(request)
+
+    giro = (body.giro or "").strip() or None
+    ciudad = (body.ciudad or "").strip() or None
+    descripcion = (body.descripcion or "").strip() or None
+    whatsapp = (body.whatsapp or "").strip().replace(" ", "") or None
+    empresa_nombre = (body.empresa_nombre or "").strip() or None
+    horario_semana = (body.horario_semana or "").strip() or None
+    horario_sabado = (body.horario_sabado or "").strip() or None
+    horario_domingo = (body.horario_domingo or "").strip() or None
+
+    # Build hours_text for the existing field
+    hours_parts = []
+    if horario_semana:
+        hours_parts.append(f"Lunes a Viernes: {horario_semana}")
+    if horario_sabado:
+        hours_parts.append(f"Sábado: {horario_sabado}")
+    if horario_domingo:
+        hours_parts.append(f"Domingo: {horario_domingo}")
+    hours_text = " | ".join(hours_parts) if hours_parts else None
+
+    # Auto-generate tenant_context
+    tenant_context = _generate_tenant_context(
+        giro, ciudad, descripcion, horario_semana, horario_sabado, horario_domingo
+    )
+
+    conn = None
+    cur = None
+    try:
+        conn = get_conn()
+        # Run migrations first (idempotent)
+        _run_onboarding_migrations(conn)
+
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE companies
+            SET giro = COALESCE(%s, giro),
+                ciudad = COALESCE(%s, ciudad),
+                descripcion = COALESCE(%s, descripcion),
+                owner_phone = COALESCE(%s, owner_phone),
+                name = COALESCE(%s, name),
+                hours_text = COALESCE(%s, hours_text),
+                tenant_context = %s,
+                updated_at = now()
+            WHERE id = %s
+            RETURNING id
+            """,
+            (giro, ciudad, descripcion, whatsapp, empresa_nombre,
+             hours_text, tenant_context or None, company_id),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Company no encontrada")
+        conn.commit()
+        return {"ok": True, "tenant_context": tenant_context}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"EMPRESA PERFIL ERROR: {repr(e)}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail="Error guardando perfil")
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
+
+
+@app.post("/api/empresa/onboarding-complete")
+def empresa_onboarding_complete(request: Request):
+    """Mark company onboarding as completed."""
+    company_id = require_company_id(request)
+    conn = None
+    cur = None
+    try:
+        conn = get_conn()
+        _run_onboarding_migrations(conn)
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE companies SET onboarding_completed = TRUE, updated_at = now() WHERE id = %s RETURNING id",
+            (company_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Company no encontrada")
+        conn.commit()
+        return {"ok": True, "onboarding_completed": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"ONBOARDING COMPLETE ERROR: {repr(e)}")
+        raise HTTPException(status_code=500, detail="Error actualizando onboarding")
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
+
+
+@app.get("/api/empresa/onboarding-status")
+def empresa_onboarding_status(request: Request):
+    """Check if company has completed onboarding."""
+    company_id = require_company_id(request)
+    conn = None
+    cur = None
+    try:
+        conn = get_conn()
+        _run_onboarding_migrations(conn)
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT onboarding_completed FROM companies WHERE id = %s LIMIT 1",
+            (company_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Company no encontrada")
+        return {"ok": True, "onboarding_completed": bool(row[0])}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"ONBOARDING STATUS ERROR: {repr(e)}")
+        return {"ok": True, "onboarding_completed": False}
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
