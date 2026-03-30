@@ -2500,7 +2500,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             missing = []
             _pedido_raw = ", ".join(p for _, p in multi if p.strip() != "???")
             for qty, prod_raw in multi:
-                if not looks_like_product_phrase(prod_raw):
+                if not looks_like_product_phrase(prod_raw) and len(prod_raw.strip()) < 2:
                     continue
                 if prod_raw.strip() == "???":
                     missing.append({"qty": qty, "raw": "producto ilegible", "candidates": []})
