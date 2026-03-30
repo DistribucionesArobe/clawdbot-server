@@ -3612,37 +3612,33 @@ def login(body: LoginBody, response: Response):
 @app.get("/api/auth/me")
 def auth_me(request: Request):
     u = get_user_from_session(request)
-    # Enrich with company data for frontend (onboarding status, company name, etc.)
     company_id = u.get("company_id")
+    u["onboarding_completed"] = False
     if company_id:
         conn = None
         cur = None
         try:
             conn = get_conn()
             cur = conn.cursor()
-            # Try with onboarding_completed first; fall back to without if column doesn't exist yet
-            try:
-                cur.execute(
-                    "SELECT name, onboarding_completed FROM companies WHERE id = %s LIMIT 1",
-                    (company_id,),
-                )
+            # Check if onboarding_completed column exists
+            cur.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name='companies' AND column_name='onboarding_completed'"
+            )
+            has_col = cur.fetchone() is not None
+            if has_col:
+                cur.execute("SELECT name, onboarding_completed FROM companies WHERE id=%s LIMIT 1", (company_id,))
                 row = cur.fetchone()
                 if row:
                     u["empresa_nombre"] = row[0]
                     u["onboarding_completed"] = bool(row[1]) if row[1] is not None else False
-                else:
-                    u["onboarding_completed"] = False
-            except Exception:
-                # Column doesn't exist yet — just get name
-                cur.close()
-                cur = conn.cursor()
-                cur.execute("SELECT name FROM companies WHERE id = %s LIMIT 1", (company_id,))
+            else:
+                cur.execute("SELECT name FROM companies WHERE id=%s LIMIT 1", (company_id,))
                 row = cur.fetchone()
-                u["empresa_nombre"] = row[0] if row else None
-                u["onboarding_completed"] = False
+                if row:
+                    u["empresa_nombre"] = row[0]
         except Exception as e:
             print(f"AUTH ME ENRICH ERROR: {repr(e)}")
-            u["onboarding_completed"] = False
         finally:
             if cur: cur.close()
             if conn: conn.close()
