@@ -261,10 +261,70 @@ def resolve_global_synonym(conn, q: str) -> str:
         cur.close()
 
 
+# Diccionario de protección: estos términos NUNCA deben ser modificados por el LLM.
+# Se revisa antes de cualquier otra cosa. Clave = input, valor = output correcto.
+_PROTECTED_TERMS = {
+    "framer": "framer",
+    "pija framer": "pija framer",
+    "pija durock": "pija durock",
+    "pija para durock": "pija para durock",
+    "pija para tablaroca": "pija para tablaroca",
+    "pija pada tablaroca": "pija para tablaroca",
+    "durock": "durock",
+    "basecoat": "basecoat",
+    "redimix": "redimix",
+    "tablaroca rh": "tablaroca anti-moho",
+    "tr rh": "tablaroca anti-moho",
+    "tablaroca hr": "tablaroca anti-moho",
+    "tr hr": "tablaroca anti-moho",
+    "tablaroca anti moho": "tablaroca anti-moho",
+    "tornillos pa taquete": "tornillo para taquete",
+}
+
+
+def seed_jerga_global(conn):
+    """
+    Inserta/actualiza términos críticos en diccionario_jerga_global.
+    Se llama una vez al inicio del servidor.
+    Usa ON CONFLICT UPDATE para corregir entradas erróneas anteriores.
+    """
+    entries = [
+        ("framer", "framer"),
+        ("pija framer", "pija framer"),
+        ("pija durock", "pija durock"),
+        ("pija pada tablaroca", "pija para tablaroca"),
+        ("tablaroca rh", "tablaroca anti-moho"),
+        ("tr rh", "tablaroca anti-moho"),
+        ("tablaroca hr", "tablaroca anti-moho"),
+        ("tr hr", "tablaroca anti-moho"),
+        ("tornillos pa taquete", "tornillo para taquete"),
+    ]
+    try:
+        cur = conn.cursor()
+        for orig, norm in entries:
+            cur.execute(
+                "INSERT INTO diccionario_jerga_global (termino_original, termino_normalizado) "
+                "VALUES (%s, %s) "
+                "ON CONFLICT (termino_original) DO UPDATE SET termino_normalizado = EXCLUDED.termino_normalizado",
+                (orig, norm),
+            )
+        cur.close()
+        print(f"SEED JERGA GLOBAL: {len(entries)} entries upserted")
+    except Exception as e:
+        print(f"SEED JERGA GLOBAL ERROR: {repr(e)}")
+
+
 def llm_normalize_query(conn, company_id: str, user_query: str, tenant_context: str = "") -> str:
     q = (user_query or "").strip().lower()
     if not q or len(q) < 2:
         return user_query
+
+    # 0. Diccionario de protección (hardcoded, instantáneo)
+    if q in _PROTECTED_TERMS:
+        result = _PROTECTED_TERMS[q]
+        if result != q:
+            print(f"PROTECTED TERM: '{q}' → '{result}'")
+        return result
 
     # 1. Buscar en diccionario local
     try:
@@ -303,10 +363,15 @@ def llm_normalize_query(conn, company_id: str, user_query: str, tenant_context: 
         system = (
             "Eres un normalizador de lenguaje para materiales de construcción en México. "
             "Convierte jerga, abreviaciones o errores a términos técnicos estándar de la industria. "
-            "NO inventes productos. NO expliques. "
+            "NO inventes productos. NO expliques. NO traduzcas al español. "
             "Responde SOLO con el término normalizado en minúsculas, sin puntuación extra.\n\n"
+            "REGLA IMPORTANTE: Si el término es una marca, nombre comercial o tipo de producto "
+            "específico (framer, durock, usg, sheetrock, tablaroca, redimix, basecoat, etc.), "
+            "NO lo traduzcas ni lo cambies. Los nombres de productos se mantienen tal cual.\n\n"
             "Ejemplos:\n"
             "- 'tr hr' → 'tablaroca resistente a humedad'\n"
+            "- 'tr rh' → 'tablaroca anti-moho'\n"
+            "- 'tablaroca rh' → 'tablaroca anti-moho'\n"
             "- 'tr std' → 'tablaroca estandar'\n"
             "- 'tablarock' → 'tablaroca'\n"
             "- 'durok' → 'durock'\n"
@@ -314,6 +379,11 @@ def llm_normalize_query(conn, company_id: str, user_query: str, tenant_context: 
             "- 'base coat' → 'basecoat'\n"
             "- 'cancel' → 'canal'\n"
             "- 'redimix' → 'redimix'\n"
+            "- 'framer' → 'framer'\n"
+            "- 'pija framer' → 'pija framer'\n"
+            "- 'pija durock' → 'pija durock'\n"
+            "- 'tornillos pa taquete' → 'tornillo para taquete'\n"
+            "- 'pija pada tablaroca' → 'pija para tablaroca'\n"
             "Si ya es un término estándar, regrésalo igual."
         )
         if tenant_context:
@@ -451,7 +521,12 @@ def _gpt_catalog_fallback(conn, company_id: str, user_query: str,
                         "El cliente busca un producto usando lenguaje coloquial, abreviado o con errores. "
                         "Usa el contexto del pedido completo para entender a qué categoría pertenece "
                         "el producto buscado — igual que lo haría un ferretero experimentado.\n\n"
-                        "Ejemplos:\n"
+                        "EQUIVALENCIAS IMPORTANTES que debes conocer:\n"
+                        "- 'resistente a humedad' = 'anti-moho' = 'RH' = 'HR'\n"
+                        "- 'framer' es un tipo de pija/tornillo (Pija framer)\n"
+                        "- 'durock' y 'tablaroca' son tipos de panel diferentes\n"
+                        "- 'pija para tablaroca' ≠ 'pija para durock' (son productos distintos)\n\n"
+                        "Ejemplos de contexto:\n"
                         "- Pedido con 'tee principal, tee 61' → 'placas' = plafón reticulado\n"
                         "- Pedido con 'tablaroca, poste, canal' → 'pasta' = redimix/basecoat\n"
                         "- Pedido con 'tubo conduit, clavija' → 'cinta' = cinta aislante\n\n"
@@ -460,6 +535,8 @@ def _gpt_catalog_fallback(conn, company_id: str, user_query: str,
                         "- VARIAS opciones del MISMO tipo → números por coma (ej: '42,43,44'). Máximo 5.\n"
                         "- Nada relevante → responde exactamente: NO\n"
                         "- NUNCA incluyas productos de tipo diferente al inferido\n"
+                        "- Sé FLEXIBLE con sinónimos: si el cliente dice 'resistente a humedad' "
+                        "y existe 'anti-moho', ESO es una coincidencia.\n"
                         "- NUNCA expliques. Solo números o NO."
                     ),
                 },

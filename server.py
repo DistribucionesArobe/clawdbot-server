@@ -19,7 +19,7 @@ import psycopg2
 from psycopg2 import IntegrityError
 
 from openai import OpenAI
-from semantic_search import smart_search, rebuild_embeddings_for_company, upsert_single_embedding
+from semantic_search import smart_search, rebuild_embeddings_for_company, upsert_single_embedding, seed_jerga_global
 from generate_quote_pdf import build_quote_pdf, generate_folio
 
 from fastapi import (
@@ -640,6 +640,14 @@ def print_db_fingerprint():
         print("DB FINGERPRINT ERROR:", repr(e))
 
 print_db_fingerprint()
+
+# Seed jerga_global con términos críticos al iniciar
+try:
+    _seed_conn = get_conn()
+    seed_jerga_global(_seed_conn)
+    _seed_conn.close()
+except Exception as e:
+    print(f"SEED STARTUP ERROR: {repr(e)}")
 
 def get_company_by_twilio_number(to_phone: str):
     to_phone = normalize_wa(to_phone)
