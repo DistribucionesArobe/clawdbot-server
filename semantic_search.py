@@ -675,6 +675,11 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                         return {"status": "found", "item": _make_item(spec_filtered[0]), "candidates": []}
                     elif spec_filtered:
                         syn_rows = spec_filtered
+                    else:
+                        # Specs no coinciden con ningún producto — no mostrar opciones irrelevantes.
+                        # Dejar que siga a los siguientes pasos (ILIKE, fuzzy, catalog fallback).
+                        print(f"SYNONYM SPEC NO MATCH: query='{user_query}' specs=({q_medida},{q_cal}) → skipping synonym ambiguous")
+                        syn_rows = []
                 # Fuzzy scoring con query completa para desempatar
                 # (usa palabras como "gris", "framer", "1/2" que diferencian)
                 scored_syns = []
