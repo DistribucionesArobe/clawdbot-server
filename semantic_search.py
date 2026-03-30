@@ -850,9 +850,32 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
         except Exception as e:
             print(f"GPT CATALOG FALLBACK ERROR: {repr(e)}")
 
-        # ── PASO 4: no encontrado → guardar para aprendizaje ──────────────────
-        print(f"NOT FOUND: query='{user_query}' → guardado en search_misses")
-        return {"status": "not_found", "item": None, "candidates": []}
+        # ── PASO 4: no encontrado → buscar sugerencias similares ──────────────
+        # En vez de solo decir "no encontrado", buscar productos similares
+        # por la primera palabra para dar opciones al cliente.
+        suggestions = []
+        try:
+            first_word = q.split()[0] if q.split() else q
+            if len(first_word) >= 3:
+                cur_sug = conn.cursor()
+                try:
+                    cur_sug.execute(
+                        "SELECT sku, name, unit, price, vat_rate FROM pricebook_items "
+                        "WHERE company_id = %s AND lower(name) LIKE lower(%s) LIMIT 5",
+                        (company_id, f"%{first_word}%"),
+                    )
+                    sug_rows = cur_sug.fetchall()
+                finally:
+                    cur_sug.close()
+                if sug_rows:
+                    suggestions = [_make_item(r) for r in sug_rows]
+                    print(f"NOT FOUND WITH SUGGESTIONS: query='{user_query}' suggestions={[s['name'] for s in suggestions]}")
+        except Exception as e:
+            print(f"SUGGESTIONS ERROR: {repr(e)}")
+
+        if not suggestions:
+            print(f"NOT FOUND: query='{user_query}' → sin sugerencias")
+        return {"status": "not_found", "item": None, "candidates": suggestions}
 
     except Exception as e:
         print(f"SMART SEARCH FATAL ERROR: {repr(e)}")
