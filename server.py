@@ -2077,6 +2077,40 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             return "Tu carrito está vacío. Mándame tu pedido, ej: 10 cemento, 5 varilla 3/8"
         return cart_render_quote(_edit_state, company_id=company_id, client_phone=wa_from)
 
+    # Si estamos esperando la cantidad a quitar
+    if _edit_state.get("awaiting_removal_qty"):
+        _removal_name = _edit_state.pop("awaiting_removal_qty")
+        _item_match = next((it for it in _cart if (it.get("name") or "").lower() == _removal_name.lower()), None)
+        if _item_match:
+            _current_qty = int(_item_match.get("qty") or 0)
+            if tnorm in {"todas", "todo", "todos", "all"}:
+                _cart = [it for it in _cart if it != _item_match]
+                _edit_state["cart"] = _cart
+                if wa_from:
+                    upsert_quote_state(company_id, wa_from, _edit_state)
+                if not _cart:
+                    return f"✅ Eliminé *{_item_match['name']}*. Tu carrito quedó vacío."
+                return cart_render_quote(_edit_state, company_id=company_id, client_phone=wa_from) + "\n\n¿Agregamos o quitamos algo más?"
+            _qty_num = re.match(r"^(\d+)", tnorm.strip())
+            if _qty_num:
+                _remove_n = int(_qty_num.group(1))
+                if _remove_n >= _current_qty:
+                    _cart = [it for it in _cart if it != _item_match]
+                    _edit_state["cart"] = _cart
+                else:
+                    _item_match["qty"] = _current_qty - _remove_n
+                if wa_from:
+                    upsert_quote_state(company_id, wa_from, _edit_state)
+                if not _edit_state.get("cart"):
+                    return f"✅ Eliminé *{_item_match['name']}*. Tu carrito quedó vacío."
+                remaining = _item_match.get("qty", 0) if _remove_n < _current_qty else 0
+                msg = cart_render_quote(_edit_state, company_id=company_id, client_phone=wa_from)
+                if remaining:
+                    return msg + f"\n\n✅ Quité {_remove_n} de *{_item_match['name']}* (quedan {remaining})"
+                return msg + "\n\n¿Agregamos o quitamos algo más?"
+        if wa_from:
+            upsert_quote_state(company_id, wa_from, _edit_state)
+
     # Si estamos esperando que el usuario escriba qué quitar, tratar su mensaje como remoción
     if _edit_state.get("awaiting_removal"):
         _edit_state.pop("awaiting_removal", None)
@@ -2107,8 +2141,23 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 if wa_from:
                     upsert_quote_state(company_id, wa_from, _edit_state)
                 return cart_render_quote(_edit_state, company_id=company_id, client_phone=wa_from) + f"\n\n✅ Quité {_remove_qty} de *{_item['name']}* (quedan {_item['qty']})"
+            elif _remove_qty and _remove_qty >= _current_qty:
+                # Quitar todo (pidió igual o más de lo que tiene)
+                _cart = [it for it in _cart if it != _item]
+                _edit_state["cart"] = _cart
+                if wa_from:
+                    upsert_quote_state(company_id, wa_from, _edit_state)
+                if not _cart:
+                    return f"✅ Eliminé *{_item['name']}*. Tu carrito quedó vacío."
+                return cart_render_quote(_edit_state, company_id=company_id, client_phone=wa_from) + "\n\n¿Agregamos o quitamos algo más?"
+            elif _current_qty > 1:
+                # No especificó cantidad y tiene más de 1 → preguntar
+                _edit_state["awaiting_removal_qty"] = _item["name"]
+                if wa_from:
+                    upsert_quote_state(company_id, wa_from, _edit_state)
+                return f"Tienes *{_current_qty}* de *{_item['name']}*.\n¿Cuántas quieres quitar? (o escribe *todas*)"
             else:
-                # Quitar todo
+                # Solo tiene 1 → quitar directo
                 _cart = [it for it in _cart if it != _item]
                 _edit_state["cart"] = _cart
                 if wa_from:
