@@ -3399,6 +3399,80 @@ def db_test():
         if conn: conn.close()
 
 
+class AdminDeleteTestUserBody(BaseModel):
+    email: str
+    confirm: str  # must be "DELETE"
+
+
+@app.post("/api/admin/delete-test-user")
+def admin_delete_test_user(body: AdminDeleteTestUserBody):
+    """Delete a test user and ALL their company data. Requires confirm='DELETE'."""
+    if body.confirm != "DELETE":
+        raise HTTPException(status_code=400, detail="Debes enviar confirm='DELETE'")
+    email = (body.email or "").strip().lower()
+    if not email:
+        raise HTTPException(status_code=400, detail="email requerido")
+
+    conn = None
+    cur = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+
+        # Find user and company
+        cur.execute("SELECT id, company_id FROM users WHERE email = %s LIMIT 1", (email,))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail=f"Usuario '{email}' no encontrado")
+        user_id, company_id = row[0], str(row[1])
+
+        deleted = {}
+
+        # Delete in dependency order
+        for table, col in [
+            ("sessions", "user_id"),
+        ]:
+            cur.execute(f"DELETE FROM {table} WHERE {col} = %s", (user_id,))
+            deleted[table] = cur.rowcount
+
+        for table, col in [
+            ("item_embeddings", "company_id"),
+            ("pricebook_items", "company_id"),
+            ("wa_quote_state", "company_id"),
+            ("wa_conversation_windows", "company_id"),
+            ("wa_usage_monthly", "company_id"),
+            ("search_misses", "company_id"),
+            ("conversations", "company_id"),
+            ("api_keys", "company_id"),
+        ]:
+            try:
+                cur.execute(f"DELETE FROM {table} WHERE {col} = %s", (company_id,))
+                deleted[table] = cur.rowcount
+            except Exception as e:
+                deleted[table] = f"skip: {repr(e)}"
+                conn.rollback()
+                conn.autocommit = True
+
+        # Delete user
+        cur.execute("DELETE FROM users WHERE id = %s", (user_id,))
+        deleted["users"] = cur.rowcount
+
+        # Delete company
+        cur.execute("DELETE FROM companies WHERE id = %s", (company_id,))
+        deleted["companies"] = cur.rowcount
+
+        return {"ok": True, "email": email, "company_id": company_id, "deleted": deleted}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"DELETE TEST USER ERROR: {repr(e)}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
+
+
 @app.post("/api/auth/register")
 def register(body: RegisterBody):
     email = (body.email or "").strip().lower()
