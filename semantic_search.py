@@ -268,7 +268,7 @@ def _run_migrations(conn):
     """
     cur = conn.cursor()
     try:
-        # Agregar columna is_protected si no existe
+        # 1. Agregar columna is_protected si no existe
         cur.execute("""
             DO $$
             BEGIN
@@ -283,10 +283,148 @@ def _run_migrations(conn):
             END $$;
         """)
         print("MIGRATION: is_protected column ensured on diccionario_jerga_global")
+
+        # 2. Nuevas columnas para jerga escalable: tracking de uso y confianza
+        cur.execute("""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'diccionario_jerga_global'
+                    AND column_name = 'usage_count'
+                ) THEN
+                    ALTER TABLE diccionario_jerga_global
+                    ADD COLUMN usage_count INTEGER NOT NULL DEFAULT 0,
+                    ADD COLUMN success_count INTEGER NOT NULL DEFAULT 0,
+                    ADD COLUMN industry VARCHAR(100) DEFAULT NULL,
+                    ADD COLUMN source VARCHAR(50) NOT NULL DEFAULT 'seed';
+                END IF;
+            END $$;
+        """)
+        print("MIGRATION: usage_count, success_count, industry, source columns ensured on diccionario_jerga_global")
+
+        # 3. Crear tabla query_events — log de cada búsqueda para aprendizaje
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS query_events (
+                id BIGSERIAL PRIMARY KEY,
+                company_id UUID NOT NULL,
+                original_text VARCHAR(500) NOT NULL,
+                cleaned_text VARCHAR(500),
+                normalized_text VARCHAR(500),
+                normalization_source VARCHAR(50),
+                matched_item_name VARCHAR(500),
+                matched_item_sku VARCHAR(100),
+                search_status VARCHAR(30) NOT NULL,
+                search_paso VARCHAR(50),
+                confidence_score REAL,
+                was_correct BOOLEAN DEFAULT NULL,
+                industry VARCHAR(100),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+        """)
+        print("MIGRATION: query_events table ensured")
+
+        # 4. Índices para query_events
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_query_events_company
+            ON query_events (company_id, created_at DESC);
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_query_events_status
+            ON query_events (search_status, created_at DESC);
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_query_events_normalized
+            ON query_events (normalized_text, search_status);
+        """)
+        print("MIGRATION: query_events indexes ensured")
+
     except Exception as e:
         print(f"MIGRATION ERROR: {repr(e)}")
     finally:
         cur.close()
+
+
+def _log_query_event(conn, company_id: str, original_text: str, cleaned_text: str,
+                     normalized_text: str, normalization_source: str,
+                     matched_item_name: str, matched_item_sku: str,
+                     search_status: str, search_paso: str,
+                     confidence_score: float = None, industry: str = None):
+    """
+    Registra un evento de búsqueda en query_events.
+    Se llama al final de smart_search() con el resultado.
+    """
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO query_events "
+            "(company_id, original_text, cleaned_text, normalized_text, "
+            "normalization_source, matched_item_name, matched_item_sku, "
+            "search_status, search_paso, confidence_score, industry) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (company_id, original_text[:500], (cleaned_text or "")[:500],
+             (normalized_text or "")[:500], normalization_source,
+             matched_item_name, matched_item_sku,
+             search_status, search_paso, confidence_score, industry),
+        )
+        cur.close()
+    except Exception as e:
+        print(f"LOG QUERY EVENT ERROR: {repr(e)}")
+
+
+def _increment_jerga_usage(conn, termino_original: str, success: bool = False):
+    """
+    Incrementa usage_count (y success_count si aplica) en diccionario_jerga_global.
+    """
+    try:
+        cur = conn.cursor()
+        if success:
+            cur.execute(
+                "UPDATE diccionario_jerga_global "
+                "SET usage_count = usage_count + 1, success_count = success_count + 1 "
+                "WHERE termino_original = %s",
+                (termino_original.lower().strip(),),
+            )
+        else:
+            cur.execute(
+                "UPDATE diccionario_jerga_global "
+                "SET usage_count = usage_count + 1 "
+                "WHERE termino_original = %s",
+                (termino_original.lower().strip(),),
+            )
+        cur.close()
+    except Exception as e:
+        print(f"INCREMENT JERGA USAGE ERROR: {repr(e)}")
+
+
+def _check_auto_promote(conn, termino_original: str):
+    """
+    Auto-promueve un término de jerga a protegido si:
+    - usage_count >= 5
+    - confidence (success_count / usage_count) >= 0.8
+    - No es ya protegido
+    """
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT usage_count, success_count, is_protected "
+            "FROM diccionario_jerga_global WHERE termino_original = %s LIMIT 1",
+            (termino_original.lower().strip(),),
+        )
+        row = cur.fetchone()
+        if row and not row[2]:  # not already protected
+            usage, success, _ = row
+            if usage >= 5 and success / max(usage, 1) >= 0.8:
+                cur.execute(
+                    "UPDATE diccionario_jerga_global SET is_protected = TRUE "
+                    "WHERE termino_original = %s AND NOT is_protected",
+                    (termino_original.lower().strip(),),
+                )
+                confidence = success / max(usage, 1)
+                print(f"AUTO-PROMOTE: '{termino_original}' → protected (usage={usage}, success={success}, confidence={confidence:.2f})")
+        cur.close()
+    except Exception as e:
+        print(f"AUTO-PROMOTE ERROR: {repr(e)}")
 
 
 def seed_jerga_global(conn):
@@ -336,10 +474,10 @@ def seed_jerga_global(conn):
         cur = conn.cursor()
         for orig, norm in _SEED_ENTRIES:
             cur.execute(
-                "INSERT INTO diccionario_jerga_global (termino_original, termino_normalizado, is_protected) "
-                "VALUES (%s, %s, TRUE) "
+                "INSERT INTO diccionario_jerga_global (termino_original, termino_normalizado, is_protected, source) "
+                "VALUES (%s, %s, TRUE, 'seed') "
                 "ON CONFLICT (termino_original) DO UPDATE "
-                "SET termino_normalizado = EXCLUDED.termino_normalizado, is_protected = TRUE",
+                "SET termino_normalizado = EXCLUDED.termino_normalizado, is_protected = TRUE, source = 'seed'",
                 (orig, norm),
             )
         cur.close()
@@ -374,10 +512,14 @@ def _validate_term_in_catalog(conn, normalized: str) -> bool:
         cur.close()
 
 
-def llm_normalize_query(conn, company_id: str, user_query: str, tenant_context: str = "") -> str:
+def llm_normalize_query(conn, company_id: str, user_query: str, tenant_context: str = ""):
+    """
+    Normaliza jerga del usuario. Retorna tupla (normalized_text, source).
+    source: 'local', 'global', 'llm', 'none'
+    """
     q = (user_query or "").strip().lower()
     if not q or len(q) < 2:
-        return user_query
+        return user_query, "none"
 
     # 1. Buscar en diccionario local (per-tenant, máxima prioridad)
     try:
@@ -390,7 +532,7 @@ def llm_normalize_query(conn, company_id: str, user_query: str, tenant_context: 
         cur.close()
         if row:
             print(f"JERGA LOCAL HIT: '{q}' → '{row[0]}'")
-            return row[0]
+            return row[0], "local"
     except Exception as e:
         print(f"JERGA LOCAL ERROR: {repr(e)}")
 
@@ -406,13 +548,15 @@ def llm_normalize_query(conn, company_id: str, user_query: str, tenant_context: 
         if row:
             label = "JERGA GLOBAL PROTECTED" if row[1] else "JERGA GLOBAL HIT"
             print(f"{label}: '{q}' → '{row[0]}'")
-            return row[0]
+            # Track usage
+            _increment_jerga_usage(conn, q, success=False)  # success se marca después en smart_search
+            return row[0], "global"
     except Exception as e:
         print(f"JERGA GLOBAL ERROR: {repr(e)}")
 
     # 3. Llamar LLM y guardar en global (solo si validado contra catálogo)
     if not openai_client:
-        return user_query
+        return user_query, "none"
     try:
         system = (
             "Eres un normalizador de lenguaje para materiales de construcción en México. "
@@ -454,7 +598,7 @@ def llm_normalize_query(conn, company_id: str, user_query: str, tenant_context: 
         )
         normalized = (resp.choices[0].message.content or "").strip().lower()
         if not normalized or normalized == q:
-            return user_query
+            return user_query, "none"
 
         print(f"LLM NORMALIZE: '{q}' → '{normalized}'")
 
@@ -465,25 +609,26 @@ def llm_normalize_query(conn, company_id: str, user_query: str, tenant_context: 
                 cur = conn.cursor()
                 cur.execute(
                     "INSERT INTO diccionario_jerga_global "
-                    "(termino_original, termino_normalizado, is_protected) "
-                    "VALUES (%s, %s, FALSE) "
+                    "(termino_original, termino_normalizado, is_protected, source, usage_count, success_count) "
+                    "VALUES (%s, %s, FALSE, 'llm', 1, 0) "
                     "ON CONFLICT (termino_original) DO UPDATE "
-                    "SET termino_normalizado = EXCLUDED.termino_normalizado "
+                    "SET termino_normalizado = EXCLUDED.termino_normalizado, "
+                    "    usage_count = diccionario_jerga_global.usage_count + 1 "
                     "WHERE NOT diccionario_jerga_global.is_protected",
                     (q, normalized),
                 )
                 cur.close()
-                print(f"JERGA GLOBAL SAVED: '{q}' → '{normalized}' (validated)")
+                print(f"JERGA GLOBAL SAVED: '{q}' → '{normalized}' (validated, source=llm)")
             except Exception as e:
                 print(f"JERGA GLOBAL SAVE ERROR: {repr(e)}")
         else:
             print(f"JERGA GLOBAL REJECTED: '{q}' → '{normalized}' (not found in any catalog)")
 
-        return normalized
+        return normalized, "llm"
 
     except Exception as e:
         print(f"LLM NORMALIZE ERROR: {repr(e)}")
-        return user_query
+        return user_query, "none"
 
 
 def _auto_save_synonym(conn, company_id: str, user_query: str, resolved_name: str):
@@ -741,9 +886,29 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
             tenant_context = ""
 
         q_pre_llm = q  # guardar query antes de normalizar para cachear después
-        q_llm = llm_normalize_query(conn, company_id, q, tenant_context)
+        q_llm, norm_source = llm_normalize_query(conn, company_id, q, tenant_context)
         if q_llm != q:
             q = q_llm
+
+        # Helper para logging de eventos al final de cada paso
+        def _log_event(status, paso, item=None, confidence=None):
+            _log_query_event(
+                conn, company_id,
+                original_text=user_query,
+                cleaned_text=q_pre_llm,
+                normalized_text=q if q != q_pre_llm else None,
+                normalization_source=norm_source,
+                matched_item_name=(item or {}).get("name"),
+                matched_item_sku=(item or {}).get("sku"),
+                search_status=status,
+                search_paso=paso,
+                confidence_score=confidence,
+                industry=None,  # TODO: fill from company giro
+            )
+            # Si fue found y vino de jerga global, marcar success
+            if status == "found" and norm_source == "global" and q != q_pre_llm:
+                _increment_jerga_usage(conn, q_pre_llm, success=True)
+                _check_auto_promote(conn, q_pre_llm)
 
         # ── PASO -1: Sinónimo global ──────────────────────────────────────────
         q_resolved = resolve_global_synonym(conn, q)
@@ -755,7 +920,9 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                 scored.sort(key=lambda x: x[0], reverse=True)
                 if scored[0][0] >= 70:
                     print(f"GLOBAL SYNONYM ILIKE HIT: '{q_resolved}' → '{scored[0][1][1]}'")
-                    return {"status": "found", "item": _make_item(scored[0][1]), "candidates": []}
+                    item = _make_item(scored[0][1])
+                    _log_event("found", "global_synonym", item, scored[0][0] / 100.0)
+                    return {"status": "found", "item": item, "candidates": []}
             first_token = q_resolved.split()[0] if q_resolved.split() else q_resolved
             if first_token != q_resolved:
                 rows_token = _name_search(first_token)
@@ -764,7 +931,9 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                     scored.sort(key=lambda x: x[0], reverse=True)
                     if scored[0][0] >= 65:
                         print(f"GLOBAL SYNONYM FIRST TOKEN HIT: '{first_token}' → '{scored[0][1][1]}'")
-                        return {"status": "found", "item": _make_item(scored[0][1]), "candidates": []}
+                        item = _make_item(scored[0][1])
+                        _log_event("found", "global_synonym_token", item, scored[0][0] / 100.0)
+                        return {"status": "found", "item": item, "candidates": []}
             print(f"GLOBAL SYNONYM NO HIT: '{q_resolved}' → continuando con q original='{q}'")
 
         # ── PASO 0: Sinónimo exacto en pricebook ─────────────────────────────
@@ -812,7 +981,9 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
             best_score = _best_syn_score(syn_rows[0], q)
             if best_score >= 60:
                 print(f"SYNONYM DIRECT HIT: query='{user_query}' match='{syn_rows[0][1]}' score={best_score}")
-                return {"status": "found", "item": _make_item(syn_rows[0]), "candidates": []}
+                item = _make_item(syn_rows[0])
+                _log_event("found", "synonym_direct", item, best_score / 100.0)
+                return {"status": "found", "item": item, "candidates": []}
         elif len(syn_rows) > 1:
             name_matches = [r for r in syn_rows if q in (r[1] or "").lower()]
             if not name_matches:
@@ -828,7 +999,9 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                         spec_filtered.append(r)
                     if len(spec_filtered) == 1:
                         print(f"SYNONYM SPEC RESOLVED: query='{user_query}' match='{spec_filtered[0][1]}'")
-                        return {"status": "found", "item": _make_item(spec_filtered[0]), "candidates": []}
+                        item = _make_item(spec_filtered[0])
+                        _log_event("found", "synonym_spec", item, 0.9)
+                        return {"status": "found", "item": item, "candidates": []}
                     elif spec_filtered:
                         syn_rows = spec_filtered
                     else:
@@ -851,9 +1024,12 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                     second_s = scored_syns[1][0]
                     if top_s >= 75 and (top_s - second_s) >= 10:
                         print(f"SYNONYM SCORED RESOLVED: query='{user_query}' match='{scored_syns[0][1][1]}' score={top_s} gap={top_s - second_s}")
-                        return {"status": "found", "item": _make_item(scored_syns[0][1]), "candidates": []}
+                        item = _make_item(scored_syns[0][1])
+                        _log_event("found", "synonym_scored", item, top_s / 100.0)
+                        return {"status": "found", "item": item, "candidates": []}
                 if syn_rows:
                     print(f"SYNONYM AMBIGUOUS: query='{user_query}' found={len(syn_rows)}")
+                    _log_event("ambiguous", "synonym_ambiguous")
                     return {"status": "ambiguous", "item": None, "candidates": [_make_item(r) for r in syn_rows]}
                 # syn_rows vacío (specs no coincidieron) → seguir a ILIKE/catalog fallback
 
@@ -883,10 +1059,13 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
             if top >= min_score and gap >= min_gap:
                 r = scored[0][1]
                 print(f"ILIKE RESOLVED: query='{user_query}' match='{r[1]}'")
-                return {"status": "found", "item": _make_item(r), "candidates": []}
+                item = _make_item(r)
+                _log_event("found", "ilike", item, top / 100.0)
+                return {"status": "found", "item": item, "candidates": []}
             q_first_token = q.split()[0] if q.split() else q
             filtered = [(s, r) for s, r in scored[:5] if (r[1] or "").lower().startswith(q_first_token)]
             candidates = filtered if filtered else scored[:5]
+            _log_event("ambiguous", "ilike_ambiguous")
             return {"status": "ambiguous", "item": None, "candidates": [_make_item(r) for _, r in candidates]}
 
         # ── PASO 2: tsvector + fuzzy sobre candidatos + tiebreak ─────────────
@@ -955,6 +1134,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                     print(f"FUZZY UNIQUE SKIPPED (LLM-normalized): query='{user_query}' match='{scored[0][1]['name']}' score={scored[0][0]} → continuando a catalog fallback")
                 else:
                     print(f"FUZZY UNIQUE: query='{user_query}' match='{scored[0][1]['name']}' score={scored[0][0]}")
+                    _log_event("found", "fuzzy_unique", scored[0][1], scored[0][0] / 100.0)
                     return {"status": "found", "item": scored[0][1], "candidates": []}
             else:
                 print(f"FUZZY UNIQUE LOW SCORE: query='{user_query}' match='{scored[0][1]['name']}' score={scored[0][0]} → semántico")
@@ -966,11 +1146,13 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
             min_score = 85 if (q_medida or q_cal) else 95
             if top_score >= min_score and gap >= 10:
                 print(f"FUZZY CLEAR WIN: query='{user_query}' match='{scored[0][1]['name']}' score={top_score}")
+                _log_event("found", "fuzzy_clear", scored[0][1], top_score / 100.0)
                 return {"status": "found", "item": scored[0][1], "candidates": []}
             print(f"FUZZY AMBIGUOUS: query='{user_query}' found={len(scored)}")
             q_first_token = q.split()[0] if q.split() else q
             filtered = [(s, item) for s, item in scored[:5] if (item.get("name") or "").lower().startswith(q_first_token)]
             candidates = filtered if filtered else scored[:5]
+            _log_event("ambiguous", "fuzzy_ambiguous")
             return {"status": "ambiguous", "item": None, "candidates": [item for _, item in candidates]}
 
         # ── PASO 3: Semántico ─────────────────────────────────────────────────
@@ -981,12 +1163,14 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                                                 threshold=cand_threshold, limit=5)
         if candidates and candidates[0].get("similarity", 0) >= 0.60:
             print(f"SEMANTIC CANDIDATES: query='{user_query}' found={len(candidates)}")
+            _log_event("ambiguous", "semantic", None, candidates[0].get("similarity"))
             return {"status": "ambiguous", "item": None, "candidates": candidates}
 
         candidates_low = semantic_search_candidates(conn, company_id, user_query,
                                                     threshold=0.50, limit=3)
         if candidates_low:
             print(f"SEMANTIC LOW THRESHOLD: query='{user_query}' found={len(candidates_low)}")
+            _log_event("ambiguous", "semantic_low", None, candidates_low[0].get("similarity"))
             return {"status": "ambiguous", "item": None, "candidates": candidates_low}
 
         # ── PASO 3.5: GPT Catalog Fallback — el LLM ve el catálogo real ────────
@@ -1000,9 +1184,11 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                     if q != q_pre_llm:
                         _cache_local_mapping(conn, company_id, q, matched["name"])
                     _auto_save_synonym(conn, company_id, q, matched["name"])
+                    _log_event("found", "gpt_catalog", matched, 0.85)
                     return {"status": "found", "item": matched, "candidates": []}
                 else:
                     print(f"GPT CATALOG AMBIGUOUS: query='{user_query}' found={len(fallback_results)}")
+                    _log_event("ambiguous", "gpt_catalog_ambiguous")
                     return {"status": "ambiguous", "item": None, "candidates": fallback_results}
         except Exception as e:
             print(f"GPT CATALOG FALLBACK ERROR: {repr(e)}")
@@ -1032,6 +1218,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
 
         if not suggestions:
             print(f"NOT FOUND: query='{user_query}' → sin sugerencias")
+        _log_event("not_found", "not_found_suggestions" if suggestions else "not_found")
         return {"status": "not_found", "item": None, "candidates": suggestions}
 
     except Exception as e:
