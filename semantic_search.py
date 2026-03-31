@@ -1000,6 +1000,24 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                 "vat_rate": float(r[4]) if r[4] is not None else None,
             }
 
+        # ── Context bonus: use other cart items to disambiguate ───────────
+        # If cart has "ciclonica, concertina, espadas" → boost fence products
+        _ctx_tokens = set()
+        if cart_context:
+            for w in _phonetic(cart_context.lower()).split():
+                if len(w) >= 4 and not w.replace(".", "").isdigit() and w not in {"para", "metros", "metro", "rollos", "rollo", "piezas", "pieza", "bultos", "bulto", "cajas", "caja"}:
+                    _ctx_tokens.add(w)
+        _ctx_stopwords = {"para", "de", "del", "con", "sin", "los", "las", "una"}
+        _ctx_tokens -= _ctx_stopwords
+
+        def _context_bonus(item_name: str) -> int:
+            """Bonus for products sharing tokens with other cart items."""
+            if not _ctx_tokens:
+                return 0
+            name_lower = _phonetic(item_name.lower())
+            hits = sum(1 for t in _ctx_tokens if t in name_lower)
+            return min(hits * 10, 30)  # max 30 bonus from context
+
         q_medida, q_cal = _extract_specs(q)
 
         # ── PASO -1 + 0.5: Normalización LLM de jerga ────────────────────────
@@ -1211,7 +1229,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
             for r in pool_rows:
                 name = _phonetic((r[1] or "").lower())
                 base = max(fuzz.token_set_ratio(q, name), fuzz.partial_ratio(q, name))
-                bonus = _spec_bonus(r[1], q_medida, q_cal)
+                bonus = _spec_bonus(r[1], q_medida, q_cal) + _context_bonus(r[1] or "")
                 scored.append((base + bonus, r))
 
             scored = [(_tiebreak(s, r), r) for s, r in scored]
@@ -1309,7 +1327,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
             name_score = max(fuzz.token_set_ratio(q, name), fuzz.partial_ratio(q, name))
             if name_score < base - 20:
                 base = name_score
-            bonus = _spec_bonus(r[1], q_medida, q_cal)
+            bonus = _spec_bonus(r[1], q_medida, q_cal) + _context_bonus(r[1] or "")
             total = base + bonus
             if total >= 80:
                 item = {
