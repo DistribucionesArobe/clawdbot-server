@@ -1189,11 +1189,22 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
         pool_rows = _name_search(q)
         if not pool_rows and q.endswith("s") and len(q) > 3:
             pool_rows = _name_search(q[:-1])
-        # Fallback: search first significant token (not bare medida like "2")
+        # Fallback: search ALL significant tokens and merge results.
+        # E.g. "rollos malla ciclonica" → try "rollos", "malla", "ciclonica"
+        # This ensures "Malla ciclonica" is found even if "rollos" only matches láminas.
         if not pool_rows:
-            _first_sig = next((t for t in q_tokens if len(t) >= 3), None)
-            if _first_sig:
-                pool_rows = _name_search(_first_sig)
+            _seen_skus = set()
+            _merged = []
+            for _tok in q_tokens:
+                if len(_tok) >= 3 and not _tok.replace(".", "").isdigit():
+                    _tok_rows = _name_search(_tok)
+                    for r in _tok_rows:
+                        if r[0] not in _seen_skus:
+                            _seen_skus.add(r[0])
+                            _merged.append(r)
+            pool_rows = _merged
+            if pool_rows:
+                print(f">>> MULTI-TOKEN FALLBACK: {len(pool_rows)} rows from tokens {[t for t in q_tokens if len(t)>=3 and not t.replace('.','').isdigit()]}")
 
         if pool_rows:
             scored = []
