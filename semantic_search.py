@@ -8,8 +8,13 @@ Novedades vs v8:
 
 import re
 import os
+import unicodedata
 from typing import Optional
 from openai import OpenAI
+
+def _strip_accents(s: str) -> str:
+    """Remove accents: 'listón' → 'liston'"""
+    return "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
 
 OPENAI_API_KEY = (os.getenv("OPENAI_API_KEY") or "").strip()
 openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
@@ -1060,53 +1065,65 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                 _log_event("found", "synonym_direct", item, best_score / 100.0)
                 return {"status": "found", "item": item, "candidates": []}
         elif len(syn_rows) > 1:
-            name_matches = [r for r in syn_rows if q in (r[1] or "").lower()]
-            if not name_matches:
-                # Filtrar por specs si el cliente especificó medida/calibre
-                if q_medida or q_cal:
-                    spec_filtered = []
-                    for r in syn_rows:
-                        n = (r[1] or "").lower()
-                        if q_medida and q_medida not in n:
-                            continue
-                        if q_cal and not _re.search(rf"\bcal(?:ibre)?\s*{q_cal}\b", n):
-                            continue
-                        spec_filtered.append(r)
-                    if len(spec_filtered) == 1:
-                        print(f"SYNONYM SPEC RESOLVED: query='{user_query}' match='{spec_filtered[0][1]}'")
-                        item = _make_item(spec_filtered[0])
-                        _log_event("found", "synonym_spec", item, 0.9)
-                        return {"status": "found", "item": item, "candidates": []}
-                    elif spec_filtered:
-                        syn_rows = spec_filtered
-                    else:
-                        # Specs no coinciden con ningún producto — no mostrar opciones irrelevantes.
-                        # Dejar que siga a los siguientes pasos (ILIKE, fuzzy, catalog fallback).
-                        print(f"SYNONYM SPEC NO MATCH: query='{user_query}' specs=({q_medida},{q_cal}) → skipping synonym ambiguous")
-                        syn_rows = []
-                # Fuzzy scoring con query completa para desempatar
-                # (usa palabras como "gris", "framer", "1/2" que diferencian)
-                # Compara contra nombre Y sinónimos para no penalizar productos
-                # cuyo nombre es diferente al sinónimo que matcheó.
+            # 1) Narrow by name containment (accent-insensitive)
+            _q_plain = _strip_accents(q)
+            name_matches = [r for r in syn_rows if _q_plain in _strip_accents((r[1] or "").lower())]
+            if name_matches and len(name_matches) < len(syn_rows):
+                print(f"SYNONYM NAME FILTER: {len(syn_rows)} → {len(name_matches)} (query='{q}' in name)")
+                syn_rows = name_matches
+
+            # 2) Filter by specs if the user specified medida/calibre
+            if q_medida or q_cal:
+                spec_filtered = []
+                for r in syn_rows:
+                    n = (r[1] or "").lower()
+                    if q_medida and q_medida not in n:
+                        continue
+                    if q_cal and not _re.search(rf"\bcal(?:ibre)?\s*{q_cal}\b", n):
+                        continue
+                    spec_filtered.append(r)
+                if len(spec_filtered) == 1:
+                    print(f"SYNONYM SPEC RESOLVED: query='{user_query}' match='{spec_filtered[0][1]}'")
+                    item = _make_item(spec_filtered[0])
+                    _log_event("found", "synonym_spec", item, 0.9)
+                    return {"status": "found", "item": item, "candidates": []}
+                elif spec_filtered:
+                    syn_rows = spec_filtered
+                else:
+                    print(f"SYNONYM SPEC NO MATCH: query='{user_query}' specs=({q_medida},{q_cal}) → skipping synonym ambiguous")
+                    syn_rows = []
+
+            # 3) If narrowed to 1, resolve directly
+            if len(syn_rows) == 1:
+                best_score = _best_syn_score(syn_rows[0], q)
+                if best_score >= 60:
+                    print(f"SYNONYM NARROWED HIT: query='{user_query}' match='{syn_rows[0][1]}' score={best_score}")
+                    item = _make_item(syn_rows[0])
+                    _log_event("found", "synonym_narrowed", item, best_score / 100.0)
+                    return {"status": "found", "item": item, "candidates": []}
+
+            # 4) Fuzzy scoring to try to resolve a clear winner
+            if len(syn_rows) >= 2:
                 scored_syns = []
                 for r in syn_rows:
                     base = _best_syn_score(r, q)
                     bonus = _spec_bonus(r[1], q_medida, q_cal)
                     scored_syns.append((base + bonus, r))
                 scored_syns.sort(key=lambda x: x[0], reverse=True)
-                if len(scored_syns) >= 2:
-                    top_s = scored_syns[0][0]
-                    second_s = scored_syns[1][0]
-                    if top_s >= 75 and (top_s - second_s) >= 10:
-                        print(f"SYNONYM SCORED RESOLVED: query='{user_query}' match='{scored_syns[0][1][1]}' score={top_s} gap={top_s - second_s}")
-                        item = _make_item(scored_syns[0][1])
-                        _log_event("found", "synonym_scored", item, top_s / 100.0)
-                        return {"status": "found", "item": item, "candidates": []}
-                if syn_rows:
-                    print(f"SYNONYM AMBIGUOUS: query='{user_query}' found={len(syn_rows)}")
-                    _log_event("ambiguous", "synonym_ambiguous")
-                    return {"status": "ambiguous", "item": None, "candidates": [_make_item(r) for r in syn_rows]}
-                # syn_rows vacío (specs no coincidieron) → seguir a ILIKE/catalog fallback
+                top_s = scored_syns[0][0]
+                second_s = scored_syns[1][0]
+                if top_s >= 75 and (top_s - second_s) >= 10:
+                    print(f"SYNONYM SCORED RESOLVED: query='{user_query}' match='{scored_syns[0][1][1]}' score={top_s} gap={top_s - second_s}")
+                    item = _make_item(scored_syns[0][1])
+                    _log_event("found", "synonym_scored", item, top_s / 100.0)
+                    return {"status": "found", "item": item, "candidates": []}
+
+            # 5) Still ambiguous — return candidates for clarification
+            if syn_rows:
+                print(f"SYNONYM AMBIGUOUS: query='{user_query}' found={len(syn_rows)}")
+                _log_event("ambiguous", "synonym_ambiguous")
+                return {"status": "ambiguous", "item": None, "candidates": [_make_item(r) for r in syn_rows]}
+            # syn_rows vacío (specs no coincidieron) → seguir a ILIKE/catalog fallback
 
         # ── PASO 1: ILIKE directo + ranking con bonus de specs + tiebreak ─────
         pool_rows = _name_search(q)
