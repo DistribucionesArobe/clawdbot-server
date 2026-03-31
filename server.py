@@ -4925,3 +4925,437 @@ def empresa_onboarding_status(request: Request):
     finally:
         if cur: cur.close()
         if conn: conn.close()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ADMIN PANEL — God mode para CotizaExpress (solo cuentas admin)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+ADMIN_EMAILS = {"ealejandro.robledo@gmail.com"}
+
+def _require_admin(request: Request):
+    """Verifica que el usuario logueado sea admin de CotizaExpress."""
+    u = get_user_from_session(request)
+    if u["email"].lower() not in ADMIN_EMAILS:
+        raise HTTPException(status_code=403, detail="No autorizado")
+    return u
+
+
+@app.get("/api/admin/stats/overview")
+def admin_stats_overview(request: Request):
+    """Dashboard overview: totales, búsquedas recientes, tasa de éxito."""
+    _require_admin(request)
+    conn = None; cur = None
+    try:
+        conn = get_conn(); cur = conn.cursor()
+
+        # Total companies activas (con productos)
+        cur.execute("SELECT COUNT(DISTINCT company_id) FROM pricebook_items")
+        total_companies = cur.fetchone()[0]
+
+        # Total productos
+        cur.execute("SELECT COUNT(*) FROM pricebook_items")
+        total_products = cur.fetchone()[0]
+
+        # Query events stats (últimos 7 días)
+        cur.execute("""
+            SELECT
+                COUNT(*) as total,
+                COUNT(*) FILTER (WHERE search_status = 'found') as found,
+                COUNT(*) FILTER (WHERE search_status = 'ambiguous') as ambiguous,
+                COUNT(*) FILTER (WHERE search_status = 'not_found') as not_found
+            FROM query_events
+            WHERE created_at > NOW() - INTERVAL '7 days'
+        """)
+        row = cur.fetchone()
+        total_queries = row[0] or 0
+        found_queries = row[1] or 0
+        ambiguous_queries = row[2] or 0
+        not_found_queries = row[3] or 0
+        success_rate = round(found_queries / max(total_queries, 1) * 100, 1)
+
+        # Queries hoy
+        cur.execute("""
+            SELECT COUNT(*) FROM query_events
+            WHERE created_at > NOW() - INTERVAL '1 day'
+        """)
+        queries_today = cur.fetchone()[0] or 0
+
+        # Total jerga global
+        cur.execute("SELECT COUNT(*) FROM diccionario_jerga_global")
+        total_jerga = cur.fetchone()[0]
+
+        # Jerga auto-promovida
+        cur.execute("""
+            SELECT COUNT(*) FROM diccionario_jerga_global
+            WHERE is_protected = TRUE AND source != 'seed'
+        """)
+        auto_promoted = cur.fetchone()[0]
+
+        # Total conversaciones WhatsApp
+        cur.execute("SELECT COUNT(*) FROM conversations")
+        total_conversations = cur.fetchone()[0]
+
+        return {
+            "ok": True,
+            "stats": {
+                "total_companies": total_companies,
+                "total_products": total_products,
+                "total_conversations": total_conversations,
+                "total_jerga": total_jerga,
+                "auto_promoted_jerga": auto_promoted,
+                "queries_7d": {
+                    "total": total_queries,
+                    "found": found_queries,
+                    "ambiguous": ambiguous_queries,
+                    "not_found": not_found_queries,
+                    "success_rate": success_rate,
+                },
+                "queries_today": queries_today,
+            },
+        }
+    except Exception as e:
+        print(f"ADMIN STATS ERROR: {repr(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
+
+
+@app.get("/api/admin/stats/top-errors")
+def admin_top_errors(request: Request, days: int = 7, limit: int = 20):
+    """Top búsquedas que terminaron en not_found — dónde falla el bot."""
+    _require_admin(request)
+    conn = None; cur = None
+    try:
+        conn = get_conn(); cur = conn.cursor()
+        cur.execute("""
+            SELECT
+                original_text,
+                normalized_text,
+                normalization_source,
+                COUNT(*) as count,
+                MIN(created_at) as first_seen,
+                MAX(created_at) as last_seen
+            FROM query_events
+            WHERE search_status = 'not_found'
+              AND created_at > NOW() - INTERVAL '%s days'
+            GROUP BY original_text, normalized_text, normalization_source
+            ORDER BY count DESC
+            LIMIT %s
+        """, (days, limit))
+        rows = cur.fetchall()
+        errors = []
+        for r in rows:
+            errors.append({
+                "original_text": r[0],
+                "normalized_text": r[1],
+                "normalization_source": r[2],
+                "count": r[3],
+                "first_seen": r[4].isoformat() if r[4] else None,
+                "last_seen": r[5].isoformat() if r[5] else None,
+            })
+        return {"ok": True, "errors": errors}
+    except Exception as e:
+        print(f"ADMIN TOP ERRORS: {repr(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
+
+
+@app.get("/api/admin/stats/top-searches")
+def admin_top_searches(request: Request, days: int = 7, limit: int = 30):
+    """Top búsquedas exitosas — qué piden más los clientes."""
+    _require_admin(request)
+    conn = None; cur = None
+    try:
+        conn = get_conn(); cur = conn.cursor()
+        cur.execute("""
+            SELECT
+                original_text,
+                normalized_text,
+                matched_item_name,
+                search_paso,
+                COUNT(*) as count,
+                ROUND(AVG(confidence_score)::numeric, 2) as avg_confidence
+            FROM query_events
+            WHERE search_status = 'found'
+              AND created_at > NOW() - INTERVAL '%s days'
+            GROUP BY original_text, normalized_text, matched_item_name, search_paso
+            ORDER BY count DESC
+            LIMIT %s
+        """, (days, limit))
+        rows = cur.fetchall()
+        searches = []
+        for r in rows:
+            searches.append({
+                "original_text": r[0],
+                "normalized_text": r[1],
+                "matched_item": r[2],
+                "paso": r[3],
+                "count": r[4],
+                "avg_confidence": float(r[5]) if r[5] else None,
+            })
+        return {"ok": True, "searches": searches}
+    except Exception as e:
+        print(f"ADMIN TOP SEARCHES: {repr(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
+
+
+@app.get("/api/admin/stats/by-company")
+def admin_stats_by_company(request: Request, days: int = 7):
+    """Stats por empresa — quién usa más, quién tiene más errores."""
+    _require_admin(request)
+    conn = None; cur = None
+    try:
+        conn = get_conn(); cur = conn.cursor()
+        cur.execute("""
+            SELECT
+                qe.company_id,
+                c.name as company_name,
+                COUNT(*) as total,
+                COUNT(*) FILTER (WHERE qe.search_status = 'found') as found,
+                COUNT(*) FILTER (WHERE qe.search_status = 'not_found') as not_found,
+                COUNT(*) FILTER (WHERE qe.search_status = 'ambiguous') as ambiguous
+            FROM query_events qe
+            LEFT JOIN companies c ON c.id = qe.company_id
+            WHERE qe.created_at > NOW() - INTERVAL '%s days'
+            GROUP BY qe.company_id, c.name
+            ORDER BY total DESC
+        """, (days,))
+        rows = cur.fetchall()
+        companies = []
+        for r in rows:
+            total = r[2] or 1
+            companies.append({
+                "company_id": str(r[0]),
+                "name": r[1] or "Sin nombre",
+                "total": r[2],
+                "found": r[3],
+                "not_found": r[4],
+                "ambiguous": r[5],
+                "success_rate": round((r[3] or 0) / total * 100, 1),
+            })
+        return {"ok": True, "companies": companies}
+    except Exception as e:
+        print(f"ADMIN BY COMPANY: {repr(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
+
+
+@app.get("/api/admin/jerga")
+def admin_jerga_list(request: Request, page: int = 1, per_page: int = 50):
+    """Lista la jerga global con stats de uso."""
+    _require_admin(request)
+    conn = None; cur = None
+    try:
+        conn = get_conn(); cur = conn.cursor()
+        offset = (max(page, 1) - 1) * per_page
+
+        cur.execute("SELECT COUNT(*) FROM diccionario_jerga_global")
+        total = cur.fetchone()[0]
+
+        cur.execute("""
+            SELECT
+                termino_original,
+                termino_normalizado,
+                is_protected,
+                usage_count,
+                success_count,
+                CASE WHEN usage_count > 0
+                     THEN ROUND((success_count::numeric / usage_count) * 100, 1)
+                     ELSE 0 END as confidence,
+                industry,
+                source
+            FROM diccionario_jerga_global
+            ORDER BY usage_count DESC, termino_original ASC
+            LIMIT %s OFFSET %s
+        """, (per_page, offset))
+        rows = cur.fetchall()
+        jerga = []
+        for r in rows:
+            jerga.append({
+                "termino_original": r[0],
+                "termino_normalizado": r[1],
+                "is_protected": r[2],
+                "usage_count": r[3],
+                "success_count": r[4],
+                "confidence": float(r[5]) if r[5] else 0,
+                "industry": r[6],
+                "source": r[7],
+            })
+        return {"ok": True, "jerga": jerga, "total": total, "page": page, "per_page": per_page}
+    except Exception as e:
+        print(f"ADMIN JERGA LIST: {repr(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
+
+
+class AdminJergaUpdate(BaseModel):
+    termino_original: str
+    termino_normalizado: Optional[str] = None
+    is_protected: Optional[bool] = None
+    industry: Optional[str] = None
+
+@app.put("/api/admin/jerga")
+def admin_jerga_update(request: Request, body: AdminJergaUpdate):
+    """Actualizar/proteger/corregir un término de jerga."""
+    _require_admin(request)
+    conn = None; cur = None
+    try:
+        conn = get_conn(); cur = conn.cursor()
+        updates = []
+        params = []
+        if body.termino_normalizado is not None:
+            updates.append("termino_normalizado = %s")
+            params.append(body.termino_normalizado.strip().lower())
+        if body.is_protected is not None:
+            updates.append("is_protected = %s")
+            params.append(body.is_protected)
+        if body.industry is not None:
+            updates.append("industry = %s")
+            params.append(body.industry.strip() or None)
+        if not updates:
+            raise HTTPException(status_code=400, detail="Nada que actualizar")
+        updates.append("source = 'admin'")
+        params.append(body.termino_original.strip().lower())
+        cur.execute(
+            f"UPDATE diccionario_jerga_global SET {', '.join(updates)} WHERE termino_original = %s",
+            tuple(params),
+        )
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Término no encontrado")
+        return {"ok": True, "updated": body.termino_original}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"ADMIN JERGA UPDATE: {repr(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
+
+
+class AdminJergaCreate(BaseModel):
+    termino_original: str
+    termino_normalizado: str
+    industry: Optional[str] = None
+
+@app.post("/api/admin/jerga")
+def admin_jerga_create(request: Request, body: AdminJergaCreate):
+    """Crear nuevo término de jerga protegido manualmente."""
+    _require_admin(request)
+    conn = None; cur = None
+    try:
+        conn = get_conn(); cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO diccionario_jerga_global "
+            "(termino_original, termino_normalizado, is_protected, source, industry) "
+            "VALUES (%s, %s, TRUE, 'admin', %s) "
+            "ON CONFLICT (termino_original) DO UPDATE "
+            "SET termino_normalizado = EXCLUDED.termino_normalizado, "
+            "    is_protected = TRUE, source = 'admin', "
+            "    industry = EXCLUDED.industry",
+            (body.termino_original.strip().lower(),
+             body.termino_normalizado.strip().lower(),
+             (body.industry or "").strip() or None),
+        )
+        return {"ok": True, "created": body.termino_original}
+    except Exception as e:
+        print(f"ADMIN JERGA CREATE: {repr(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
+
+
+@app.delete("/api/admin/jerga/{termino}")
+def admin_jerga_delete(request: Request, termino: str):
+    """Eliminar término de jerga global."""
+    _require_admin(request)
+    conn = None; cur = None
+    try:
+        conn = get_conn(); cur = conn.cursor()
+        cur.execute(
+            "DELETE FROM diccionario_jerga_global WHERE termino_original = %s",
+            (termino.strip().lower(),),
+        )
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Término no encontrado")
+        return {"ok": True, "deleted": termino}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"ADMIN JERGA DELETE: {repr(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
+
+
+@app.get("/api/admin/query-log")
+def admin_query_log(request: Request, days: int = 1, limit: int = 100,
+                    status: Optional[str] = None, company_id: Optional[str] = None):
+    """Log detallado de búsquedas recientes."""
+    _require_admin(request)
+    conn = None; cur = None
+    try:
+        conn = get_conn(); cur = conn.cursor()
+        where = ["qe.created_at > NOW() - INTERVAL '%s days'"]
+        params = [days]
+        if status:
+            where.append("qe.search_status = %s")
+            params.append(status)
+        if company_id:
+            where.append("qe.company_id = %s::uuid")
+            params.append(company_id)
+        params.append(limit)
+
+        cur.execute(f"""
+            SELECT
+                qe.original_text,
+                qe.cleaned_text,
+                qe.normalized_text,
+                qe.normalization_source,
+                qe.matched_item_name,
+                qe.search_status,
+                qe.search_paso,
+                qe.confidence_score,
+                qe.created_at,
+                c.name as company_name
+            FROM query_events qe
+            LEFT JOIN companies c ON c.id = qe.company_id
+            WHERE {' AND '.join(where)}
+            ORDER BY qe.created_at DESC
+            LIMIT %s
+        """, tuple(params))
+        rows = cur.fetchall()
+        events = []
+        for r in rows:
+            events.append({
+                "original_text": r[0],
+                "cleaned_text": r[1],
+                "normalized_text": r[2],
+                "normalization_source": r[3],
+                "matched_item": r[4],
+                "status": r[5],
+                "paso": r[6],
+                "confidence": float(r[7]) if r[7] else None,
+                "created_at": r[8].isoformat() if r[8] else None,
+                "company": r[9],
+            })
+        return {"ok": True, "events": events}
+    except Exception as e:
+        print(f"ADMIN QUERY LOG: {repr(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
