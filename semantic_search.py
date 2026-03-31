@@ -1069,11 +1069,20 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
 
         if len(syn_rows) == 1:
             best_score = _best_syn_score(syn_rows[0], q)
-            if best_score >= 60:
-                print(f"SYNONYM DIRECT HIT: query='{user_query}' match='{syn_rows[0][1]}' score={best_score}")
+            # Sanity check: at least one key query token (>3 chars) must appear
+            # in the product name or synonyms to avoid false positives like
+            # "ciclónica" matching "lamina en rollo" just because of shared "rollo"/"cal"
+            _prod_text = _strip_accents(((syn_rows[0][1] or "") + " " + (syn_rows[0][5] if len(syn_rows[0]) > 5 else "") or "").lower())
+            _key_tokens = [t for t in q.split() if len(t) > 3 and not t.replace(".", "").isdigit()]
+            _token_overlap = sum(1 for t in _key_tokens if t in _prod_text)
+            _overlap_ratio = _token_overlap / max(len(_key_tokens), 1)
+            if best_score >= 60 and (not _key_tokens or _overlap_ratio >= 0.3):
+                print(f"SYNONYM DIRECT HIT: query='{user_query}' match='{syn_rows[0][1]}' score={best_score} overlap={_overlap_ratio:.0%}")
                 item = _make_item(syn_rows[0])
                 _log_event("found", "synonym_direct", item, best_score / 100.0)
                 return {"status": "found", "item": item, "candidates": []}
+            else:
+                print(f"SYNONYM DIRECT REJECTED (low overlap): query='{user_query}' match='{syn_rows[0][1]}' score={best_score} overlap={_overlap_ratio:.0%} key_tokens={_key_tokens}")
         elif len(syn_rows) > 1:
             # 1) Narrow by name containment (accent-insensitive)
             _q_plain = _strip_accents(q)
@@ -1139,8 +1148,11 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
         pool_rows = _name_search(q)
         if not pool_rows and q.endswith("s") and len(q) > 3:
             pool_rows = _name_search(q[:-1])
-        if not pool_rows and q_medida:
-            pool_rows = _name_search(q_medida)
+        # Fallback: search first significant token (not bare medida like "2")
+        if not pool_rows:
+            _first_sig = next((t for t in q_tokens if len(t) >= 3), None)
+            if _first_sig:
+                pool_rows = _name_search(_first_sig)
 
         if pool_rows:
             scored = []
@@ -1160,10 +1172,17 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
             min_gap = 15 if (q_medida or q_cal) else 8
             if top >= min_score and gap >= min_gap:
                 r = scored[0][1]
-                print(f"ILIKE RESOLVED: query='{user_query}' match='{r[1]}'")
-                item = _make_item(r)
-                _log_event("found", "ilike", item, top / 100.0)
-                return {"status": "found", "item": item, "candidates": []}
+                # Sanity: verify key query tokens overlap with product name
+                _ilike_name = _strip_accents((r[1] or "").lower())
+                _ilike_key = [t for t in q_tokens if len(t) > 3 and not t.replace(".", "").isdigit()]
+                _ilike_overlap = sum(1 for t in _ilike_key if t in _ilike_name) / max(len(_ilike_key), 1)
+                if not _ilike_key or _ilike_overlap >= 0.3:
+                    print(f"ILIKE RESOLVED: query='{user_query}' match='{r[1]}' overlap={_ilike_overlap:.0%}")
+                    item = _make_item(r)
+                    _log_event("found", "ilike", item, top / 100.0)
+                    return {"status": "found", "item": item, "candidates": []}
+                else:
+                    print(f"ILIKE REJECTED (low overlap): query='{user_query}' match='{r[1]}' score={top} overlap={_ilike_overlap:.0%} key={_ilike_key}")
             q_first_token = q.split()[0] if q.split() else q
             filtered = [(s, r) for s, r in scored[:5] if _strip_accents((r[1] or "").lower()).startswith(q_first_token)]
             candidates = filtered if filtered else scored[:5]
