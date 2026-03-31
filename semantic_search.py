@@ -319,6 +319,18 @@ def seed_jerga_global(conn):
         ("tornillo para taquete", "pija para taquete"),
         ("tornillo pa taquete", "pija para taquete"),
         ("tornillos para taquete", "pija para taquete"),
+        # Tablaroca / hojas
+        ("hojas", "tablaroca"),
+        ("hoja", "tablaroca"),
+        ("hojas tablaroca", "tablaroca"),
+        ("hojas de tablaroca", "tablaroca"),
+        ("laminas tablaroca", "tablaroca"),
+        # Canaletas / cargadoras
+        ("cargadoras", "canaleta de carga"),
+        ("cargadora", "canaleta de carga"),
+        ("canaleta carga", "canaleta de carga"),
+        ("canaletas de carga", "canaleta de carga"),
+        ("canaletas carga", "canaleta de carga"),
     ]
     try:
         cur = conn.cursor()
