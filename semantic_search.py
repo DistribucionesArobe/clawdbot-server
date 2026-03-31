@@ -36,10 +36,20 @@ def build_query_text(user_input: str) -> str:
     t = re.sub(r"(\d+)\s*/\s*(\d+)", r"\1/\2", t)
     noise_intent = r"\b(cotiza|cotizame|dame|quiero|necesito|por favor|porfa|pls|precio|precios)\b"
     t = re.sub(noise_intent, " ", t)
+
+    # Preservar "N metro(s)" como spec de medida antes de quitar unidades noise.
+    # Convertimos "de 2 metros" / "2 metros" / "2 metro" → "2_metro" para protegerlo.
+    t = re.sub(r"\bde\s+(\d+(?:\.\d+)?)\s*(?:metros?|mts?|m)\b", r"\1_metro", t)
+    t = re.sub(r"\b(\d+(?:\.\d+)?)\s*(?:metros?|mts?|m)\b", r"\1_metro", t)
+
     noise_units = r"\b(cubeta|cubetas|bulto|bultos|bolsa|bolsas|rollo|rollos|pieza|piezas|metro|metros|kilo|kilos|kilogramo|kilogramos|litro|litros|par|pares|juego|juegos|caja|cajas|saco|sacos|bote|botes|lata|latas|tubo|tubos|tira|tiras|hoja|hojas)\b"
     t = re.sub(noise_units, " ", t)
     t = re.sub(r"^\s*\d+\s+", "", t)
     t = re.sub(r"(?<![/\d.])(\b\d\b)(?![/\d.])", " ", t)
+
+    # Restaurar "N_metro" → "N metro" para que sea buscable en catálogo
+    t = re.sub(r"(\d+(?:\.\d+)?)_metro", r"\1 metro", t)
+
     t = re.sub(r"\s+", " ", t).strip()
     if not t:
         t = (user_input or "").lower().strip()
@@ -469,6 +479,13 @@ def seed_jerga_global(conn):
         ("canaleta carga", "canaleta de carga"),
         ("canaletas de carga", "canaleta de carga"),
         ("canaletas carga", "canaleta de carga"),
+        # Rejas / rejacero
+        ("reja", "rejacero"),
+        ("rejas", "rejacero"),
+        ("reja blanca", "rejacero blanca"),
+        ("rejas blancas", "rejacero blanca"),
+        ("reja negra", "rejacero negra"),
+        ("rejas negras", "rejacero negra"),
     ]
     try:
         cur = conn.cursor()
@@ -553,6 +570,39 @@ def llm_normalize_query(conn, company_id: str, user_query: str, tenant_context: 
             return row[0], "global"
     except Exception as e:
         print(f"JERGA GLOBAL ERROR: {repr(e)}")
+
+    # 2.5. Reemplazo parcial: si la query tiene specs (ej "rejas blancas 2 metro"),
+    # buscar sub-frases en la jerga global y reemplazarlas, conservando el resto.
+    try:
+        words = q.split()
+        if len(words) >= 2:
+            cur = conn.cursor()
+            best_match = None
+            best_len = 0
+            # Probar sub-frases de más larga a más corta (greedy)
+            for size in range(min(len(words), 4), 0, -1):
+                for start in range(len(words) - size + 1):
+                    sub = " ".join(words[start:start + size])
+                    cur.execute(
+                        "SELECT termino_normalizado FROM diccionario_jerga_global WHERE termino_original = %s LIMIT 1",
+                        (sub,),
+                    )
+                    row = cur.fetchone()
+                    if row and len(sub) > best_len:
+                        best_match = (sub, row[0], start, size)
+                        best_len = len(sub)
+                if best_match:
+                    break  # Encontramos la sub-frase más larga que matchea
+            cur.close()
+            if best_match:
+                orig_sub, norm_sub, start, size = best_match
+                new_words = words[:start] + norm_sub.split() + words[start + size:]
+                result = " ".join(new_words)
+                print(f"JERGA GLOBAL PARTIAL: '{q}' → '{result}' (replaced '{orig_sub}' → '{norm_sub}')")
+                _increment_jerga_usage(conn, orig_sub, success=False)
+                return result, "global"
+    except Exception as e:
+        print(f"JERGA GLOBAL PARTIAL ERROR: {repr(e)}")
 
     # 3. Llamar LLM y guardar en global (solo si validado contra catálogo)
     if not openai_client:
@@ -834,9 +884,15 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
             m_cal = _re.search(r"\bcal(?:ibre)?\s*(\d+)\b", t)
             if m_cal:
                 cal = m_cal.group(1)
-            m_med = _re.search(r"\b(\d+\.\d+)\b", t)
-            if m_med:
-                medida = m_med.group(1)
+            # Match "N metro" patterns first (e.g., "2 metro", "2.50 metro")
+            m_metro = _re.search(r"\b(\d+(?:\.\d+)?)\s*metros?\b", t)
+            if m_metro:
+                medida = m_metro.group(1)
+            else:
+                # Fallback: any decimal number (e.g., "2.50" in product names)
+                m_med = _re.search(r"\b(\d+\.\d+)\b", t)
+                if m_med:
+                    medida = m_med.group(1)
             return medida, cal
 
         def _spec_bonus(item_name, medida, cal):
