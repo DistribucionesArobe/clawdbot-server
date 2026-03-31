@@ -5238,6 +5238,16 @@ def _require_admin(request: Request):
     return u
 
 
+@app.delete("/api/admin/quote-state/{wa_from}")
+def admin_clear_quote_state(wa_from: str, request: Request):
+    """Clear a stuck quote state for a given WhatsApp number."""
+    _require_admin(request)
+    # Use Aceromax company_id by default (only tenant currently)
+    company_id = "30208e3c-70c6-4203-97d9-172fad7d3c75"
+    clear_quote_state(company_id, wa_from)
+    return {"ok": True, "cleared": wa_from}
+
+
 @app.get("/api/admin/stats/overview")
 def admin_stats_overview(request: Request):
     """Dashboard overview: totales, búsquedas recientes, tasa de éxito."""

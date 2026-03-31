@@ -16,6 +16,25 @@ def _strip_accents(s: str) -> str:
     """Remove accents: 'listón' → 'liston'"""
     return "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
 
+
+def _singulars_es(word: str):
+    """Return possible singular forms of a Spanish word.
+    rollos→rollo, tubos→tubo, abrazaderas→abrazadera,
+    conectores→conector, soleras→solera.
+    Returns list of candidates (may include original)."""
+    w = word.lower().strip()
+    forms = []
+    if w.endswith("es") and len(w) > 4:
+        base = w[:-2]       # conectores → conector
+        base_s = w[:-1]     # soleras   → solera  (vowel+s case)
+        if base and base[-1] not in "aeiou":
+            forms.append(base)       # consonant+es → remove "es"
+        forms.append(base_s)         # always try just removing "s"
+    elif w.endswith("s") and len(w) > 3:
+        forms.append(w[:-1])         # rollos → rollo
+    return forms
+
+
 OPENAI_API_KEY = (os.getenv("OPENAI_API_KEY") or "").strip()
 openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
@@ -881,9 +900,6 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
             c = conn.cursor()
             term_plain = _strip_accents(term)
             try:
-                c.execute("SELECT count(*) FROM pricebook_items WHERE company_id = %s", (company_id,))
-                cnt = c.fetchone()[0]
-                print(f">>> DEBUG: company_id='{company_id}' total_rows={cnt}")
                 c.execute(
                     """SELECT sku, name, unit, price, vat_rate FROM pricebook_items
                        WHERE company_id = %s
@@ -892,8 +908,24 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                     (company_id, f"%{term_plain}%"),
                 )
                 rows = c.fetchall()
-                print(f">>> _name_search('{term}') → {len(rows)} rows: {[r[1] for r in rows]}")
-                return rows
+                if rows:
+                    print(f">>> _name_search('{term}') → {len(rows)} rows: {[r[1] for r in rows]}")
+                    return rows
+                # Try singular forms: rollos→rollo, conectores→conector, etc.
+                for singular in _singulars_es(term_plain):
+                    c.execute(
+                        """SELECT sku, name, unit, price, vat_rate FROM pricebook_items
+                           WHERE company_id = %s
+                             AND lower(translate(COALESCE(name,''), 'áéíóúÁÉÍÓÚñÑ', 'aeiouAEIOUnN')) LIKE lower(%s)
+                           LIMIT 10""",
+                        (company_id, f"%{singular}%"),
+                    )
+                    rows = c.fetchall()
+                    if rows:
+                        print(f">>> _name_search('{term}') singular='{singular}' → {len(rows)} rows: {[r[1] for r in rows]}")
+                        return rows
+                print(f">>> _name_search('{term}') → 0 rows")
+                return []
             except Exception as e:
                 print(f">>> _name_search ERROR: {repr(e)}")
                 return []
@@ -1183,6 +1215,24 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                     return {"status": "found", "item": item, "candidates": []}
                 else:
                     print(f"ILIKE REJECTED (low overlap): query='{user_query}' match='{r[1]}' score={top} overlap={_ilike_overlap:.0%} key={_ilike_key}")
+            # Try spec-based narrowing before returning ambiguous
+            if q_medida or q_cal:
+                _ilike_spec = []
+                for s, r in scored:
+                    n = (r[1] or "").lower()
+                    if q_medida and q_medida not in n:
+                        continue
+                    if q_cal and not _re.search(rf"\bcal(?:ibre)?\s*{q_cal}\b", n):
+                        continue
+                    _ilike_spec.append((s, r))
+                if len(_ilike_spec) == 1:
+                    print(f"ILIKE SPEC RESOLVED: query='{user_query}' match='{_ilike_spec[0][1][1]}'")
+                    item = _make_item(_ilike_spec[0][1])
+                    _log_event("found", "ilike_spec", item, _ilike_spec[0][0] / 100.0)
+                    return {"status": "found", "item": item, "candidates": []}
+                elif _ilike_spec:
+                    scored = _ilike_spec
+
             q_first_token = q.split()[0] if q.split() else q
             filtered = [(s, r) for s, r in scored[:5] if _strip_accents((r[1] or "").lower()).startswith(q_first_token)]
             candidates = filtered if filtered else scored[:5]
@@ -1247,18 +1297,19 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
         scored.sort(key=lambda x: x[0], reverse=True)
 
         if len(scored) == 1:
-            if scored[0][0] >= 92:
-                # Si query fue LLM-normalizada, el término genérico matchea
-                # vagamente con cualquier producto de la misma categoría.
-                # No confiar en fuzzy único → dejar que catalog fallback decida.
-                if q != q_pre_llm:
+            _fu_name = _strip_accents((scored[0][1].get("name") or "").lower())
+            _fu_key = [t for t in q.split() if len(t) >= 4 and not t.replace(".", "").isdigit()]
+            _fu_overlap = sum(1 for t in _fu_key if t in _fu_name) / max(len(_fu_key), 1)
+            # Accept single fuzzy result if score >= 85 AND key tokens overlap
+            if scored[0][0] >= 85 and (not _fu_key or _fu_overlap >= 0.3):
+                if q != q_pre_llm and scored[0][0] < 92:
                     print(f"FUZZY UNIQUE SKIPPED (LLM-normalized): query='{user_query}' match='{scored[0][1]['name']}' score={scored[0][0]} → continuando a catalog fallback")
                 else:
-                    print(f"FUZZY UNIQUE: query='{user_query}' match='{scored[0][1]['name']}' score={scored[0][0]}")
+                    print(f"FUZZY UNIQUE: query='{user_query}' match='{scored[0][1]['name']}' score={scored[0][0]} overlap={_fu_overlap:.0%}")
                     _log_event("found", "fuzzy_unique", scored[0][1], scored[0][0] / 100.0)
                     return {"status": "found", "item": scored[0][1], "candidates": []}
             else:
-                print(f"FUZZY UNIQUE LOW SCORE: query='{user_query}' match='{scored[0][1]['name']}' score={scored[0][0]} → semántico")
+                print(f"FUZZY UNIQUE LOW SCORE: query='{user_query}' match='{scored[0][1]['name']}' score={scored[0][0]} overlap={_fu_overlap:.0%} → semántico")
 
         if len(scored) > 1:
             top_score = scored[0][0]
@@ -1269,6 +1320,33 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                 print(f"FUZZY CLEAR WIN: query='{user_query}' match='{scored[0][1]['name']}' score={top_score}")
                 _log_event("found", "fuzzy_clear", scored[0][1], top_score / 100.0)
                 return {"status": "found", "item": scored[0][1], "candidates": []}
+
+            # Try spec-based narrowing: filter by medida/calibre if user specified
+            if q_medida or q_cal:
+                spec_filtered = []
+                for s, item in scored:
+                    n = (item.get("name") or "").lower()
+                    if q_medida and q_medida not in n:
+                        continue
+                    if q_cal and not _re.search(rf"\bcal(?:ibre)?\s*{q_cal}\b", n):
+                        continue
+                    spec_filtered.append((s, item))
+                if len(spec_filtered) == 1:
+                    print(f"FUZZY SPEC RESOLVED: query='{user_query}' match='{spec_filtered[0][1]['name']}' score={spec_filtered[0][0]}")
+                    _log_event("found", "fuzzy_spec", spec_filtered[0][1], spec_filtered[0][0] / 100.0)
+                    return {"status": "found", "item": spec_filtered[0][1], "candidates": []}
+                elif spec_filtered:
+                    scored = spec_filtered  # narrow candidates for return
+
+            # Key token overlap: if top match has strong token overlap, auto-pick
+            _fa_name = _strip_accents((scored[0][1].get("name") or "").lower())
+            _fa_key = [t for t in q.split() if len(t) >= 4 and not t.replace(".", "").isdigit()]
+            _fa_overlap = sum(1 for t in _fa_key if t in _fa_name) / max(len(_fa_key), 1)
+            if top_score >= 90 and _fa_overlap >= 0.5 and gap >= 5:
+                print(f"FUZZY OVERLAP WIN: query='{user_query}' match='{scored[0][1]['name']}' score={top_score} overlap={_fa_overlap:.0%} gap={gap}")
+                _log_event("found", "fuzzy_overlap", scored[0][1], top_score / 100.0)
+                return {"status": "found", "item": scored[0][1], "candidates": []}
+
             print(f"FUZZY AMBIGUOUS: query='{user_query}' found={len(scored)}")
             q_first_token = q.split()[0] if q.split() else q
             filtered = [(s, item) for s, item in scored[:5] if _strip_accents((item.get("name") or "").lower()).startswith(q_first_token)]
