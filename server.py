@@ -4536,6 +4536,17 @@ def extract_qty_items_robust(text: str):
     t = re.sub(r"(\d+)\s*/\s*(\d+)", r"\1_\2", t)
     t = re.sub(r"\s+y\s+(?=\d)", "\n", t, flags=re.IGNORECASE)
     t = re.sub(r"\s+e\s+(?=\d)", "\n", t, flags=re.IGNORECASE)
+
+    # Proteger specs de medida que aparecen DENTRO del nombre del producto
+    # (después de al menos una palabra), NO al inicio de la línea (que serían cantidad + unidad empaque).
+    # "rejas de 2 metros" → "rejas SPEC_2_metros"  (spec de producto, proteger)
+    # "clavos de 3 pulgadas" → "clavos SPEC_3_pulgadas"  (spec de producto, proteger)
+    # "5 kilos alambre" → no proteger (5 kilos es cantidad + empaque al inicio)
+    _measure_units = r"(metros?|mts?|m|cm|centimetros?|pulgadas?|pulg|mm)"
+    # Solo proteger si viene después de una letra (parte del nombre del producto)
+    t = re.sub(rf"(?<=[a-záéíóúñ])\s+de\s+(\d+(?:\.\d+)?)\s*{_measure_units}\b", r" SPEC_\1_\2", t, flags=re.IGNORECASE)
+    t = re.sub(rf"(?<=[a-záéíóúñ])\s+(\d+(?:\.\d+)?)\s*{_measure_units}\b", r" SPEC_\1_\2", t, flags=re.IGNORECASE)
+
     items = []
     lines = [l.strip() for l in re.split(r"[\n\r]+", t) if l.strip()]
     for line in lines:
@@ -4543,11 +4554,16 @@ def extract_qty_items_robust(text: str):
         for part in parts:
             sub_parts = re.split(r'(?<=\S)\s+(?=\d+\s)', part.strip())
             for sub in sub_parts:
+                # Restaurar specs protegidas: SPEC_2_metros → "2 metros"
+                sub = re.sub(r"SPEC_(\d+(?:\.\d+)?)_(\w+)", r"\1 \2", sub)
                 m = re.match(r"^\s*(\d+)\s+(.+)$", sub.strip())
                 if m:
                     qty = int(m.group(1))
                     prod = m.group(2).replace("_", "/").strip()
-                    prod = re.sub(r"\b(de|hojas|hoja|piezas|pieza|rollos|rollo|bultos|bulto|sacos|saco|atados|atado|paquetes|paquete)\b", "", prod, flags=re.IGNORECASE).strip()
+                    # Solo quitar unidades de EMPAQUE (no de medida/spec)
+                    _packaging_re = r"\b(hojas?|piezas?|rollos?|bultos?|sacos?|atados?|paquetes?|costales?|cubetas?|bolsas?|botes?|latas?|tiras?|cajas?|cientos?|millares?)\b"
+                    prod = re.sub(_packaging_re, "", prod, flags=re.IGNORECASE).strip()
+                    prod = re.sub(r"\bde\b", " ", prod, flags=re.IGNORECASE).strip()
                     prod = re.sub(r"\s+", " ", prod).strip()
                     if prod and qty > 0:
                         items.append((qty, prod))
