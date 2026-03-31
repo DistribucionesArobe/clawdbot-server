@@ -32,23 +32,34 @@ def build_product_text(name: str, sku: str = "", unit: str = "", synonyms: str =
 
 
 def build_query_text(user_input: str) -> str:
+    """
+    Limpia la query del usuario para búsqueda en catálogo.
+    Estrategia: solo quitar la unidad de empaque cuando va pegada a la cantidad
+    inicial (ej "10 sacos cemento" → "cemento"). Preservar todo lo demás
+    (specs de medida, unidades dentro del nombre del producto, etc.).
+    """
     t = (user_input or "").lower().strip()
+    # Normalizar fracciones: "1 / 2" → "1/2"
     t = re.sub(r"(\d+)\s*/\s*(\d+)", r"\1/\2", t)
+    # Quitar palabras de intención (cotiza, dame, quiero, etc.)
     noise_intent = r"\b(cotiza|cotizame|dame|quiero|necesito|por favor|porfa|pls|precio|precios)\b"
     t = re.sub(noise_intent, " ", t)
 
-    # Preservar "N metro(s)" como spec de medida antes de quitar unidades noise.
-    # Convertimos "de 2 metros" / "2 metros" / "2 metro" → "2_metro" para protegerlo.
-    t = re.sub(r"\bde\s+(\d+(?:\.\d+)?)\s*(?:metros?|mts?|m)\b", r"\1_metro", t)
-    t = re.sub(r"\b(\d+(?:\.\d+)?)\s*(?:metros?|mts?|m)\b", r"\1_metro", t)
-
-    noise_units = r"\b(cubeta|cubetas|bulto|bultos|bolsa|bolsas|rollo|rollos|pieza|piezas|metro|metros|kilo|kilos|kilogramo|kilogramos|litro|litros|par|pares|juego|juegos|caja|cajas|saco|sacos|bote|botes|lata|latas|tubo|tubos|tira|tiras|hoja|hojas)\b"
-    t = re.sub(noise_units, " ", t)
+    # Solo quitar la cantidad inicial + su unidad de empaque directa.
+    # Ej: "10 sacos cemento" → "cemento", "5 bolsas arena" → "arena"
+    # Pero NO tocar: "tubo de 2 metros", "rejacero 2.50 m", "clavo de 3 pulgadas"
+    _packaging_units = (
+        r"(?:cubetas?|bultos?|bolsas?|rollos?|piezas?|kilos?|kilogramos?|kg|"
+        r"litros?|lts?|pares?|juegos?|cajas?|sacos?|botes?|latas?|tiras?|hojas?|"
+        r"paquetes?|cientos?|millares?|costales?)"
+    )
+    # Quitar "CANTIDAD [de] UNIDAD_EMPAQUE [de]" al inicio
+    t = re.sub(rf"^\s*\d+\s+(?:de\s+)?{_packaging_units}\s+(?:de\s+)?", "", t)
+    # Si solo era "CANTIDAD PRODUCTO" sin unidad de empaque, quitar la cantidad inicial
     t = re.sub(r"^\s*\d+\s+", "", t)
-    t = re.sub(r"(?<![/\d.])(\b\d\b)(?![/\d.])", " ", t)
 
-    # Restaurar "N_metro" → "N metro" para que sea buscable en catálogo
-    t = re.sub(r"(\d+(?:\.\d+)?)_metro", r"\1 metro", t)
+    # Normalizar "de" suelto al inicio (residual)
+    t = re.sub(r"^\s*de\s+", "", t)
 
     t = re.sub(r"\s+", " ", t).strip()
     if not t:
@@ -884,10 +895,12 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
             m_cal = _re.search(r"\bcal(?:ibre)?\s*(\d+)\b", t)
             if m_cal:
                 cal = m_cal.group(1)
-            # Match "N metro" patterns first (e.g., "2 metro", "2.50 metro")
-            m_metro = _re.search(r"\b(\d+(?:\.\d+)?)\s*metros?\b", t)
-            if m_metro:
-                medida = m_metro.group(1)
+            # Match "N metro(s)" / "N m" / "N cm" / "N pulgadas" patterns
+            m_unit = _re.search(r"\b(\d+(?:\.\d+)?)\s*(?:metros?|mts?|m|cm|centimetros?|pulgadas?|pulg|mm)\b", t)
+            if m_unit:
+                medida = m_unit.group(1)
+            elif _re.search(r"(?:de\s+)?(\d+(?:\.\d+)?)\s*(?:metros?|mts?|m)\b", t):
+                medida = _re.search(r"(?:de\s+)?(\d+(?:\.\d+)?)\s*(?:metros?|mts?|m)\b", t).group(1)
             else:
                 # Fallback: any decimal number (e.g., "2.50" in product names)
                 m_med = _re.search(r"\b(\d+\.\d+)\b", t)
@@ -898,8 +911,14 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
         def _spec_bonus(item_name, medida, cal):
             n = item_name.lower()
             bonus = 0
-            if medida and medida in n:
-                bonus += 30
+            if medida:
+                # Exact medida in product name (e.g., "2" in "2 metro x 2.50 m")
+                if _re.search(rf"\b{_re.escape(medida)}\s*(?:metros?|mts?|m|cm|mm|pulg)?\b", n):
+                    bonus += 30
+                # Penalize if product has a DIFFERENT leading measurement
+                m_prod = _re.search(r"\b(\d+(?:\.\d+)?)\s*(?:metros?|mts?|m)\b", n)
+                if m_prod and m_prod.group(1) != medida:
+                    bonus -= 20  # Wrong size variant
             if cal and (_re.search(rf"\bcal\s*{cal}\b", n)):
                 bonus += 50
             q_tokens = [t for t in q.split() if len(t) >= 4]
