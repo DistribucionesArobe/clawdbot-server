@@ -1969,6 +1969,76 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         t = t.replace("PICK_", "")
         return [(m[0], int(m[1])) for m in re.findall(r"([A-Z])(\d+)", t)]
 
+    def _classify_intent(text: str) -> str:
+        """
+        Clasifica si un mensaje es intención de cotizar productos o conversación general.
+        Retorna 'product' o 'other'. Usa GPT-4o-mini para clasificación rápida.
+        """
+        t = (text or "").strip()
+        if not t or len(t) < 3:
+            return "other"
+        try:
+            from openai import OpenAI
+            _oai_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
+            if not _oai_key:
+                return "product"  # fallback: asumir producto si no hay API key
+            _oai = OpenAI(api_key=_oai_key)
+            resp = _oai.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": (
+                        "Eres un clasificador de mensajes para un bot de cotización de materiales de construcción "
+                        "(ferretería, acero, tablaroca, cemento, etc.) en México.\n\n"
+                        "Clasifica si el mensaje del cliente es:\n"
+                        "- PRODUCT: quiere cotizar, preguntar por un producto, material, herramienta o precio\n"
+                        "- OTHER: conversación casual, preguntas personales, temas administrativos, saludos extendidos, "
+                        "quejas, pagos, facturas, entregas, o cualquier cosa que NO sea pedir/cotizar un producto\n\n"
+                        "Responde SOLO con: PRODUCT o OTHER"
+                    )},
+                    {"role": "user", "content": t},
+                ],
+                temperature=0.0,
+                max_tokens=5,
+            )
+            result = (resp.choices[0].message.content or "").strip().upper()
+            print(f"INTENT CLASSIFY: '{t[:50]}' → {result}")
+            return "product" if "PRODUCT" in result else "other"
+        except Exception as e:
+            print(f"INTENT CLASSIFY ERROR: {repr(e)}")
+            return "product"  # fallback seguro: asumir producto
+
+    def _escalate_non_quote(company_id_esc: str, wa_from_esc: str, text_esc: str) -> str:
+        """Escala un mensaje no-cotización al dueño y responde al cliente."""
+        try:
+            conn_esc = get_conn()
+            cur_esc = conn_esc.cursor()
+            cur_esc.execute(
+                "SELECT owner_phone, wa_api_key, wa_phone_number_id, name FROM companies WHERE id=%s",
+                (company_id_esc,),
+            )
+            row_esc = cur_esc.fetchone()
+            cur_esc.close()
+            conn_esc.close()
+            company_name_esc = "la empresa"
+            if row_esc and row_esc[0]:
+                state_esc = get_quote_state(company_id_esc, wa_from_esc) or {}
+                notify_owner_escalation(
+                    wa_api_key=row_esc[1], phone_number_id=row_esc[2], owner_phone=row_esc[0],
+                    client_phone=wa_from_esc,
+                    reason=f"Mensaje no relacionado a cotización: \"{(text_esc or '')[:100]}\"",
+                    state=state_esc,
+                )
+                company_name_esc = row_esc[3] or "la empresa"
+        except Exception as e:
+            print(f"ESCALATE NON-QUOTE ERROR: {repr(e)}")
+            company_name_esc = "la empresa"
+        return (
+            f"Ese tema lo maneja directamente el equipo de *{company_name_esc}* 🙋\n\n"
+            "Ya les avisé y te contactarán pronto.\n\n"
+            "Si quieres cotizar materiales, mándame tu lista con cantidades 📋\n"
+            "Ej: 10 cemento, 5 varilla 3/8"
+        )
+
     def _is_greeting_like(tnorm: str) -> bool:
         t = (tnorm or "").strip()
         if not t:
@@ -2896,15 +2966,27 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 "• 'salir' → cancelar"
             )
 
-        return (
-            "¿Cuántas piezas necesitas?\n"
-            "Ejemplo: '10 sacos cemento' o '5 varilla 3/8'\n\n"
-            "🧭 Comandos:\n"
-            "• 'nueva cotizacion' → empezar de cero\n"
-            "• 'salir' → cancelar"
-        )
+        # Podría ser producto sin cantidad O conversación casual.
+        # Clasificar con GPT antes de asumir que es producto.
+        intent = _classify_intent(user_text)
+        if intent == "product":
+            return (
+                "¿Cuántas piezas necesitas?\n"
+                "Ejemplo: '10 sacos cemento' o '5 varilla 3/8'\n\n"
+                "🧭 Comandos:\n"
+                "• 'nueva cotizacion' → empezar de cero\n"
+                "• 'salir' → cancelar"
+            )
+        else:
+            # No es producto → escalar a humano
+            return _escalate_non_quote(company_id, wa_from, user_text)
 
-    return "¿Me repites eso? No entendí bien tu pedido 🤔"
+    # Último fallback: clasificar con GPT
+    intent = _classify_intent(user_text)
+    if intent == "product":
+        return "¿Me repites eso? No entendí bien tu pedido 🤔"
+    else:
+        return _escalate_non_quote(company_id, wa_from, user_text)
 
 
 @app.post("/api/admin/rebuild-synonyms-public")
