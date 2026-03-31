@@ -3825,6 +3825,125 @@ def _rebuild_embeddings_bg(company_id: str):
     except Exception as e:
         print(f"BG EMBEDDINGS ERROR: {repr(e)}")
 
+@app.post("/api/carga-productos/rapida")
+async def carga_productos_rapida(request: Request, background_tasks: BackgroundTasks = None):
+    """Carga rápida de productos: recibe lista de {nombre, precio_base, categoria, unidad}."""
+    user = get_user_from_session(request)
+    company_id = require_company_id(request)
+    body = await request.json()
+    productos = body.get("productos") or []
+    if not productos:
+        raise HTTPException(status_code=400, detail="No hay productos para cargar")
+
+    conn = None
+    cur = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        insertados = 0
+        actualizados = 0
+        errores = []
+
+        # Generar sinónimos por batch
+        names_list = [normalize_display_name(p["nombre"]) for p in productos if p.get("nombre")]
+        synonyms_map = {}
+        if openai_client:
+            for i in range(0, len(names_list), 20):
+                batch = names_list[i:i+20]
+                try:
+                    numbered = "\n".join(f"{j+1}. {n}" for j, n in enumerate(batch))
+                    resp = openai_client.chat.completions.create(
+                        model="gpt-4o-mini",
+                        messages=[
+                            {"role": "system", "content": (
+                                "Eres experto en ferreterías de México. Para cada producto numerado, "
+                                "genera hasta 5 sinónimos coloquiales, typos comunes o marcas usadas como nombre genérico. "
+                                'Responde SOLO en JSON válido así: {"1": "sin1, sin2", "2": "sin1, sin2"} '
+                                "Sin explicación, sin markdown, solo el JSON."
+                            )},
+                            {"role": "user", "content": numbered}
+                        ],
+                        temperature=0.3, max_tokens=300,
+                    )
+                    raw = (resp.choices[0].message.content or "{}").strip().replace("```json", "").replace("```", "").strip()
+                    parsed_syns = json.loads(raw)
+                    for k, v in parsed_syns.items():
+                        if k.isdigit() and int(k)-1 < len(batch):
+                            synonyms_map[batch[int(k)-1]] = v
+                except Exception as e:
+                    print(f"BATCH SYNONYMS ERROR (rapida): {repr(e)}")
+
+        for p in productos:
+            nombre = normalize_display_name(p.get("nombre", "").strip())
+            if not nombre:
+                continue
+            try:
+                precio = float(str(p.get("precio_base", 0)).replace("$", "").replace(",", ""))
+            except Exception:
+                errores.append(f"Precio inválido para '{nombre}'")
+                continue
+            if precio <= 0:
+                errores.append(f"Precio debe ser > 0 para '{nombre}'")
+                continue
+
+            unidad = p.get("unidad", "Pieza") or "Pieza"
+            name_norm = norm_name(nombre)
+            auto_syn = synonyms_map.get(nombre, "")
+
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO pricebook_items
+                        (company_id, name, name_norm, unit, price, synonyms, source, updated_at)
+                    VALUES
+                        (%s, %s, %s, %s, %s, %s, 'rapida', now())
+                    ON CONFLICT (company_id, name_norm)
+                    DO UPDATE SET
+                        name = EXCLUDED.name, unit = EXCLUDED.unit,
+                        price = EXCLUDED.price,
+                        synonyms = COALESCE(NULLIF(pricebook_items.synonyms, ''), EXCLUDED.synonyms),
+                        source = 'rapida', updated_at = now()
+                    RETURNING (xmax = 0) AS is_insert
+                    """,
+                    (company_id, nombre, name_norm, unidad, precio, auto_syn),
+                )
+                row = cur.fetchone()
+                if row and row[0]:
+                    insertados += 1
+                else:
+                    actualizados += 1
+            except Exception as e:
+                print(f"RAPIDA INSERT ERROR {nombre}: {repr(e)}")
+                errores.append(f"Error con '{nombre}': {str(e)}")
+
+        conn.commit()
+
+        # Rebuild embeddings en background
+        if background_tasks:
+            background_tasks.add_task(_rebuild_embeddings_bg, company_id)
+        else:
+            try:
+                rebuild_embeddings_for_company(conn, company_id)
+            except Exception as e:
+                print(f"EMBEDDINGS REBUILD ERROR (rapida): {repr(e)}")
+
+        return {
+            "ok": True,
+            "productos_insertados": insertados,
+            "productos_actualizados": actualizados,
+            "errores": errores,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"CARGA RAPIDA ERROR: {repr(e)}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
+
+
 @app.post("/api/pricebook/upload")
 def pricebook_upload(
     request: Request,
