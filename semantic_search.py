@@ -1242,11 +1242,17 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                 elif _ilike_spec:
                     scored = _ilike_spec
 
-            q_first_token = q.split()[0] if q.split() else q
-            filtered = [(s, r) for s, r in scored[:5] if _phonetic((r[1] or "").lower()).startswith(q_first_token)]
-            candidates = filtered if filtered else scored[:5]
-            _log_event("ambiguous", "ilike_ambiguous")
-            return {"status": "ambiguous", "item": None, "candidates": [_make_item(r) for _, r in candidates]}
+            # Only return candidates if top score is decent (≥65).
+            # Otherwise the results are irrelevant (e.g. "rollo" matching láminas
+            # when user asked for "ciclónica") — let later steps handle it.
+            if top < 65:
+                print(f"ILIKE SCORES TOO LOW ({top:.0f}): query='{user_query}' → skipping to next step")
+            else:
+                q_first_token = q.split()[0] if q.split() else q
+                filtered = [(s, r) for s, r in scored[:5] if _phonetic((r[1] or "").lower()).startswith(q_first_token)]
+                candidates = filtered if filtered else scored[:5]
+                _log_event("ambiguous", "ilike_ambiguous")
+                return {"status": "ambiguous", "item": None, "candidates": [_make_item(r) for _, r in candidates]}
 
         # ── PASO 2: tsvector + fuzzy sobre candidatos + tiebreak ─────────────
         _tokens = [t for t in q.split() if len(t) >= 3]
