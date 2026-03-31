@@ -1324,12 +1324,14 @@ async def whatsapp_webhook(request: Request):
         )
 
     elif isinstance(reply, dict) and reply.get("type") == "text_then_list_sections":
-        send_whatsapp_text(
-            wa_api_key=company["wa_api_key"],
-            phone_number_id=company["wa_phone_number_id"],
-            to=from_phone,
-            text=reply["text"],
-        )
+        _pre_text = (reply.get("text") or "").strip()
+        if _pre_text:
+            send_whatsapp_text(
+                wa_api_key=company["wa_api_key"],
+                phone_number_id=company["wa_phone_number_id"],
+                to=from_phone,
+                text=_pre_text,
+            )
         send_whatsapp_list_sections(
             wa_api_key=company["wa_api_key"],
             phone_number_id=company["wa_phone_number_id"],
@@ -2057,64 +2059,63 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         pending = state.get("pending") or []
 
         if pending:
-            letters = "ABCDEFGHIJKLMNOP"
             cart = state.get("cart") or []
             cart_count = len(cart)
             pending_count = len(pending)
 
-            con_opciones = [(i, p) for i, p in enumerate(pending) if p.get("candidates")]
-            sin_opciones = [(i, p) for i, p in enumerate(pending) if not p.get("candidates")]
+            con_opciones = [p for p in pending if p.get("candidates")]
+            sin_opciones = [p for p in pending if not p.get("candidates")]
 
-            section_rows = []
-            for idx, (i, p) in enumerate(con_opciones[:10]):
-                tag = letters[idx]
-                qty = int(p.get("qty") or 0)
-                raw = (p.get("raw") or "").strip()
-                cands = p.get("candidates") or []
+            if wa_from and company_id:
+                upsert_quote_state(company_id, wa_from, state)
+
+            # ── Show ONE pending item at a time ──────────────────────
+            if con_opciones:
+                current = con_opciones[0]
+                qty = int(current.get("qty") or 0)
+                raw = (current.get("raw") or "").strip()
+                cands = current.get("candidates") or []
+
+                section_rows = []
                 for j, it in enumerate(cands[:5], start=1):
                     price = float(it.get("price") or 0.0)
                     unit = it.get("unit") or "unidad"
                     full_name = it["name"]
                     section_rows.append({
-                        "id": f"pick_{tag}{j}",
-                        "title": f"{tag}{j}) ${price:,.0f}/{unit}"[:24],
+                        "id": f"pick_A{j}",
+                        "title": f"{j}) ${price:,.0f}/{unit}"[:24],
                         "description": full_name[:72],
                     })
 
-            if wa_from and company_id:
-                upsert_quote_state(company_id, wa_from, state)
-
-            if section_rows:
+                # Build contextual header
                 resumen_lines = []
                 if cart_count > 0:
-                    resumen_lines.append(f"✅ Cotizamos *{cart_count} producto(s)* automáticamente.")
-                resumen_lines.append(f"❓ Necesito confirmar *{pending_count}* — elige una opción por letra:")
-                resumen_txt = "\n".join(resumen_lines)
+                    resumen_lines.append(f"✅ *{cart_count}* producto(s) cotizados.")
+                remaining = len(con_opciones) - 1
+                if remaining > 0:
+                    resumen_lines.append(f"📋 Quedan *{remaining}* más por confirmar después de este.")
+                # Not-found items
+                for p in sin_opciones:
+                    nq = int(p.get("qty") or 0)
+                    nr = (p.get("raw") or "").strip()
+                    resumen_lines.append(f"❌ {nq}x {nr} — no encontrado")
+                resumen_txt = "\n".join(resumen_lines) if resumen_lines else ""
 
-                list_body_lines = []
-                for idx, (i, p) in enumerate(con_opciones[:10]):
-                    tag = letters[idx]
-                    qty = int(p.get("qty") or 0)
-                    raw = (p.get("raw") or "").strip()
-                    list_body_lines.append(f"*{tag})* {qty}x {raw}")
-                for i, p in sin_opciones:
-                    qty = int(p.get("qty") or 0)
-                    raw = (p.get("raw") or "").strip()
-                    list_body_lines.append(f"❌ {qty}x {raw} — no encontrado")
-                list_body = "\n".join(list_body_lines) or "Elige una opción:"
+                body_txt = f"*{qty}x {raw}*\n¿Cuál de estas opciones?"
 
                 return {
                     "type": "text_then_list_sections",
                     "text": resumen_txt,
-                    "body": list_body[:1024],
-                    "sections": [{"title": "Elige por letra", "rows": section_rows[:10]}],
+                    "body": body_txt[:1024],
+                    "sections": [{"title": f"{raw}"[:24], "rows": section_rows[:10]}],
                     "button_label": "Ver opciones",
                 }
             else:
+                # Only not-found items remain
                 lines = []
                 if cart_count > 0:
                     lines.append(f"✅ Cotizamos *{cart_count} producto(s)* automáticamente.\n")
-                for i, p in sin_opciones:
+                for p in sin_opciones:
                     qty = int(p.get("qty") or 0)
                     raw = (p.get("raw") or "").strip()
                     lines.append(f"❌ *{qty}x {raw}* — no encontrado, escríbelo diferente")
@@ -2639,46 +2640,46 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             upsert_quote_state(company_id, wa_from, _cs_state)
             return _handle_construccion(company_id, user_text, wa_from)
         
-    # ── Picks múltiples A1 B2 C3 ─────────────────────────────────────────────
+    # ── Pick handler (one-at-a-time) ──────────────────────────────────────────
     _quick_picks = _parse_pending_picks(user_text)
+    # Also handle bare number "1", "2" etc. as pick for the first pending item
+    _bare_num = re.match(r"^\s*(\d)\s*$", user_text.strip())
+    if _bare_num and not _quick_picks:
+        _quick_picks = [("A", int(_bare_num.group(1)))]
+
     _state_picks = get_quote_state(company_id, wa_from) if wa_from else {}
     _state_picks = _state_picks or {}
 
     if _quick_picks and _state_picks.get("pending"):
         state = _state_picks
         pend = state.get("pending") or []
-        letters = "ABCDEFGHIJKLMNOP"
 
-        letter_to_idx = {letters[i]: i for i in range(len(pend))}
-        picks_map = {}
+        # Since we show one at a time, any pick with letter "A" resolves the FIRST pending item
+        pick_opt = None
         for letter, opt in _quick_picks:
-            if letter in letter_to_idx:
-                picks_map[letter] = opt
+            if letter == "A":
+                pick_opt = opt
+                break
 
-        still_pending = []
-        for i, p in enumerate(pend):
-            tag = letters[i] if i < len(letters) else None
-            if tag and tag in picks_map:
-                opt = picks_map[tag]
-                cands = p.get("candidates") or []
-                if cands and 1 <= opt <= len(cands):
-                    chosen = cands[opt - 1]
-                    qty = int(p.get("qty") or 0)
-                    state = cart_add_item(state, {
-                        "sku": chosen.get("sku"),
-                        "name": chosen.get("name"),
-                        "unit": chosen.get("unit") or "unidad",
-                        "price": float(chosen.get("price") or 0.0),
-                        "vat_rate": chosen.get("vat_rate"),
-                        "qty": qty,
-                    })
-                else:
-                    still_pending.append(p)
-            else:
-                still_pending.append(p)
+        if pick_opt is not None and pend:
+            first = pend[0]
+            cands = first.get("candidates") or []
+            if cands and 1 <= pick_opt <= len(cands):
+                chosen = cands[pick_opt - 1]
+                qty = int(first.get("qty") or 0)
+                state = cart_add_item(state, {
+                    "sku": chosen.get("sku"),
+                    "name": chosen.get("name"),
+                    "unit": chosen.get("unit") or "unidad",
+                    "price": float(chosen.get("price") or 0.0),
+                    "vat_rate": chosen.get("vat_rate"),
+                    "qty": qty,
+                })
+                pend = pend[1:]  # Remove the resolved item
+            # else: invalid option number, keep it pending
 
-        if still_pending:
-            state["pending"] = still_pending
+        if pend:
+            state["pending"] = pend
         else:
             state.pop("pending", None)
 
@@ -4881,7 +4882,7 @@ async def twilio_webhook(
                 if cart_text:
                     twilio_send_whatsapp(to_user_whatsapp=From, text=cart_text)
                 opciones = (reply.get("body") or "") + _sections_to_text(reply.get("sections") or [])
-                opciones += "\n\n✅ Responde con el código, ej: A1"
+                opciones += "\n\n✅ Responde con el número, ej: 1"
                 twilio_send_whatsapp(to_user_whatsapp=From, text=opciones.strip())
             elif reply_type in ("list_sections", "list"):
                 lines = [(reply.get("body") or "")]
