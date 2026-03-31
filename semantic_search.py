@@ -525,15 +525,15 @@ def _validate_term_in_catalog(conn, normalized: str) -> bool:
     en al menos un producto de cualquier tenant.
     Evita que el LLM guarde basura como 'framer' → 'estructura'.
     """
-    n = (normalized or "").strip().lower()
+    n = _strip_accents((normalized or "").strip().lower())
     if not n or len(n) < 2:
         return False
     cur = conn.cursor()
     try:
         cur.execute(
             "SELECT 1 FROM pricebook_items "
-            "WHERE lower(name) LIKE lower(%s) "
-            "   OR lower(synonyms) LIKE lower(%s) "
+            "WHERE lower(translate(name, 'áéíóúÁÉÍÓÚñÑ', 'aeiouAEIOUnN')) LIKE lower(%s) "
+            "   OR lower(translate(synonyms, 'áéíóúÁÉÍÓÚñÑ', 'aeiouAEIOUnN')) LIKE lower(%s) "
             "LIMIT 1",
             (f"%{n}%", f"%{n}%"),
         )
@@ -550,22 +550,24 @@ def llm_normalize_query(conn, company_id: str, user_query: str, tenant_context: 
     Normaliza jerga del usuario. Retorna tupla (normalized_text, source).
     source: 'local', 'global', 'llm', 'none'
     """
-    q = (user_query or "").strip().lower()
+    q = _strip_accents((user_query or "").strip().lower())
     if not q or len(q) < 2:
         return user_query, "none"
+
+    _JERGA_TRANSLATE = "translate(termino_original, 'áéíóúÁÉÍÓÚñÑ', 'aeiouAEIOUnN')"
 
     # 1. Buscar en diccionario local (per-tenant, máxima prioridad)
     try:
         cur = conn.cursor()
         cur.execute(
-            "SELECT termino_normalizado FROM diccionario_jerga_local WHERE company_id = %s AND termino_original = %s LIMIT 1",
+            f"SELECT termino_normalizado FROM diccionario_jerga_local WHERE company_id = %s AND lower({_JERGA_TRANSLATE}) = %s LIMIT 1",
             (company_id, q),
         )
         row = cur.fetchone()
         cur.close()
         if row:
             print(f"JERGA LOCAL HIT: '{q}' → '{row[0]}'")
-            return row[0], "local"
+            return _strip_accents(row[0]), "local"
     except Exception as e:
         print(f"JERGA LOCAL ERROR: {repr(e)}")
 
@@ -573,7 +575,7 @@ def llm_normalize_query(conn, company_id: str, user_query: str, tenant_context: 
     try:
         cur = conn.cursor()
         cur.execute(
-            "SELECT termino_normalizado, is_protected FROM diccionario_jerga_global WHERE termino_original = %s LIMIT 1",
+            f"SELECT termino_normalizado, is_protected FROM diccionario_jerga_global WHERE lower({_JERGA_TRANSLATE}) = %s LIMIT 1",
             (q,),
         )
         row = cur.fetchone()
@@ -583,7 +585,7 @@ def llm_normalize_query(conn, company_id: str, user_query: str, tenant_context: 
             print(f"{label}: '{q}' → '{row[0]}'")
             # Track usage
             _increment_jerga_usage(conn, q, success=False)  # success se marca después en smart_search
-            return row[0], "global"
+            return _strip_accents(row[0]), "global"
     except Exception as e:
         print(f"JERGA GLOBAL ERROR: {repr(e)}")
 
@@ -600,7 +602,7 @@ def llm_normalize_query(conn, company_id: str, user_query: str, tenant_context: 
                 for start in range(len(words) - size + 1):
                     sub = " ".join(words[start:start + size])
                     cur.execute(
-                        "SELECT termino_normalizado FROM diccionario_jerga_global WHERE termino_original = %s LIMIT 1",
+                        f"SELECT termino_normalizado FROM diccionario_jerga_global WHERE lower({_JERGA_TRANSLATE}) = %s LIMIT 1",
                         (sub,),
                     )
                     row = cur.fetchone()
@@ -612,6 +614,7 @@ def llm_normalize_query(conn, company_id: str, user_query: str, tenant_context: 
             cur.close()
             if best_match:
                 orig_sub, norm_sub, start, size = best_match
+                norm_sub = _strip_accents(norm_sub)
                 new_words = words[:start] + norm_sub.split() + words[start + size:]
                 result = " ".join(new_words)
                 print(f"JERGA GLOBAL PARTIAL: '{q}' → '{result}' (replaced '{orig_sub}' → '{norm_sub}')")
@@ -662,7 +665,7 @@ def llm_normalize_query(conn, company_id: str, user_query: str, tenant_context: 
             temperature=0.0,
             max_tokens=30,
         )
-        normalized = (resp.choices[0].message.content or "").strip().lower()
+        normalized = _strip_accents((resp.choices[0].message.content or "").strip().lower())
         if not normalized or normalized == q:
             return user_query, "none"
 
@@ -864,7 +867,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
         from rapidfuzz import fuzz
         import re as _re
 
-        q = user_query.lower().strip()
+        q = _strip_accents(user_query.lower().strip())
         q = build_query_text(q)
 
         _stopwords = {"para", "de", "del", "la", "el", "un", "una", "con", "sin", "los", "las"}
@@ -876,13 +879,17 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
 
         def _name_search(term):
             c = conn.cursor()
+            term_plain = _strip_accents(term)
             try:
                 c.execute("SELECT count(*) FROM pricebook_items WHERE company_id = %s", (company_id,))
                 cnt = c.fetchone()[0]
                 print(f">>> DEBUG: company_id='{company_id}' total_rows={cnt}")
                 c.execute(
-                    "SELECT sku, name, unit, price, vat_rate FROM pricebook_items WHERE company_id = %s AND lower(name) LIKE lower(%s) LIMIT 10",
-                    (company_id, f"%{term}%"),
+                    """SELECT sku, name, unit, price, vat_rate FROM pricebook_items
+                       WHERE company_id = %s
+                         AND lower(translate(name, 'áéíóúÁÉÍÓÚñÑ', 'aeiouAEIOUnN')) LIKE lower(%s)
+                       LIMIT 10""",
+                    (company_id, f"%{term_plain}%"),
                 )
                 rows = c.fetchall()
                 print(f">>> _name_search('{term}') → {len(rows)} rows: {[r[1] for r in rows]}")
@@ -1016,43 +1023,46 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                         return {"status": "found", "item": item, "candidates": []}
             print(f"GLOBAL SYNONYM NO HIT: '{q_resolved}' → continuando con q original='{q}'")
 
-        # ── PASO 0: Sinónimo exacto en pricebook ─────────────────────────────
+        # ── PASO 0: Sinónimo exacto en pricebook (accent-insensitive) ────────
+        _SYN_TRANSLATE = "translate(synonyms, 'áéíóúÁÉÍÓÚñÑ', 'aeiouAEIOUnN')"
+        _NAME_TRANSLATE = "translate(name, 'áéíóúÁÉÍÓÚñÑ', 'aeiouAEIOUnN')"
         cur0 = conn.cursor()
         try:
             cur0.execute(
-                "SELECT sku, name, unit, price, vat_rate, synonyms FROM pricebook_items WHERE company_id = %s AND lower(synonyms) LIKE lower(%s) LIMIT 5",
-                (company_id, f"%{q}%"),
+                f"SELECT sku, name, unit, price, vat_rate, synonyms FROM pricebook_items WHERE company_id = %s AND lower({_SYN_TRANSLATE}) LIKE lower(%s) LIMIT 5",
+                (company_id, f"%{_strip_accents(q)}%"),
             )
             syn_rows = cur0.fetchall()
 
             if not syn_rows and q_tokens:
-                first_token = q_tokens[0]
+                first_token = _strip_accents(q_tokens[0])
                 cur0.execute(
-                    "SELECT sku, name, unit, price, vat_rate, synonyms FROM pricebook_items WHERE company_id = %s AND lower(synonyms) LIKE lower(%s) LIMIT 5",
+                    f"SELECT sku, name, unit, price, vat_rate, synonyms FROM pricebook_items WHERE company_id = %s AND lower({_SYN_TRANSLATE}) LIKE lower(%s) LIMIT 5",
                     (company_id, f"%{first_token}%"),
                 )
                 syn_rows = cur0.fetchall()
                 if len(syn_rows) > 1 and len(q_tokens) > 1:
-                    rest_tokens = q_tokens[1:]
+                    rest_tokens = [_strip_accents(t) for t in q_tokens[1:]]
                     syn_rows = [
                         r for r in syn_rows
-                        if any(t in (r[1] or "").lower() for t in rest_tokens)
-                        or fuzz.token_set_ratio(q, (r[1] or "").lower()) >= 50
+                        if any(t in _strip_accents((r[1] or "").lower()) for t in rest_tokens)
+                        or fuzz.token_set_ratio(q, _strip_accents((r[1] or "").lower())) >= 50
                     ]
         finally:
             cur0.close()
 
         def _best_syn_score(row, query):
-            """Score considerando nombre Y sinónimos del producto."""
-            name = (row[1] or "").lower()
-            name_score = max(fuzz.token_set_ratio(query, name), fuzz.partial_ratio(query, name))
+            """Score considerando nombre Y sinónimos del producto (accent-insensitive)."""
+            query_plain = _strip_accents(query)
+            name = _strip_accents((row[1] or "").lower())
+            name_score = max(fuzz.token_set_ratio(query_plain, name), fuzz.partial_ratio(query_plain, name))
             # También comparar contra cada sinónimo individual
             syns_raw = row[5] if len(row) > 5 else ""
             if syns_raw:
                 for s in (syns_raw or "").split(","):
-                    s = s.strip().lower()
+                    s = _strip_accents(s.strip().lower())
                     if s:
-                        syn_score = max(fuzz.token_set_ratio(query, s), fuzz.partial_ratio(query, s))
+                        syn_score = max(fuzz.token_set_ratio(query_plain, s), fuzz.partial_ratio(query_plain, s))
                         if syn_score > name_score:
                             name_score = syn_score
             return name_score
@@ -1135,7 +1145,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
         if pool_rows:
             scored = []
             for r in pool_rows:
-                name = (r[1] or "").lower()
+                name = _strip_accents((r[1] or "").lower())
                 base = max(fuzz.token_set_ratio(q, name), fuzz.partial_ratio(q, name))
                 bonus = _spec_bonus(r[1], q_medida, q_cal)
                 scored.append((base + bonus, r))
@@ -1155,7 +1165,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                 _log_event("found", "ilike", item, top / 100.0)
                 return {"status": "found", "item": item, "candidates": []}
             q_first_token = q.split()[0] if q.split() else q
-            filtered = [(s, r) for s, r in scored[:5] if (r[1] or "").lower().startswith(q_first_token)]
+            filtered = [(s, r) for s, r in scored[:5] if _strip_accents((r[1] or "").lower()).startswith(q_first_token)]
             candidates = filtered if filtered else scored[:5]
             _log_event("ambiguous", "ilike_ambiguous")
             return {"status": "ambiguous", "item": None, "candidates": [_make_item(r) for _, r in candidates]}
@@ -1167,18 +1177,18 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
         cur2 = conn.cursor()
         try:
             cur2.execute(
-                """
+                f"""
                 SELECT sku, name, unit, price, vat_rate, synonyms
                 FROM pricebook_items
                 WHERE company_id = %s
                   AND (
                       search_vector @@ to_tsquery('spanish', %s)
-                      OR lower(name) LIKE lower(%s)
-                      OR lower(synonyms) LIKE lower(%s)
+                      OR lower({_NAME_TRANSLATE}) LIKE lower(%s)
+                      OR lower({_SYN_TRANSLATE}) LIKE lower(%s)
                   )
                 LIMIT 30
                 """,
-                (company_id, _tsquery, f"%{q}%", f"%{q}%"),
+                (company_id, _tsquery, f"%{_strip_accents(q)}%", f"%{_strip_accents(q)}%"),
             )
             rows = cur2.fetchall()
         except Exception as e:
@@ -1186,8 +1196,8 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
             cur2_b = conn.cursor()
             try:
                 cur2_b.execute(
-                    "SELECT sku, name, unit, price, vat_rate, synonyms FROM pricebook_items WHERE company_id = %s AND (lower(name) LIKE lower(%s) OR lower(synonyms) LIKE lower(%s)) LIMIT 30",
-                    (company_id, f"%{q}%", f"%{q}%"),
+                    f"SELECT sku, name, unit, price, vat_rate, synonyms FROM pricebook_items WHERE company_id = %s AND (lower({_NAME_TRANSLATE}) LIKE lower(%s) OR lower({_SYN_TRANSLATE}) LIKE lower(%s)) LIMIT 30",
+                    (company_id, f"%{_strip_accents(q)}%", f"%{_strip_accents(q)}%"),
                 )
                 rows = cur2_b.fetchall()
             finally:
@@ -1197,8 +1207,8 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
 
         scored = []
         for r in rows:
-            name = (r[1] or "").lower()
-            syns = [s.strip().lower() for s in (r[5] or "").split(",") if s.strip()]
+            name = _strip_accents((r[1] or "").lower())
+            syns = [_strip_accents(s.strip().lower()) for s in (r[5] or "").split(",") if s.strip()]
             all_terms = [name] + syns
             base = max(max(fuzz.token_set_ratio(q, t), fuzz.partial_ratio(q, t)) for t in all_terms)
             name_score = max(fuzz.token_set_ratio(q, name), fuzz.partial_ratio(q, name))
@@ -1242,7 +1252,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                 return {"status": "found", "item": scored[0][1], "candidates": []}
             print(f"FUZZY AMBIGUOUS: query='{user_query}' found={len(scored)}")
             q_first_token = q.split()[0] if q.split() else q
-            filtered = [(s, item) for s, item in scored[:5] if (item.get("name") or "").lower().startswith(q_first_token)]
+            filtered = [(s, item) for s, item in scored[:5] if _strip_accents((item.get("name") or "").lower()).startswith(q_first_token)]
             candidates = filtered if filtered else scored[:5]
             _log_event("ambiguous", "fuzzy_ambiguous")
             return {"status": "ambiguous", "item": None, "candidates": [item for _, item in candidates]}
