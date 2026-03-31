@@ -17,6 +17,23 @@ def _strip_accents(s: str) -> str:
     return "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
 
 
+# ── Phonetic normalization for Mexican Spanish typos ──────────────
+# b↔v and s↔z sound identical in Mexican Spanish, causing constant
+# misspellings: abrasadera/abrazadera, barilla/varilla, tencion/tension
+_SQL_TRANSLATE_FROM = "áéíóúÁÉÍÓÚñÑbBzZ"
+_SQL_TRANSLATE_TO   = "aeiouAEIOUnNvVsS"
+
+def _phonetic(s: str) -> str:
+    """Accent-strip + phonetic normalize: 'abrasadera' → 'avrasadera'"""
+    out = _strip_accents(s)
+    return out.replace("b", "v").replace("B", "V").replace("z", "s").replace("Z", "S")
+
+
+def _sql_translate(col: str) -> str:
+    """Return SQL translate() expression for accent+phonetic normalization."""
+    return f"translate(COALESCE({col},''), '{_SQL_TRANSLATE_FROM}', '{_SQL_TRANSLATE_TO}')"
+
+
 def _singulars_es(word: str):
     """Return possible singular forms of a Spanish word.
     rollos→rollo, tubos→tubo, abrazaderas→abrazadera,
@@ -551,8 +568,8 @@ def _validate_term_in_catalog(conn, normalized: str) -> bool:
     try:
         cur.execute(
             "SELECT 1 FROM pricebook_items "
-            "WHERE lower(translate(COALESCE(name,''), 'áéíóúÁÉÍÓÚñÑ', 'aeiouAEIOUnN')) LIKE lower(%s) "
-            "   OR lower(translate(COALESCE(synonyms,''), 'áéíóúÁÉÍÓÚñÑ', 'aeiouAEIOUnN')) LIKE lower(%s) "
+            f"WHERE lower({_sql_translate('name')}) LIKE lower(%s) "
+            f"   OR lower({_sql_translate('synonyms')}) LIKE lower(%s) "
             "LIMIT 1",
             (f"%{n}%", f"%{n}%"),
         )
@@ -569,11 +586,11 @@ def llm_normalize_query(conn, company_id: str, user_query: str, tenant_context: 
     Normaliza jerga del usuario. Retorna tupla (normalized_text, source).
     source: 'local', 'global', 'llm', 'none'
     """
-    q = _strip_accents((user_query or "").strip().lower())
+    q = _phonetic((user_query or "").strip().lower())
     if not q or len(q) < 2:
         return user_query, "none"
 
-    _JERGA_TRANSLATE = "translate(COALESCE(termino_original,''), 'áéíóúÁÉÍÓÚñÑ', 'aeiouAEIOUnN')"
+    _JERGA_TRANSLATE = _sql_translate("termino_original")
 
     # 1. Buscar en diccionario local (per-tenant, máxima prioridad)
     try:
@@ -886,7 +903,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
         from rapidfuzz import fuzz
         import re as _re
 
-        q = _strip_accents(user_query.lower().strip())
+        q = _phonetic(user_query.lower().strip())
         q = build_query_text(q)
 
         _stopwords = {"para", "de", "del", "la", "el", "un", "una", "con", "sin", "los", "las"}
@@ -896,30 +913,23 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
             q_tokens = [t for t in q.split() if t not in _soft_stopwords]
         q = " ".join(q_tokens).strip() or q
 
+        _NS_SQL = f"""SELECT sku, name, unit, price, vat_rate FROM pricebook_items
+                      WHERE company_id = %s
+                        AND lower({_sql_translate('name')}) LIKE lower(%s)
+                      LIMIT 10"""
+
         def _name_search(term):
             c = conn.cursor()
-            term_plain = _strip_accents(term)
+            term_phon = _phonetic(term)
             try:
-                c.execute(
-                    """SELECT sku, name, unit, price, vat_rate FROM pricebook_items
-                       WHERE company_id = %s
-                         AND lower(translate(COALESCE(name,''), 'áéíóúÁÉÍÓÚñÑ', 'aeiouAEIOUnN')) LIKE lower(%s)
-                       LIMIT 10""",
-                    (company_id, f"%{term_plain}%"),
-                )
+                c.execute(_NS_SQL, (company_id, f"%{term_phon}%"))
                 rows = c.fetchall()
                 if rows:
                     print(f">>> _name_search('{term}') → {len(rows)} rows: {[r[1] for r in rows]}")
                     return rows
                 # Try singular forms: rollos→rollo, conectores→conector, etc.
-                for singular in _singulars_es(term_plain):
-                    c.execute(
-                        """SELECT sku, name, unit, price, vat_rate FROM pricebook_items
-                           WHERE company_id = %s
-                             AND lower(translate(COALESCE(name,''), 'áéíóúÁÉÍÓÚñÑ', 'aeiouAEIOUnN')) LIKE lower(%s)
-                           LIMIT 10""",
-                        (company_id, f"%{singular}%"),
-                    )
+                for singular in _singulars_es(term_phon):
+                    c.execute(_NS_SQL, (company_id, f"%{singular}%"))
                     rows = c.fetchall()
                     if rows:
                         print(f">>> _name_search('{term}') singular='{singular}' → {len(rows)} rows: {[r[1] for r in rows]}")
@@ -1056,43 +1066,43 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
             print(f"GLOBAL SYNONYM NO HIT: '{q_resolved}' → continuando con q original='{q}'")
 
         # ── PASO 0: Sinónimo exacto en pricebook (accent-insensitive) ────────
-        _SYN_TRANSLATE = "translate(COALESCE(synonyms,''), 'áéíóúÁÉÍÓÚñÑ', 'aeiouAEIOUnN')"
-        _NAME_TRANSLATE = "translate(COALESCE(name,''), 'áéíóúÁÉÍÓÚñÑ', 'aeiouAEIOUnN')"
+        _SYN_TRANSLATE = _sql_translate("synonyms")
+        _NAME_TRANSLATE = _sql_translate("name")
         cur0 = conn.cursor()
         try:
             cur0.execute(
                 f"SELECT sku, name, unit, price, vat_rate, synonyms FROM pricebook_items WHERE company_id = %s AND lower({_SYN_TRANSLATE}) LIKE lower(%s) LIMIT 5",
-                (company_id, f"%{_strip_accents(q)}%"),
+                (company_id, f"%{_phonetic(q)}%"),
             )
             syn_rows = cur0.fetchall()
 
             if not syn_rows and q_tokens:
-                first_token = _strip_accents(q_tokens[0])
+                first_token = _phonetic(q_tokens[0])
                 cur0.execute(
                     f"SELECT sku, name, unit, price, vat_rate, synonyms FROM pricebook_items WHERE company_id = %s AND lower({_SYN_TRANSLATE}) LIKE lower(%s) LIMIT 5",
                     (company_id, f"%{first_token}%"),
                 )
                 syn_rows = cur0.fetchall()
                 if len(syn_rows) > 1 and len(q_tokens) > 1:
-                    rest_tokens = [_strip_accents(t) for t in q_tokens[1:]]
+                    rest_tokens = [_phonetic(t) for t in q_tokens[1:]]
                     syn_rows = [
                         r for r in syn_rows
-                        if any(t in _strip_accents((r[1] or "").lower()) for t in rest_tokens)
-                        or fuzz.token_set_ratio(q, _strip_accents((r[1] or "").lower())) >= 50
+                        if any(t in _phonetic((r[1] or "").lower()) for t in rest_tokens)
+                        or fuzz.token_set_ratio(q, _phonetic((r[1] or "").lower())) >= 50
                     ]
         finally:
             cur0.close()
 
         def _best_syn_score(row, query):
-            """Score considerando nombre Y sinónimos del producto (accent-insensitive)."""
-            query_plain = _strip_accents(query)
-            name = _strip_accents((row[1] or "").lower())
+            """Score considerando nombre Y sinónimos del producto (phonetic-normalized)."""
+            query_plain = _phonetic(query)
+            name = _phonetic((row[1] or "").lower())
             name_score = max(fuzz.token_set_ratio(query_plain, name), fuzz.partial_ratio(query_plain, name))
             # También comparar contra cada sinónimo individual
             syns_raw = row[5] if len(row) > 5 else ""
             if syns_raw:
                 for s in (syns_raw or "").split(","):
-                    s = _strip_accents(s.strip().lower())
+                    s = _phonetic(s.strip().lower())
                     if s:
                         syn_score = max(fuzz.token_set_ratio(query_plain, s), fuzz.partial_ratio(query_plain, s))
                         if syn_score > name_score:
@@ -1102,9 +1112,8 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
         if len(syn_rows) == 1:
             best_score = _best_syn_score(syn_rows[0], q)
             # Sanity check: at least one key query token (>3 chars) must appear
-            # in the product name or synonyms to avoid false positives like
-            # "ciclónica" matching "lamina en rollo" just because of shared "rollo"/"cal"
-            _prod_text = _strip_accents(((syn_rows[0][1] or "") + " " + (syn_rows[0][5] if len(syn_rows[0]) > 5 else "") or "").lower())
+            # in the product name or synonyms to avoid false positives
+            _prod_text = _phonetic(((syn_rows[0][1] or "") + " " + (syn_rows[0][5] if len(syn_rows[0]) > 5 else "") or "").lower())
             _key_tokens = [t for t in q.split() if len(t) > 3 and not t.replace(".", "").isdigit()]
             _token_overlap = sum(1 for t in _key_tokens if t in _prod_text)
             _overlap_ratio = _token_overlap / max(len(_key_tokens), 1)
@@ -1117,8 +1126,8 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                 print(f"SYNONYM DIRECT REJECTED (low overlap): query='{user_query}' match='{syn_rows[0][1]}' score={best_score} overlap={_overlap_ratio:.0%} key_tokens={_key_tokens}")
         elif len(syn_rows) > 1:
             # 1) Narrow by name containment (accent-insensitive)
-            _q_plain = _strip_accents(q)
-            name_matches = [r for r in syn_rows if _q_plain in _strip_accents((r[1] or "").lower())]
+            _q_plain = _phonetic(q)
+            name_matches = [r for r in syn_rows if _q_plain in _phonetic((r[1] or "").lower())]
             if name_matches and len(name_matches) < len(syn_rows):
                 print(f"SYNONYM NAME FILTER: {len(syn_rows)} → {len(name_matches)} (query='{q}' in name)")
                 syn_rows = name_matches
@@ -1189,7 +1198,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
         if pool_rows:
             scored = []
             for r in pool_rows:
-                name = _strip_accents((r[1] or "").lower())
+                name = _phonetic((r[1] or "").lower())
                 base = max(fuzz.token_set_ratio(q, name), fuzz.partial_ratio(q, name))
                 bonus = _spec_bonus(r[1], q_medida, q_cal)
                 scored.append((base + bonus, r))
@@ -1205,7 +1214,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
             if top >= min_score and gap >= min_gap:
                 r = scored[0][1]
                 # Sanity: verify key query tokens overlap with product name
-                _ilike_name = _strip_accents((r[1] or "").lower())
+                _ilike_name = _phonetic((r[1] or "").lower())
                 _ilike_key = [t for t in q_tokens if len(t) > 3 and not t.replace(".", "").isdigit()]
                 _ilike_overlap = sum(1 for t in _ilike_key if t in _ilike_name) / max(len(_ilike_key), 1)
                 if not _ilike_key or _ilike_overlap >= 0.3:
@@ -1234,7 +1243,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                     scored = _ilike_spec
 
             q_first_token = q.split()[0] if q.split() else q
-            filtered = [(s, r) for s, r in scored[:5] if _strip_accents((r[1] or "").lower()).startswith(q_first_token)]
+            filtered = [(s, r) for s, r in scored[:5] if _phonetic((r[1] or "").lower()).startswith(q_first_token)]
             candidates = filtered if filtered else scored[:5]
             _log_event("ambiguous", "ilike_ambiguous")
             return {"status": "ambiguous", "item": None, "candidates": [_make_item(r) for _, r in candidates]}
@@ -1257,7 +1266,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                   )
                 LIMIT 30
                 """,
-                (company_id, _tsquery, f"%{_strip_accents(q)}%", f"%{_strip_accents(q)}%"),
+                (company_id, _tsquery, f"%{_phonetic(q)}%", f"%{_phonetic(q)}%"),
             )
             rows = cur2.fetchall()
         except Exception as e:
@@ -1266,7 +1275,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
             try:
                 cur2_b.execute(
                     f"SELECT sku, name, unit, price, vat_rate, synonyms FROM pricebook_items WHERE company_id = %s AND (lower({_NAME_TRANSLATE}) LIKE lower(%s) OR lower({_SYN_TRANSLATE}) LIKE lower(%s)) LIMIT 30",
-                    (company_id, f"%{_strip_accents(q)}%", f"%{_strip_accents(q)}%"),
+                    (company_id, f"%{_phonetic(q)}%", f"%{_phonetic(q)}%"),
                 )
                 rows = cur2_b.fetchall()
             finally:
@@ -1276,8 +1285,8 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
 
         scored = []
         for r in rows:
-            name = _strip_accents((r[1] or "").lower())
-            syns = [_strip_accents(s.strip().lower()) for s in (r[5] or "").split(",") if s.strip()]
+            name = _phonetic((r[1] or "").lower())
+            syns = [_phonetic(s.strip().lower()) for s in (r[5] or "").split(",") if s.strip()]
             all_terms = [name] + syns
             base = max(max(fuzz.token_set_ratio(q, t), fuzz.partial_ratio(q, t)) for t in all_terms)
             name_score = max(fuzz.token_set_ratio(q, name), fuzz.partial_ratio(q, name))
@@ -1297,7 +1306,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
         scored.sort(key=lambda x: x[0], reverse=True)
 
         if len(scored) == 1:
-            _fu_name = _strip_accents((scored[0][1].get("name") or "").lower())
+            _fu_name = _phonetic((scored[0][1].get("name") or "").lower())
             _fu_key = [t for t in q.split() if len(t) >= 4 and not t.replace(".", "").isdigit()]
             _fu_overlap = sum(1 for t in _fu_key if t in _fu_name) / max(len(_fu_key), 1)
             # Accept single fuzzy result if score >= 85 AND key tokens overlap
@@ -1339,7 +1348,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                     scored = spec_filtered  # narrow candidates for return
 
             # Key token overlap: if top match has strong token overlap, auto-pick
-            _fa_name = _strip_accents((scored[0][1].get("name") or "").lower())
+            _fa_name = _phonetic((scored[0][1].get("name") or "").lower())
             _fa_key = [t for t in q.split() if len(t) >= 4 and not t.replace(".", "").isdigit()]
             _fa_overlap = sum(1 for t in _fa_key if t in _fa_name) / max(len(_fa_key), 1)
             if top_score >= 90 and _fa_overlap >= 0.5 and gap >= 5:
@@ -1349,7 +1358,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
 
             print(f"FUZZY AMBIGUOUS: query='{user_query}' found={len(scored)}")
             q_first_token = q.split()[0] if q.split() else q
-            filtered = [(s, item) for s, item in scored[:5] if _strip_accents((item.get("name") or "").lower()).startswith(q_first_token)]
+            filtered = [(s, item) for s, item in scored[:5] if _phonetic((item.get("name") or "").lower()).startswith(q_first_token)]
             candidates = filtered if filtered else scored[:5]
             _log_event("ambiguous", "fuzzy_ambiguous")
             return {"status": "ambiguous", "item": None, "candidates": [item for _, item in candidates]}
