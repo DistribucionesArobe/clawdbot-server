@@ -2486,14 +2486,14 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
 
         if wa_from:
             st = get_quote_state(company_id, wa_from) or {}
-            if (st.get("cart") or []) or (st.get("pending") or []):
+            has_pending = bool(st.get("pending"))
+            has_cart = bool(st.get("cart"))
+            if has_pending:
+                # Don't reset — remind user of pending clarifications
+                return _build_reply_with_pending(st, company_id=company_id, wa_from=wa_from)
+            if has_cart:
+                # Cart exists but no pending clarifications — let them start fresh
                 clear_quote_state(company_id, wa_from)
-                return {
-                    "type": "list",
-                    "body": f"👋 ¡Hola! Soy el Cotizabot de *{company_name}*\n\n¿En qué te puedo ayudar?",
-                    "options": ["🔨 Cotizar materiales", "🏗️ Calcular m2", "🕐 Horarios y ubicación", "👤 Hablar con alguien"],
-                    "button_label": "Ver opciones",
-                }
         return {
             "type": "list",
             "body": f"👋 ¡Hola! Soy el Cotizabot de *{company_name}*\n\n¿En qué te puedo ayudar?",
