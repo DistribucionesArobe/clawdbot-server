@@ -532,8 +532,8 @@ def _validate_term_in_catalog(conn, normalized: str) -> bool:
     try:
         cur.execute(
             "SELECT 1 FROM pricebook_items "
-            "WHERE lower(translate(name, 'áéíóúÁÉÍÓÚñÑ', 'aeiouAEIOUnN')) LIKE lower(%s) "
-            "   OR lower(translate(synonyms, 'áéíóúÁÉÍÓÚñÑ', 'aeiouAEIOUnN')) LIKE lower(%s) "
+            "WHERE lower(translate(COALESCE(name,''), 'áéíóúÁÉÍÓÚñÑ', 'aeiouAEIOUnN')) LIKE lower(%s) "
+            "   OR lower(translate(COALESCE(synonyms,''), 'áéíóúÁÉÍÓÚñÑ', 'aeiouAEIOUnN')) LIKE lower(%s) "
             "LIMIT 1",
             (f"%{n}%", f"%{n}%"),
         )
@@ -554,7 +554,7 @@ def llm_normalize_query(conn, company_id: str, user_query: str, tenant_context: 
     if not q or len(q) < 2:
         return user_query, "none"
 
-    _JERGA_TRANSLATE = "translate(termino_original, 'áéíóúÁÉÍÓÚñÑ', 'aeiouAEIOUnN')"
+    _JERGA_TRANSLATE = "translate(COALESCE(termino_original,''), 'áéíóúÁÉÍÓÚñÑ', 'aeiouAEIOUnN')"
 
     # 1. Buscar en diccionario local (per-tenant, máxima prioridad)
     try:
@@ -887,7 +887,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                 c.execute(
                     """SELECT sku, name, unit, price, vat_rate FROM pricebook_items
                        WHERE company_id = %s
-                         AND lower(translate(name, 'áéíóúÁÉÍÓÚñÑ', 'aeiouAEIOUnN')) LIKE lower(%s)
+                         AND lower(translate(COALESCE(name,''), 'áéíóúÁÉÍÓÚñÑ', 'aeiouAEIOUnN')) LIKE lower(%s)
                        LIMIT 10""",
                     (company_id, f"%{term_plain}%"),
                 )
@@ -1024,8 +1024,8 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
             print(f"GLOBAL SYNONYM NO HIT: '{q_resolved}' → continuando con q original='{q}'")
 
         # ── PASO 0: Sinónimo exacto en pricebook (accent-insensitive) ────────
-        _SYN_TRANSLATE = "translate(synonyms, 'áéíóúÁÉÍÓÚñÑ', 'aeiouAEIOUnN')"
-        _NAME_TRANSLATE = "translate(name, 'áéíóúÁÉÍÓÚñÑ', 'aeiouAEIOUnN')"
+        _SYN_TRANSLATE = "translate(COALESCE(synonyms,''), 'áéíóúÁÉÍÓÚñÑ', 'aeiouAEIOUnN')"
+        _NAME_TRANSLATE = "translate(COALESCE(name,''), 'áéíóúÁÉÍÓÚñÑ', 'aeiouAEIOUnN')"
         cur0 = conn.cursor()
         try:
             cur0.execute(
