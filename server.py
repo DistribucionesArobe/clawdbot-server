@@ -2307,6 +2307,60 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         "hablar con alguien", "hablar con una persona", "quiero hablar",
         "necesito ayuda", "ayuda humana",
     }
+    # ── Detección de intención NO-cotización ──────────────────────────────
+    # Mensajes que claramente no son pedidos de productos → escalar a humano
+    _non_quote_keywords = [
+        "factura", "facturas", "facturar", "facturacion", "facturación",
+        "pago", "pagos", "pagué", "pague", "transferencia", "deposito", "depósito",
+        "comprobante", "recibo",
+        "conciliacion", "conciliación",
+        "entrega", "entregas", "envio", "envío", "enviar", "mandaron", "llegó", "llego",
+        "pedido", "mi pedido", "orden", "mi orden", "status", "estatus",
+        "reclamo", "queja", "problema", "error", "devolucion", "devolución", "cambio",
+        "garantia", "garantía",
+        "correo", "email", "mail",
+        "credito", "crédito", "saldo", "adeudo", "deuda", "debo", "deben",
+        "cuenta", "estado de cuenta",
+        "vendedor", "encargado", "dueño", "gerente", "jefe",
+        "llamar", "llamada", "telefono", "teléfono", "cel", "celular",
+        "visita", "visitarlos", "dirección", "donde estan", "dónde están",
+        "abierto", "abren", "cierran", "horario",
+    ]
+    _t_lower = user_text.lower().strip()
+    # No interceptar si el mensaje tiene números con productos (ej: "10 cemento y factura")
+    _has_qty = bool(re.search(r"\b\d+\s+[a-záéíóúñü]", _t_lower))
+    if not _has_qty and any(kw in _t_lower for kw in _non_quote_keywords):
+        # Verificar que no sea un saludo simple o que ya esté en escalation_triggers
+        _is_escalation_kw = any(rt == tnorm or rt in tnorm for rt in escalation_triggers)
+        if not _is_escalation_kw:
+            state_esc = get_quote_state(company_id, wa_from) if wa_from else {}
+            state_esc = state_esc or {}
+            try:
+                conn_esc = get_conn()
+                cur_esc = conn_esc.cursor()
+                cur_esc.execute("SELECT owner_phone, wa_api_key, wa_phone_number_id, name FROM companies WHERE id=%s", (company_id,))
+                row_esc = cur_esc.fetchone()
+                cur_esc.close()
+                conn_esc.close()
+                if row_esc and row_esc[0]:
+                    notify_owner_escalation(
+                        wa_api_key=row_esc[1], phone_number_id=row_esc[2], owner_phone=row_esc[0],
+                        client_phone=wa_from,
+                        reason=f"Mensaje no relacionado a cotización: \"{user_text[:100]}\"",
+                        state=state_esc,
+                    )
+                    company_name_esc = row_esc[3] or "la empresa"
+                else:
+                    company_name_esc = "la empresa"
+            except Exception as e:
+                print("NON-QUOTE ESCALATION ERROR:", repr(e))
+                company_name_esc = "la empresa"
+            return (
+                f"Ese tema lo maneja directamente el equipo de *{company_name_esc}* 🙋\n\n"
+                "Ya les avisé y te contactarán pronto.\n\n"
+                "Si quieres cotizar materiales mientras tanto, mándame tu lista con cantidades 📋"
+            )
+
     if any(rt == tnorm or rt in tnorm for rt in escalation_triggers):
         state = get_quote_state(company_id, wa_from) if wa_from else {}
         state = state or {}
