@@ -1144,6 +1144,16 @@ def root():
 # WhatsApp webhook receive
 # -------------------------
 
+_processed_msg_ids: dict = {}  # message_id → timestamp, simple dedup cache
+
+def _dedup_cleanup():
+    """Remove entries older than 5 minutes."""
+    import time
+    now = time.time()
+    stale = [k for k, v in _processed_msg_ids.items() if now - v > 300]
+    for k in stale:
+        del _processed_msg_ids[k]
+
 @app.post("/webhook/whatsapp")
 async def whatsapp_webhook(request: Request):
     payload = await request.json()
@@ -1162,6 +1172,18 @@ async def whatsapp_webhook(request: Request):
         return {"ok": True}
 
     msg = messages[0]
+
+    # ── Deduplication: Meta retries webhooks if response is slow ─────────
+    import time
+    wa_msg_id = msg.get("id", "")
+    if wa_msg_id:
+        if wa_msg_id in _processed_msg_ids:
+            print(f"DEDUP: skipping already-processed message {wa_msg_id}")
+            return {"ok": True}
+        _processed_msg_ids[wa_msg_id] = time.time()
+        if len(_processed_msg_ids) > 500:
+            _dedup_cleanup()
+
     from_phone = msg.get("from")
     msg_type = msg.get("type", "text")
 
@@ -2712,7 +2734,10 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             for qty, prod_raw in multi:
                 if not looks_like_product_phrase(prod_raw) and len(prod_raw.strip()) < 2:
                     continue
-                if prod_raw.strip() == "???":
+                _skip_phrases = {"???", "producto ilegible", "ilegible", "no identificado",
+                                 "producto no identificado", "producto desconocido", "desconocido",
+                                 "no se entiende", "no legible"}
+                if prod_raw.strip().lower() in _skip_phrases or prod_raw.strip() == "???":
                     missing.append({"qty": qty, "raw": "producto ilegible", "candidates": []})
                     continue
                 steps = get_spec_steps(prod_raw)
