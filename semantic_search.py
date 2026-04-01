@@ -949,22 +949,30 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
             m_cal = _re.search(r"\bcal(?:ibre)?\s*(\d+(?:\.\d+)?)\b", t)
             if m_cal:
                 cal = m_cal.group(1)
+            # Strip calibre portion so it doesn't interfere with medida extraction
+            t_no_cal = _re.sub(r"\bcal(?:ibre)?\s*\d+(?:\.\d+)?\b", "", t)
             # Match fractions like "2 1/2", "1 3/8", "1 5/8" FIRST (most specific)
-            m_frac = _re.search(r"\b(\d+\s+\d+/\d+)\b", t)
+            m_frac = _re.search(r"\b(\d+\s+\d+/\d+)\b", t_no_cal)
             if m_frac:
                 medida = m_frac.group(1)  # e.g. "2 1/2"
             else:
-                # Match "N metro(s)" / "N m" / "N cm" / "N pulgadas" patterns
-                m_unit = _re.search(r"\b(\d+(?:\.\d+)?)\s*(?:metros?|mts?|m|cm|centimetros?|pulgadas?|pulg|mm)\b", t)
+                # Match "N unit" patterns including altura, largo, ancho
+                m_unit = _re.search(r"\b(\d+(?:\.\d+)?)\s*(?:metros?|mts?|m|cm|centimetros?|pulgadas?|pulg|mm|altura|alto|largo|ancho)\b", t_no_cal)
                 if m_unit:
                     medida = m_unit.group(1)
-                elif _re.search(r"(?:de\s+)?(\d+(?:\.\d+)?)\s*(?:metros?|mts?|m)\b", t):
-                    medida = _re.search(r"(?:de\s+)?(\d+(?:\.\d+)?)\s*(?:metros?|mts?|m)\b", t).group(1)
+                elif _re.search(r"(?:de\s+)?(\d+(?:\.\d+)?)\s*(?:metros?|mts?|m)\b", t_no_cal):
+                    medida = _re.search(r"(?:de\s+)?(\d+(?:\.\d+)?)\s*(?:metros?|mts?|m)\b", t_no_cal).group(1)
                 else:
                     # Fallback: any decimal number (e.g., "2.50" in product names)
-                    m_med = _re.search(r"\b(\d+\.\d+)\b", t)
+                    m_med = _re.search(r"\b(\d+\.\d+)\b", t_no_cal)
                     if m_med:
                         medida = m_med.group(1)
+                    else:
+                        # Last resort: bare integer that's likely a size (e.g. "espadas 2 simples", "tubos 2 galvanizados")
+                        # Only capture if it's a small number (1-99) and NOT already the calibre
+                        m_bare = _re.search(r"\b(\d{1,2})\b", t_no_cal)
+                        if m_bare and m_bare.group(1) != cal:
+                            medida = m_bare.group(1)
             print(f">>> _extract_specs('{text[:60]}') → medida={medida}, cal={cal}")
             return medida, cal
 
@@ -989,10 +997,16 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                         bonus -= 20  # Wrong size variant
             if cal and (_re.search(rf"\bcal\s*{cal}\b", n)):
                 bonus += 50
-            q_tokens = [t for t in q.split() if len(t) >= 4]
-            for tok in q_tokens:
+            _bt = [t for t in q.split() if len(t) >= 4]
+            for tok in _bt:
                 if tok in n:
                     bonus += 15
+                else:
+                    # Try singular forms: "soleras"→"solera", "conectores"→"conector"
+                    for sg in _singulars_es(tok):
+                        if sg in n:
+                            bonus += 15
+                            break
             return bonus
 
         def _tiebreak(s, row_or_item):
