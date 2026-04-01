@@ -1276,14 +1276,27 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
             second = scored[1][0] if len(scored) > 1 else 0
             gap = top - second
             print(f"ILIKE SCORED: {[(s, r[1]) for s, r in scored[:3]]}")
+            # Helper: check overlap including singular forms
+            def _token_overlap_smart(name_lower, key_tokens):
+                hits = 0
+                for t in key_tokens:
+                    if t in name_lower:
+                        hits += 1
+                    else:
+                        for sg in _singulars_es(t):
+                            if sg in name_lower:
+                                hits += 1
+                                break
+                return hits / max(len(key_tokens), 1)
+
             min_score = 80 if (q_medida or q_cal) else 85
             min_gap = 15 if (q_medida or q_cal) else 8
+            _ilike_key = [t for t in q_tokens if len(t) > 3 and not t.replace(".", "").isdigit()]
+
             if top >= min_score and gap >= min_gap:
                 r = scored[0][1]
-                # Sanity: verify key query tokens overlap with product name
                 _ilike_name = _phonetic((r[1] or "").lower())
-                _ilike_key = [t for t in q_tokens if len(t) > 3 and not t.replace(".", "").isdigit()]
-                _ilike_overlap = sum(1 for t in _ilike_key if t in _ilike_name) / max(len(_ilike_key), 1)
+                _ilike_overlap = _token_overlap_smart(_ilike_name, _ilike_key)
                 if not _ilike_key or _ilike_overlap >= 0.3:
                     print(f"ILIKE RESOLVED: query='{user_query}' match='{r[1]}' overlap={_ilike_overlap:.0%}")
                     item = _make_item(r)
@@ -1291,6 +1304,23 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                     return {"status": "found", "item": item, "candidates": []}
                 else:
                     print(f"ILIKE REJECTED (low overlap): query='{user_query}' match='{r[1]}' score={top} overlap={_ilike_overlap:.0%} key={_ilike_key}")
+
+            # "Obvious winner" path: even if gap is small, if the #1 candidate
+            # contains the PRIMARY query token (first significant word) and #2 does NOT,
+            # resolve directly. E.g. "soleras tensión 2m" → "Solera" wins over "Abrazadera"
+            if top >= 80 and gap < min_gap and len(scored) >= 2 and _ilike_key:
+                _primary = _ilike_key[0]  # first significant token
+                _name1 = _phonetic((scored[0][1][1] or "").lower())
+                _name2 = _phonetic((scored[1][1][1] or "").lower())
+                _p1 = _primary in _name1 or any(sg in _name1 for sg in _singulars_es(_primary))
+                _p2 = _primary in _name2 or any(sg in _name2 for sg in _singulars_es(_primary))
+                if _p1 and not _p2:
+                    r = scored[0][1]
+                    print(f"ILIKE OBVIOUS WINNER: query='{user_query}' match='{r[1]}' (primary='{_primary}' in #1 but not #2)")
+                    item = _make_item(r)
+                    _log_event("found", "ilike_obvious", item, top / 100.0)
+                    return {"status": "found", "item": item, "candidates": []}
+
             # Try spec-based narrowing before returning ambiguous
             if q_medida or q_cal:
                 _ilike_spec = []
@@ -1381,7 +1411,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
         if len(scored) == 1:
             _fu_name = _phonetic((scored[0][1].get("name") or "").lower())
             _fu_key = [t for t in q.split() if len(t) >= 4 and not t.replace(".", "").isdigit()]
-            _fu_overlap = sum(1 for t in _fu_key if t in _fu_name) / max(len(_fu_key), 1)
+            _fu_overlap = _token_overlap_smart(_fu_name, _fu_key)
             # Accept single fuzzy result if score >= 85 AND key tokens overlap
             if scored[0][0] >= 85 and (not _fu_key or _fu_overlap >= 0.3):
                 if q != q_pre_llm and scored[0][0] < 92:
@@ -1423,11 +1453,23 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
             # Key token overlap: if top match has strong token overlap, auto-pick
             _fa_name = _phonetic((scored[0][1].get("name") or "").lower())
             _fa_key = [t for t in q.split() if len(t) >= 4 and not t.replace(".", "").isdigit()]
-            _fa_overlap = sum(1 for t in _fa_key if t in _fa_name) / max(len(_fa_key), 1)
+            _fa_overlap = _token_overlap_smart(_fa_name, _fa_key)
             if top_score >= 90 and _fa_overlap >= 0.5 and gap >= 5:
                 print(f"FUZZY OVERLAP WIN: query='{user_query}' match='{scored[0][1]['name']}' score={top_score} overlap={_fa_overlap:.0%} gap={gap}")
                 _log_event("found", "fuzzy_overlap", scored[0][1], top_score / 100.0)
                 return {"status": "found", "item": scored[0][1], "candidates": []}
+
+            # "Obvious winner": primary token in #1 but not #2
+            if top_score >= 80 and _fa_key:
+                _primary = _fa_key[0]
+                _name1 = _phonetic((scored[0][1].get("name") or "").lower())
+                _name2 = _phonetic((scored[1][1].get("name") or "").lower())
+                _p1 = _primary in _name1 or any(sg in _name1 for sg in _singulars_es(_primary))
+                _p2 = _primary in _name2 or any(sg in _name2 for sg in _singulars_es(_primary))
+                if _p1 and not _p2:
+                    print(f"FUZZY OBVIOUS WINNER: query='{user_query}' match='{scored[0][1]['name']}' (primary='{_primary}' in #1 but not #2)")
+                    _log_event("found", "fuzzy_obvious", scored[0][1], top_score / 100.0)
+                    return {"status": "found", "item": scored[0][1], "candidates": []}
 
             print(f"FUZZY AMBIGUOUS: query='{user_query}' found={len(scored)}")
             q_first_token = q.split()[0] if q.split() else q
