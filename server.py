@@ -2190,7 +2190,17 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                     qty = int(p.get("qty") or 0)
                     raw = (p.get("raw") or "").strip()
                     lines.append(f"❌ *{qty}x {raw}* — no encontrado, escríbelo diferente")
-                return "\n".join(lines)
+                not_found_msg = "\n".join(lines)
+                # If cart has items, show quote + action buttons
+                if cart_count > 0:
+                    quote_msg = cart_render_quote(state, company_id=company_id, client_phone=wa_from)
+                    return {
+                        "type": "text_then_buttons",
+                        "text": not_found_msg + "\n\n" + quote_msg,
+                        "body": "¿Qué deseas hacer?",
+                        "buttons": ["💳 Pagar", "➕ Agregar más", "🗑️ Quitar producto"],
+                    }
+                return not_found_msg
 
         msg = cart_render_quote(state, company_id=company_id, client_phone=wa_from) if (state.get("cart") or []) else ""
 
