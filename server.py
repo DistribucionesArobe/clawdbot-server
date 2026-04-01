@@ -3359,6 +3359,43 @@ def synonyms_clean(
         conn.close()
 
 
+@app.post("/api/admin/set-bundle-size")
+def set_bundle_size(
+    company_id: str = "30208e3c-70c6-4203-97d9-172fad7d3c75",
+    name_contains: str = "",
+    bundle_size: int = 12,
+    dry_run: bool = True
+):
+    """Set bundle_size for products matching name_contains. E.g. name_contains=poste&bundle_size=12"""
+    if not name_contains:
+        raise HTTPException(status_code=400, detail="name_contains requerido")
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT id, name, bundle_size FROM pricebook_items WHERE company_id=%s AND lower(name) LIKE lower(%s) ORDER BY name",
+            (company_id, f"%{name_contains}%")
+        )
+        rows = cur.fetchall()
+        results = []
+        for item_id, name, current_bs in rows:
+            results.append({"id": item_id, "name": name, "old_bundle_size": current_bs, "new_bundle_size": bundle_size})
+            if not dry_run:
+                cur.execute("UPDATE pricebook_items SET bundle_size=%s WHERE id=%s", (bundle_size, item_id))
+        if not dry_run:
+            conn.commit()
+        return {
+            "dry_run": dry_run,
+            "matched": len(results),
+            "bundle_size": bundle_size,
+            "products": results,
+            "hint": "Pass dry_run=false to apply" if dry_run else "Done!"
+        }
+    finally:
+        cur.close()
+        conn.close()
+
+
 @app.get("/api/_version")
 def _version():
     return {"version": "pricebook-v2-2026-03-10", "unaccent": False}
