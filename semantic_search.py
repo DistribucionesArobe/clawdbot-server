@@ -209,7 +209,7 @@ def semantic_search_best(conn, company_id: str, user_query: str,
     try:
         cur.execute(
             """
-            SELECT sku, name, unit, price, vat_rate,
+            SELECT sku, name, unit, price, vat_rate, bundle_size,
                    1 - (embedding <=> %s::vector) AS similarity
             FROM pricebook_items
             WHERE company_id = %s AND embedding IS NOT NULL
@@ -256,7 +256,7 @@ def semantic_search_candidates(conn, company_id: str, user_query: str,
     try:
         cur.execute(
             """
-            SELECT sku, name, unit, price, vat_rate,
+            SELECT sku, name, unit, price, vat_rate, bundle_size,
                    1 - (embedding <=> %s::vector) AS similarity
             FROM pricebook_items
             WHERE company_id = %s AND embedding IS NOT NULL
@@ -297,7 +297,7 @@ def _vector_candidates(conn, company_id: str, query_text: str, limit: int = 20) 
     try:
         cur.execute(
             """
-            SELECT sku, name, unit, price, vat_rate,
+            SELECT sku, name, unit, price, vat_rate, bundle_size,
                    1 - (embedding <=> %s::vector) AS similarity
             FROM pricebook_items
             WHERE company_id = %s AND embedding IS NOT NULL
@@ -324,7 +324,7 @@ def _keyword_candidates(conn, company_id: str, query_phonetic: str,
                          q_tokens: list, limit: int = 20) -> list:
     """Get top-N candidates from ILIKE multi-token search."""
     from rapidfuzz import fuzz
-    _NS_SQL = f"""SELECT sku, name, unit, price, vat_rate FROM pricebook_items
+    _NS_SQL = f"""SELECT sku, name, unit, price, vat_rate, bundle_size FROM pricebook_items
                   WHERE company_id = %s
                     AND lower({_sql_translate('name')}) LIKE lower(%s)
                   LIMIT 10"""
@@ -601,7 +601,7 @@ def fuzzy_search_best(conn, company_id: str, user_query: str, threshold: int = 9
     cur = conn.cursor()
     try:
         cur.execute(
-            "SELECT sku, name, unit, price, vat_rate, synonyms FROM pricebook_items WHERE company_id = %s AND embedding IS NOT NULL",
+            "SELECT sku, name, unit, price, vat_rate, synonyms, bundle_size FROM pricebook_items WHERE company_id = %s AND embedding IS NOT NULL",
             (company_id,),
         )
         rows = cur.fetchall()
@@ -1256,7 +1256,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
             q_tokens = [t for t in q.split() if t not in _soft_stopwords]
         q = " ".join(q_tokens).strip() or q
 
-        _NS_SQL = f"""SELECT sku, name, unit, price, vat_rate FROM pricebook_items
+        _NS_SQL = f"""SELECT sku, name, unit, price, vat_rate, bundle_size FROM pricebook_items
                       WHERE company_id = %s
                         AND lower({_sql_translate('name')}) LIKE lower(%s)
                       LIMIT 25"""
@@ -1392,10 +1392,21 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
             return s
 
         def _make_item(r):
+            # Rows can be:
+            #   (sku, name, unit, price, vat_rate, bundle_size)           — from _NS_SQL
+            #   (sku, name, unit, price, vat_rate, synonyms, bundle_size) — from synonym queries
+            #   (sku, name, unit, price, vat_rate, bundle_size, similarity) — from vector queries
+            # bundle_size is always an int or None; synonyms is always a string
+            _bs = None
+            for i in range(5, len(r)):
+                if isinstance(r[i], int):
+                    _bs = r[i]
+                    break
             return {
                 "sku": r[0], "name": r[1], "unit": r[2],
                 "price": float(r[3]) if r[3] is not None else None,
                 "vat_rate": float(r[4]) if r[4] is not None else None,
+                "bundle_size": _bs,
             }
 
         # ── Context bonus: use other cart items to disambiguate ───────────
@@ -1503,7 +1514,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
         cur0 = conn.cursor()
         try:
             cur0.execute(
-                f"SELECT sku, name, unit, price, vat_rate, synonyms FROM pricebook_items WHERE company_id = %s AND lower({_SYN_TRANSLATE}) LIKE lower(%s) LIMIT 5",
+                f"SELECT sku, name, unit, price, vat_rate, synonyms, bundle_size FROM pricebook_items WHERE company_id = %s AND lower({_SYN_TRANSLATE}) LIKE lower(%s) LIMIT 5",
                 (company_id, f"%{_phonetic(q)}%"),
             )
             syn_rows = cur0.fetchall()
@@ -1511,7 +1522,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
             if not syn_rows and q_tokens:
                 first_token = _phonetic(q_tokens[0])
                 cur0.execute(
-                    f"SELECT sku, name, unit, price, vat_rate, synonyms FROM pricebook_items WHERE company_id = %s AND lower({_SYN_TRANSLATE}) LIKE lower(%s) LIMIT 5",
+                    f"SELECT sku, name, unit, price, vat_rate, synonyms, bundle_size FROM pricebook_items WHERE company_id = %s AND lower({_SYN_TRANSLATE}) LIKE lower(%s) LIMIT 5",
                     (company_id, f"%{first_token}%"),
                 )
                 syn_rows = cur0.fetchall()
@@ -1806,7 +1817,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
         try:
             cur2.execute(
                 f"""
-                SELECT sku, name, unit, price, vat_rate, synonyms
+                SELECT sku, name, unit, price, vat_rate, synonyms, bundle_size
                 FROM pricebook_items
                 WHERE company_id = %s
                   AND (
@@ -1824,7 +1835,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
             cur2_b = conn.cursor()
             try:
                 cur2_b.execute(
-                    f"SELECT sku, name, unit, price, vat_rate, synonyms FROM pricebook_items WHERE company_id = %s AND (lower({_NAME_TRANSLATE}) LIKE lower(%s) OR lower({_SYN_TRANSLATE}) LIKE lower(%s)) LIMIT 30",
+                    f"SELECT sku, name, unit, price, vat_rate, synonyms, bundle_size FROM pricebook_items WHERE company_id = %s AND (lower({_NAME_TRANSLATE}) LIKE lower(%s) OR lower({_SYN_TRANSLATE}) LIKE lower(%s)) LIMIT 30",
                     (company_id, f"%{_phonetic(q)}%", f"%{_phonetic(q)}%"),
                 )
                 rows = cur2_b.fetchall()

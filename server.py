@@ -281,14 +281,28 @@ def extract_product_query(text: str) -> str:
     return t
 
 
+_BUNDLE_WORDS = {"atado", "atados", "paquete", "paquetes", "bulto", "bultos"}
+
+def _resolve_bundle_qty(qty: int, is_bundle: bool, item: dict) -> int:
+    """If customer ordered in bundles and product has bundle_size, multiply qty."""
+    if is_bundle and item and item.get("bundle_size"):
+        return qty * int(item["bundle_size"])
+    return qty
+
 def extract_qty_and_product(text: str):
+    """Extract quantity and product from text like '10 tubos' or '2 atados de poste'.
+    Returns (qty, product, is_bundle) where is_bundle=True if customer used bundle words."""
     t = (text or "").strip().lower()
     m = re.match(r"^\s*(\d+)(?!\.)\s+(.+?)\s*$", t)
     if not m:
-        return None, None
+        return None, None, False
     qty = int(m.group(1))
     product = m.group(2).strip()
-    return qty, product
+    # Detect bundle: "2 atados de poste" → qty=2, product="poste", is_bundle=True
+    bundle_match = re.match(r"^(atados?|paquetes?|bultos?)\s+(?:de\s+)?(.+)$", product)
+    if bundle_match:
+        return qty, bundle_match.group(2).strip(), True
+    return qty, product, False
 
 
 def is_specs_only(text: str) -> bool:
@@ -1124,6 +1138,7 @@ class PricebookItemCreateBody(BaseModel):
     vat_rate: Optional[float] = 0.16
     source: Optional[str] = "manual"
     synonyms: Optional[str] = None
+    bundle_size: Optional[int] = None
 
 # ── NUEVO: schema para PATCH (todos los campos opcionales) ────────────────────
 class PricebookItemUpdateBody(BaseModel):
@@ -1133,6 +1148,7 @@ class PricebookItemUpdateBody(BaseModel):
     price: Optional[float] = None
     vat_rate: Optional[float] = None
     synonyms: Optional[str] = None
+    bundle_size: Optional[int] = None
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -2560,13 +2576,15 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                     _state_specs.pop("pending_specs", None)
 
                 if result["status"] == "found":
+                    _spec_bun = current.get("is_bundle", False)
+                    _spec_fq = _resolve_bundle_qty(current["qty"], _spec_bun, result["item"])
                     _state_specs = cart_add_item(_state_specs, {
                         "sku": result["item"].get("sku"),
                         "name": result["item"].get("name"),
                         "unit": result["item"].get("unit") or "unidad",
                         "price": float(result["item"].get("price") or 0.0),
                         "vat_rate": result["item"].get("vat_rate"),
-                        "qty": current["qty"],
+                        "qty": _spec_fq,
                     })
                 else:
                     pend = _state_specs.get("pending") or []
@@ -2730,8 +2748,10 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 state = {}
             state.pop("pending_specs", None)
             missing = []
-            _pedido_raw = ", ".join(p for _, p in multi if p.strip() != "???")
-            for qty, prod_raw in multi:
+            _pedido_raw = ", ".join(p for _, p, *_ in multi if p.strip() != "???")
+            for _mi in multi:
+                qty, prod_raw = _mi[0], _mi[1]
+                _mi_bundle = _mi[2] if len(_mi) > 2 else False
                 if not looks_like_product_phrase(prod_raw) and len(prod_raw.strip()) < 2:
                     continue
                 _skip_phrases = {"???", "producto ilegible", "ilegible", "no identificado",
@@ -2743,24 +2763,25 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 steps = get_spec_steps(prod_raw)
                 if steps and not already_has_specs(prod_raw, steps):
                     specs_pending = state.get("pending_specs") or []
-                    specs_pending.append({"raw": prod_raw, "qty": qty, "steps": steps, "step_idx": 0, "resolved": {}})
+                    specs_pending.append({"raw": prod_raw, "qty": qty, "is_bundle": _mi_bundle, "steps": steps, "step_idx": 0, "resolved": {}})
                     state["pending_specs"] = specs_pending
                     continue
                 try:
                     result = smart_search(conn, company_id, prod_raw, qty,
-                                          cart_context=_pedido_raw)  
+                                          cart_context=_pedido_raw)
                 except Exception as e:
                     print("SMART SEARCH ERROR:", repr(e))
                     result = {"status": "not_found", "item": None, "candidates": []}
                     save_search_miss(company_id, prod_raw)
                 if result["status"] == "found":
+                    _fq = _resolve_bundle_qty(qty, _mi_bundle, result["item"])
                     state = cart_add_item(state, {
                         "sku": result["item"].get("sku"),
                         "name": result["item"].get("name"),
                         "unit": result["item"].get("unit") or "unidad",
                         "price": float(result["item"].get("price") or 0.0),
                         "vat_rate": result["item"].get("vat_rate"),
-                        "qty": qty,
+                        "qty": _fq,
                     })
                 else:
                     missing.append({"qty": qty, "raw": prod_raw, "candidates": result["candidates"]})
@@ -2790,13 +2811,13 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         finally:
             conn.close()
 
-    qty, prod_query = extract_qty_and_product(user_text)
+    qty, prod_query, _is_bundle = extract_qty_and_product(user_text)
     if qty and prod_query:
         steps = get_spec_steps(prod_query)
         if steps and not already_has_specs(prod_query, steps):
             state = get_quote_state(company_id, wa_from) if wa_from else {}
             state = state or {}
-            state["pending_specs"] = [{"raw": prod_query, "qty": qty, "steps": steps, "step_idx": 0, "resolved": {}}]
+            state["pending_specs"] = [{"raw": prod_query, "qty": qty, "is_bundle": _is_bundle, "steps": steps, "step_idx": 0, "resolved": {}}]
             if wa_from:
                 upsert_quote_state(company_id, wa_from, state)
             return {"type": "list", "body": steps[0]["question"], "options": steps[0]["options"], "button_label": "Ver opciones"}
@@ -2815,6 +2836,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
 
 
             if result["status"] == "found":
+                _final_qty = _resolve_bundle_qty(qty, _is_bundle, result["item"])
                 state = _single_state
                 state = cart_add_item(state, {
                     "sku": result["item"].get("sku"),
@@ -2822,7 +2844,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                     "unit": result["item"].get("unit") or "unidad",
                     "price": float(result["item"].get("price") or 0.0),
                     "vat_rate": result["item"].get("vat_rate"),
-                    "qty": qty,
+                    "qty": _final_qty,
                 })
                 state.pop("pending", None)
                 if wa_from:
@@ -2912,7 +2934,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             return _build_reply_with_pending(state, company_id=company_id, wa_from=wa_from)
 
     if re.search(r"\b\d+\b", user_text):
-        qty, prod_query = extract_qty_and_product(user_text)
+        qty, prod_query, _is_bundle2 = extract_qty_and_product(user_text)
         if qty and prod_query:
             _fallback_state = get_quote_state(company_id, wa_from) if wa_from else {}
             _fallback_state = _fallback_state or {}
@@ -2924,6 +2946,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 conn.close()
 
             if result["status"] == "found":
+                _final_qty2 = _resolve_bundle_qty(qty, _is_bundle2, result["item"])
                 state = _fallback_state
                 state = cart_add_item(state, {
                     "sku": result["item"].get("sku"),
@@ -2931,7 +2954,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                     "unit": result["item"].get("unit") or "unidad",
                     "price": float(result["item"].get("price") or 0.0),
                     "vat_rate": result["item"].get("vat_rate"),
-                    "qty": qty,
+                    "qty": _final_qty2,
                 })
                 state.pop("pending", None)
                 if wa_from:
@@ -2993,14 +3016,16 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                     state = {}
                 state.pop("pending_specs", None)
                 missing = []
-                _pedido_raw = ", ".join(p for _, p in multi if p.strip() != "???")
-                for qty, prod_raw in multi:
+                _pedido_raw = ", ".join(p for _, p, *_ in multi if p.strip() != "???")
+                for _mi2 in multi:
+                    qty, prod_raw = _mi2[0], _mi2[1]
+                    _mi2_bundle = _mi2[2] if len(_mi2) > 2 else False
                     if not looks_like_product_phrase(prod_raw) and len(prod_raw.strip()) < 2:
                         continue
                     steps = get_spec_steps(prod_raw)
                     if steps and not already_has_specs(prod_raw, steps):
                         specs_pending = state.get("pending_specs") or []
-                        specs_pending.append({"raw": prod_raw, "qty": qty, "steps": steps, "step_idx": 0, "resolved": {}})
+                        specs_pending.append({"raw": prod_raw, "qty": qty, "is_bundle": _mi2_bundle, "steps": steps, "step_idx": 0, "resolved": {}})
                         state["pending_specs"] = specs_pending
                         continue
                     try:
@@ -3011,13 +3036,14 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                         result = {"status": "not_found", "item": None, "candidates": []}
                         save_search_miss(company_id, prod_raw)
                     if result["status"] == "found":
+                        _fq2 = _resolve_bundle_qty(qty, _mi2_bundle, result["item"])
                         state = cart_add_item(state, {
                             "sku": result["item"].get("sku"),
                             "name": result["item"].get("name"),
                             "unit": result["item"].get("unit") or "unidad",
                             "price": float(result["item"].get("price") or 0.0),
                             "vat_rate": result["item"].get("vat_rate"),
-                            "qty": qty,
+                            "qty": _fq2,
                         })
                     else:
                         missing.append({"qty": qty, "raw": prod_raw, "candidates": result["candidates"]})
@@ -4465,7 +4491,7 @@ def pricebook_items(
             like = f"%{q.strip()}%"
             cur.execute(
                 """
-                select id, company_id, sku, name, unit, price, vat_rate, source, updated_at, created_at
+                select id, company_id, sku, name, unit, price, vat_rate, source, updated_at, created_at, bundle_size
                 from pricebook_items
                 where company_id = %s and (sku ilike %s or name ilike %s or name_norm ilike %s)
                 order by name asc limit %s
@@ -4474,7 +4500,7 @@ def pricebook_items(
             )
         else:
             cur.execute(
-                "select id, company_id, sku, name, unit, price, vat_rate, source, updated_at, created_at from pricebook_items where company_id = %s order by name asc limit %s",
+                "select id, company_id, sku, name, unit, price, vat_rate, source, updated_at, created_at, bundle_size from pricebook_items where company_id = %s order by name asc limit %s",
                 (company_id, limit),
             )
         rows = cur.fetchall()
@@ -4488,6 +4514,7 @@ def pricebook_items(
                 "source": r[7],
                 "updated_at": r[8].isoformat() if r[8] else None,
                 "created_at": r[9].isoformat() if r[9] else None,
+                "bundle_size": r[10],
             })
         return {"ok": True, "items": items}
     except HTTPException:
@@ -4557,6 +4584,10 @@ def pricebook_item_create(request: Request, body: PricebookItemCreateBody):
         if new_vars:
             synonyms = (synonyms + ", " + ", ".join(new_vars)).strip(", ")
 
+    bundle_size = body.bundle_size
+    if bundle_size is not None:
+        bundle_size = int(bundle_size) if bundle_size > 0 else None
+
     conn = None
     cur = None
     try:
@@ -4564,16 +4595,16 @@ def pricebook_item_create(request: Request, body: PricebookItemCreateBody):
         cur = conn.cursor()
         cur.execute(
             """
-            INSERT INTO pricebook_items (company_id, sku, name, name_norm, unit, price, vat_rate, synonyms, source, updated_at, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now())
+            INSERT INTO pricebook_items (company_id, sku, name, name_norm, unit, price, vat_rate, synonyms, source, bundle_size, updated_at, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now())
             ON CONFLICT (company_id, name_norm)
             DO UPDATE SET sku=EXCLUDED.sku, name=EXCLUDED.name, unit=EXCLUDED.unit,
                 price=EXCLUDED.price, vat_rate=EXCLUDED.vat_rate,
                 synonyms=COALESCE(NULLIF(pricebook_items.synonyms,''), EXCLUDED.synonyms),
-                source=EXCLUDED.source, updated_at=now()
+                source=EXCLUDED.source, bundle_size=EXCLUDED.bundle_size, updated_at=now()
             RETURNING id
             """,
-            (company_id, sku, name, name_norm, unit, price, vat_rate, synonyms, source),
+            (company_id, sku, name, name_norm, unit, price, vat_rate, synonyms, source, bundle_size),
         )
         new_id = cur.fetchone()[0]
         try:
@@ -4700,7 +4731,7 @@ def pricebook_item_update(request: Request, item_id: str, body: PricebookItemUpd
     cur = conn.cursor()
     try:
         cur.execute(
-            "SELECT name, sku, unit, price, vat_rate, synonyms FROM pricebook_items WHERE id=%s AND company_id=%s",
+            "SELECT name, sku, unit, price, vat_rate, synonyms, bundle_size FROM pricebook_items WHERE id=%s AND company_id=%s",
             (item_id, company_id),
         )
         row = cur.fetchone()
@@ -4713,6 +4744,9 @@ def pricebook_item_update(request: Request, item_id: str, body: PricebookItemUpd
         price    = body.price    if body.price    is not None else row[3]
         vat_rate = body.vat_rate if body.vat_rate is not None else row[4]
         synonyms = (body.synonyms.strip() if body.synonyms is not None else None) or row[5] or ""
+        bundle_size = body.bundle_size if body.bundle_size is not None else row[6]
+        if bundle_size is not None and bundle_size <= 0:
+            bundle_size = None
 
         # Auto-generar plurales/singulares como sinónimos
         _auto_vars = _auto_plural_singular(name)
@@ -4727,11 +4761,11 @@ def pricebook_item_update(request: Request, item_id: str, body: PricebookItemUpd
         cur.execute(
             """
             UPDATE pricebook_items
-            SET name=%s, name_norm=%s, sku=%s, unit=%s, price=%s, vat_rate=%s, synonyms=%s, updated_at=now()
+            SET name=%s, name_norm=%s, sku=%s, unit=%s, price=%s, vat_rate=%s, synonyms=%s, bundle_size=%s, updated_at=now()
             WHERE id=%s AND company_id=%s
             RETURNING id
             """,
-            (name, name_norm, sku, unit, price, vat_rate, synonyms, item_id, company_id),
+            (name, name_norm, sku, unit, price, vat_rate, synonyms, bundle_size, item_id, company_id),
         )
         if not cur.fetchone():
             raise HTTPException(status_code=404, detail="Producto no encontrado")
@@ -4957,7 +4991,7 @@ def ner_extract_items(user_text: str):
         )
         raw = (resp.choices[0].message.content or "[]").replace("```json", "").replace("```", "").strip()
         parsed = json.loads(raw)
-        return [(int(it["qty"]), str(it["product"]).strip()) for it in parsed if it.get("qty") and it.get("product")]
+        return [(int(it["qty"]), str(it["product"]).strip(), False) for it in parsed if it.get("qty") and it.get("product")]
     except Exception as e:
         print("NER ERROR:", repr(e))
         return []
@@ -4995,13 +5029,15 @@ def extract_qty_items_robust(text: str):
                 if m:
                     qty = int(m.group(1))
                     prod = m.group(2).replace("_", "/").strip()
+                    # Detect bundle words BEFORE stripping them
+                    _is_bun = bool(re.search(r"\b(atados?|paquetes?|bultos?)\b", prod, re.IGNORECASE))
                     # Solo quitar unidades de EMPAQUE (no de medida/spec)
                     _packaging_re = r"\b(hojas?|piezas?|rollos?|bultos?|sacos?|atados?|paquetes?|costales?|cubetas?|bolsas?|botes?|latas?|tiras?|cajas?|cientos?|millares?)\b"
                     prod = re.sub(_packaging_re, "", prod, flags=re.IGNORECASE).strip()
                     prod = re.sub(r"\bde\b", " ", prod, flags=re.IGNORECASE).strip()
                     prod = re.sub(r"\s+", " ", prod).strip()
                     if prod and qty > 0:
-                        items.append((qty, prod))
+                        items.append((qty, prod, _is_bun))
     return items
 
 @app.post("/api/chat")
@@ -5013,7 +5049,7 @@ async def chat(req: ChatRequest, authorization: str = Header(default="")):
         return {"reply": "Escribe un mensaje para poder ayudarte."}
 
     if app_id == "cotizabot":
-        qty, prod_query = extract_qty_and_product(user_text)
+        qty, prod_query, _is_bundle3 = extract_qty_and_product(user_text)
         if qty and prod_query:
             try:
                 tenant = get_company_from_bearer(authorization)
@@ -5318,6 +5354,30 @@ def toggle_bot(
 # ONBOARDING endpoints
 # ─────────────────────────────────────────────────────────────
 
+def _run_pricebook_migrations(conn):
+    """Add bundle_size column to pricebook_items (idempotent)."""
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name='pricebook_items' AND column_name='bundle_size'
+                ) THEN
+                    ALTER TABLE pricebook_items ADD COLUMN bundle_size INTEGER;
+                END IF;
+            END $$;
+        """)
+        conn.commit()
+        print("PRICEBOOK MIGRATIONS: OK (bundle_size)")
+    except Exception as e:
+        print("PRICEBOOK MIGRATION ERROR:", repr(e))
+        conn.rollback()
+    finally:
+        cur.close()
+
+
 def _run_onboarding_migrations(conn):
     """Add onboarding columns to companies table (idempotent)."""
     cur = conn.cursor()
@@ -5421,6 +5481,7 @@ def empresa_perfil_update(request: Request, body: EmpresaPerfilBody):
     try:
         conn = get_conn()
         # Run migrations first (idempotent)
+        _run_pricebook_migrations(conn)
         _run_onboarding_migrations(conn)
 
         cur = conn.cursor()
