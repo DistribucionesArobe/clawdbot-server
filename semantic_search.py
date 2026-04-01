@@ -1259,7 +1259,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
         _NS_SQL = f"""SELECT sku, name, unit, price, vat_rate FROM pricebook_items
                       WHERE company_id = %s
                         AND lower({_sql_translate('name')}) LIKE lower(%s)
-                      LIMIT 10"""
+                      LIMIT 25"""
 
         def _name_search(term):
             c = conn.cursor()
@@ -1319,25 +1319,40 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
             print(f">>> _extract_specs('{text[:60]}') → medida={medida}, cal={cal}")
             return medida, cal
 
+        def _medida_matches(medida_val, product_name):
+            """Check if a measurement value matches in a product name.
+            Handles: '2' matches '2.00', '1.5' matches '1.50', '2 1/2' matches '2 1/2'"""
+            n = product_name.lower()
+            if not medida_val:
+                return False
+            # Fractions: exact substring
+            if " " in medida_val or "/" in medida_val:
+                return medida_val in n
+            # Numeric: parse and compare against all numbers in name
+            try:
+                target = float(medida_val)
+            except ValueError:
+                return medida_val in n
+            # Find all decimal numbers in the name (but not inside "cal XX" or "abb XX")
+            # Remove cal/calibre and abb sections first to avoid matching caliber as measurement
+            n_no_cal = _re.sub(r'\bcal(?:ibre)?\s*\d+(?:\.\d+)?\b', '', n)
+            n_no_cal = _re.sub(r'\babb\s*\d+(?:\.\d+)?\b', '', n_no_cal)
+            for m in _re.finditer(r'\b(\d+(?:\.\d+)?)\b', n_no_cal):
+                try:
+                    if float(m.group(1)) == target:
+                        return True
+                except ValueError:
+                    pass
+            return False
+
         def _spec_bonus(item_name, medida, cal):
             n = item_name.lower()
             bonus = 0
             if medida:
-                # For fractions like "2 1/2", use simple string containment
-                if " " in medida or "/" in medida:
-                    if medida in n:
-                        bonus += 30
-                    else:
-                        # Penalize: has a different fraction/measurement
-                        bonus -= 20
+                if _medida_matches(medida, item_name):
+                    bonus += 30
                 else:
-                    # Exact medida in product name (e.g., "2" in "2 metro x 2.50 m")
-                    if _re.search(rf"\b{_re.escape(medida)}\s*(?:metros?|mts?|m|cm|mm|pulg)?\b", n):
-                        bonus += 30
-                    # Penalize if product has a DIFFERENT leading measurement
-                    m_prod = _re.search(r"\b(\d+(?:\.\d+)?)\s*(?:metros?|mts?|m)\b", n)
-                    if m_prod and m_prod.group(1) != medida:
-                        bonus -= 20  # Wrong size variant
+                    bonus -= 20  # Wrong size variant
             if cal and (_re.search(rf"\bcal\s*{cal}\b", n)):
                 bonus += 50
             _bt = [t for t in q.split() if len(t) >= 4]
@@ -1703,7 +1718,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                 _ilike_spec = []
                 for s, r in scored:
                     n = (r[1] or "").lower()
-                    if q_medida and q_medida not in n:
+                    if q_medida and not _medida_matches(q_medida, r[1] or ""):
                         continue
                     if q_cal and not _re.search(rf"\bcal(?:ibre)?\s*{q_cal}\b", n):
                         continue
