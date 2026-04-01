@@ -1345,6 +1345,13 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                         after = n_no_cal[m.end():]
                         if _re.match(r'\s+\d+/\d+', after):
                             continue  # Skip: this "2" is part of "2 1/2"
+                        # Check if this number is the denominator of a fraction (e.g. the "2" in "1/2")
+                        before = n_no_cal[:m.start()]
+                        if _re.search(r'\d+/$', before):
+                            continue  # Skip: this "2" is denominator of "1/2"
+                        # Check if this number is the numerator of a fraction (e.g. the "3" in "3/8")
+                        if _re.match(r'/\d+', after):
+                            continue  # Skip: this "3" is numerator of "3/8"
                         return True
                 except ValueError:
                     pass
@@ -1732,10 +1739,13 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                 for s, r in scored:
                     n = (r[1] or "").lower()
                     if q_medida and not _medida_matches(q_medida, r[1] or ""):
+                        print(f"ILIKE SPEC FILTER: '{r[1]}' rejected (medida={q_medida} not matched)")
                         continue
                     if q_cal and not _re.search(rf"\bcal(?:ibre)?\s*{q_cal}\b", n):
+                        print(f"ILIKE SPEC FILTER: '{r[1]}' rejected (cal={q_cal} not matched)")
                         continue
                     _ilike_spec.append((s, r))
+                print(f"ILIKE SPEC NARROWING: {len(scored)} → {len(_ilike_spec)} candidates (medida={q_medida}, cal={q_cal})")
                 if len(_ilike_spec) == 1:
                     print(f"ILIKE SPEC RESOLVED: query='{user_query}' match='{_ilike_spec[0][1][1]}'")
                     item = _make_item(_ilike_spec[0][1])
