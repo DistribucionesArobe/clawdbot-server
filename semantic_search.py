@@ -1549,7 +1549,10 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
             _key_tokens = [t for t in q.split() if len(t) > 3 and not t.replace(".", "").isdigit()]
             _token_overlap = sum(1 for t in _key_tokens if t in _prod_text)
             _overlap_ratio = _token_overlap / max(len(_key_tokens), 1)
-            if best_score >= 60 and (not _key_tokens or _overlap_ratio >= 0.3):
+            # Check if any significant key token (>5 chars) is missing from the product
+            _missing_significant = [t for t in _key_tokens if len(t) > 5 and t not in _prod_text
+                                    and not any(_phonetic(sg) in _prod_text for sg in _singulars_es(t))]
+            if best_score >= 60 and (not _key_tokens or _overlap_ratio >= 0.5) and not _missing_significant:
                 print(f"SYNONYM DIRECT HIT: query='{user_query}' match='{syn_rows[0][1]}' score={best_score} overlap={_overlap_ratio:.0%}")
                 item = _make_item(syn_rows[0])
                 _log_event("found", "synonym_direct", item, best_score / 100.0)
