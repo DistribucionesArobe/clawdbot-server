@@ -3155,6 +3155,38 @@ def rebuild_synonyms_public(company_id: str = "30208e3c-70c6-4203-97d9-172fad7d3
         conn.close()
 
 
+@app.get("/api/admin/synonyms-audit")
+def synonyms_audit(company_id: str = "30208e3c-70c6-4203-97d9-172fad7d3c75"):
+    """List all products with their synonyms for auditing"""
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT name, synonyms FROM pricebook_items WHERE company_id=%s ORDER BY name",
+            (company_id,)
+        )
+        rows = cur.fetchall()
+        result = []
+        total_with_syn = 0
+        total_without_syn = 0
+        for name, synonyms in rows:
+            syn = (synonyms or "").strip()
+            if syn:
+                total_with_syn += 1
+                result.append({"name": name, "synonyms": syn})
+            else:
+                total_without_syn += 1
+        return {
+            "total": len(rows),
+            "with_synonyms": total_with_syn,
+            "without_synonyms": total_without_syn,
+            "items": result
+        }
+    finally:
+        cur.close()
+        conn.close()
+
+
 @app.get("/api/_version")
 def _version():
     return {"version": "pricebook-v2-2026-03-10", "unaccent": False}
