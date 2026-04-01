@@ -2973,8 +2973,10 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         )
 
     if looks_like_product_phrase(user_text) and not re.search(r"\b\d+\b", user_text):
+        # --- Default qty=1: productos sin cantidad se cotizan automáticamente ---
         productos_detectados = []
-        for sep in [" y ", " e ", ",", "/"]:
+        # Intentar splitear por separadores comunes
+        for sep in ["\n", " y ", " e ", ",", "/"]:
             if sep in user_text.lower():
                 partes = [p.strip() for p in user_text.lower().split(sep) if p.strip()]
                 if len(partes) > 1:
@@ -2982,27 +2984,122 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                     break
 
         if productos_detectados:
-            ejemplos = ", ".join([f"10 {p}" for p in productos_detectados[:3]])
-            return (
-                f"Vi que mencionas varios productos. ¿Cuántas piezas de cada uno necesitas?\n\n"
-                f"Mándamelo así:\n"
-                f"👉 {ejemplos}\n\n"
-                "🧭 Comandos:\n"
-                "• 'nueva cotizacion' → empezar de cero\n"
-                "• 'salir' → cancelar"
-            )
+            # Multi-producto sin cantidad → asumir qty=1 cada uno
+            multi = [(1, p) for p in productos_detectados]
+            conn = get_conn()
+            try:
+                state = get_quote_state(company_id, wa_from) if wa_from else None
+                if not state:
+                    state = {}
+                state.pop("pending_specs", None)
+                missing = []
+                _pedido_raw = ", ".join(p for _, p in multi if p.strip() != "???")
+                for qty, prod_raw in multi:
+                    if not looks_like_product_phrase(prod_raw) and len(prod_raw.strip()) < 2:
+                        continue
+                    steps = get_spec_steps(prod_raw)
+                    if steps and not already_has_specs(prod_raw, steps):
+                        specs_pending = state.get("pending_specs") or []
+                        specs_pending.append({"raw": prod_raw, "qty": qty, "steps": steps, "step_idx": 0, "resolved": {}})
+                        state["pending_specs"] = specs_pending
+                        continue
+                    try:
+                        result = smart_search(conn, company_id, prod_raw, qty,
+                                              cart_context=_pedido_raw)
+                    except Exception as e:
+                        print("SMART SEARCH ERROR:", repr(e))
+                        result = {"status": "not_found", "item": None, "candidates": []}
+                        save_search_miss(company_id, prod_raw)
+                    if result["status"] == "found":
+                        state = cart_add_item(state, {
+                            "sku": result["item"].get("sku"),
+                            "name": result["item"].get("name"),
+                            "unit": result["item"].get("unit") or "unidad",
+                            "price": float(result["item"].get("price") or 0.0),
+                            "vat_rate": result["item"].get("vat_rate"),
+                            "qty": qty,
+                        })
+                    else:
+                        missing.append({"qty": qty, "raw": prod_raw, "candidates": result["candidates"]})
+                if missing:
+                    state["pending"] = missing
+                else:
+                    state.pop("pending", None)
+                if wa_from:
+                    upsert_quote_state(company_id, wa_from, state)
+                if state.get("pending_specs"):
+                    first = state["pending_specs"][0]
+                    first_step = first["steps"][first["step_idx"]]
+                    prefix = ""
+                    if state.get("cart"):
+                        prefix = cart_render_quote(state, company_id=company_id, client_phone=wa_from) + "\n\n"
+                    n_specs = len(state["pending_specs"])
+                    intro = f"Encontré {n_specs} producto(s) que necesitan especificaciones.\n\n" if n_specs > 1 else ""
+                    return {
+                        "type": "list",
+                        "body": prefix + intro + first_step["question"],
+                        "options": first_step["options"],
+                        "button_label": "Ver opciones",
+                    }
+                if not state.get("cart") and not missing:
+                    return "No encontré esos productos en el catálogo."
+                return _build_reply_with_pending(state, company_id=company_id, wa_from=wa_from)
+            finally:
+                conn.close()
 
-        # Podría ser producto sin cantidad O conversación casual.
-        # Clasificar con GPT antes de asumir que es producto.
+        # Producto individual sin cantidad → clasificar y asumir qty=1
         intent = _classify_intent(user_text)
         if intent == "product":
-            return (
-                "¿Cuántas piezas necesitas?\n"
-                "Ejemplo: '10 sacos cemento' o '5 varilla 3/8'\n\n"
-                "🧭 Comandos:\n"
-                "• 'nueva cotizacion' → empezar de cero\n"
-                "• 'salir' → cancelar"
-            )
+            conn = get_conn()
+            try:
+                state = get_quote_state(company_id, wa_from) if wa_from else None
+                if not state:
+                    state = {}
+                state.pop("pending_specs", None)
+                prod_raw = user_text.strip()
+                steps = get_spec_steps(prod_raw)
+                if steps and not already_has_specs(prod_raw, steps):
+                    specs_pending = state.get("pending_specs") or []
+                    specs_pending.append({"raw": prod_raw, "qty": 1, "steps": steps, "step_idx": 0, "resolved": {}})
+                    state["pending_specs"] = specs_pending
+                    if wa_from:
+                        upsert_quote_state(company_id, wa_from, state)
+                    first = specs_pending[0]
+                    first_step = first["steps"][first["step_idx"]]
+                    return {
+                        "type": "list",
+                        "body": first_step["question"],
+                        "options": first_step["options"],
+                        "button_label": "Ver opciones",
+                    }
+                try:
+                    result = smart_search(conn, company_id, prod_raw, 1,
+                                          cart_context="")
+                except Exception as e:
+                    print("SMART SEARCH ERROR:", repr(e))
+                    result = {"status": "not_found", "item": None, "candidates": []}
+                    save_search_miss(company_id, prod_raw)
+                if result["status"] == "found":
+                    state = cart_add_item(state, {
+                        "sku": result["item"].get("sku"),
+                        "name": result["item"].get("name"),
+                        "unit": result["item"].get("unit") or "unidad",
+                        "price": float(result["item"].get("price") or 0.0),
+                        "vat_rate": result["item"].get("vat_rate"),
+                        "qty": 1,
+                    })
+                    state.pop("pending", None)
+                    if wa_from:
+                        upsert_quote_state(company_id, wa_from, state)
+                    return _build_reply_with_pending(state, company_id=company_id, wa_from=wa_from)
+                else:
+                    missing = [{"qty": 1, "raw": prod_raw, "candidates": result["candidates"]}]
+                    state["pending"] = missing
+                    if wa_from:
+                        upsert_quote_state(company_id, wa_from, state)
+                    return _build_reply_with_pending(state, company_id=company_id, wa_from=wa_from)
+            finally:
+                conn.close()
         else:
             # No es producto → escalar a humano
             return _escalate_non_quote(company_id, wa_from, user_text)
