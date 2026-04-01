@@ -57,6 +57,13 @@ openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 EMBED_MODEL = "text-embedding-3-large"
 
+# Packaging/unit words to skip when selecting the primary token for matching
+_PACKAGING_WORDS = {"rollos", "rollo", "sacos", "saco", "bultos", "bulto",
+                    "piezas", "pieza", "hojas", "hoja", "tiras", "tira",
+                    "metros", "metro", "kilos", "kilo", "cajas", "caja",
+                    "cubetas", "cubeta", "botes", "bote", "bolsas", "bolsa",
+                    "paquetes", "paquete", "costales", "costal", "atados", "atado"}
+
 
 def build_product_text(name: str, sku: str = "", unit: str = "", synonyms: str = "") -> str:
     parts = [(name or "").strip()]
@@ -1630,25 +1637,33 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
             def _token_overlap_smart(name_lower, key_tokens):
                 hits = 0
                 for t in key_tokens:
-                    if t in name_lower:
+                    tp = _phonetic(t)
+                    if tp in name_lower:
                         hits += 1
                     else:
                         for sg in _singulars_es(t):
-                            if sg in name_lower:
+                            if _phonetic(sg) in name_lower:
                                 hits += 1
                                 break
                 return hits / max(len(key_tokens), 1)
 
             min_score = 80 if (q_medida or q_cal) else 85
             min_gap = 15 if (q_medida or q_cal) else 8
-            _ilike_key = [t for t in q_tokens if len(t) > 3 and not t.replace(".", "").isdigit()]
+            # Skip packaging/unit words when selecting key tokens for primary check
+            _ilike_key = [t for t in q_tokens if len(t) > 3 and not t.replace(".", "").isdigit()
+                          and t.lower() not in _PACKAGING_WORDS]
+            # Fallback: if all tokens were packaging, use original filter
+            if not _ilike_key:
+                _ilike_key = [t for t in q_tokens if len(t) > 3 and not t.replace(".", "").isdigit()]
 
             # Helper: check if primary token (or its singular) is in a name
+            # Uses phonetic normalization to match b↔v, z↔s
             def _has_primary(name_lower, primary_tok):
-                if primary_tok in name_lower:
+                tp = _phonetic(primary_tok)
+                if tp in name_lower:
                     return True
                 for sg in _singulars_es(primary_tok):
-                    if sg in name_lower:
+                    if _phonetic(sg) in name_lower:
                         return True
                 return False
 
@@ -1673,8 +1688,9 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                 _primary = _ilike_key[0]  # first significant token
                 _name1 = _phonetic((scored[0][1][1] or "").lower())
                 _name2 = _phonetic((scored[1][1][1] or "").lower())
-                _p1 = _primary in _name1 or any(sg in _name1 for sg in _singulars_es(_primary))
-                _p2 = _primary in _name2 or any(sg in _name2 for sg in _singulars_es(_primary))
+                _pp = _phonetic(_primary)
+                _p1 = _pp in _name1 or any(_phonetic(sg) in _name1 for sg in _singulars_es(_primary))
+                _p2 = _pp in _name2 or any(_phonetic(sg) in _name2 for sg in _singulars_es(_primary))
                 if _p1 and not _p2:
                     r = scored[0][1]
                     print(f"ILIKE OBVIOUS WINNER: query='{user_query}' match='{r[1]}' (primary='{_primary}' in #1 but not #2)")
@@ -1825,7 +1841,10 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
 
             # Key token overlap: if top match has strong token overlap, auto-pick
             _fa_name = _phonetic((scored[0][1].get("name") or "").lower())
-            _fa_key = [t for t in q.split() if len(t) >= 4 and not t.replace(".", "").isdigit()]
+            _fa_key = [t for t in q.split() if len(t) >= 4 and not t.replace(".", "").isdigit()
+                       and t.lower() not in _PACKAGING_WORDS]
+            if not _fa_key:
+                _fa_key = [t for t in q.split() if len(t) >= 4 and not t.replace(".", "").isdigit()]
             _fa_overlap = _token_overlap_smart(_fa_name, _fa_key)
             if top_score >= 90 and _fa_overlap >= 0.5 and gap >= 5:
                 print(f"FUZZY OVERLAP WIN: query='{user_query}' match='{scored[0][1]['name']}' score={top_score} overlap={_fa_overlap:.0%} gap={gap}")
@@ -1837,8 +1856,9 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                 _primary = _fa_key[0]
                 _name1 = _phonetic((scored[0][1].get("name") or "").lower())
                 _name2 = _phonetic((scored[1][1].get("name") or "").lower())
-                _p1 = _primary in _name1 or any(sg in _name1 for sg in _singulars_es(_primary))
-                _p2 = _primary in _name2 or any(sg in _name2 for sg in _singulars_es(_primary))
+                _pp = _phonetic(_primary)
+                _p1 = _pp in _name1 or any(_phonetic(sg) in _name1 for sg in _singulars_es(_primary))
+                _p2 = _pp in _name2 or any(_phonetic(sg) in _name2 for sg in _singulars_es(_primary))
                 if _p1 and not _p2:
                     print(f"FUZZY OBVIOUS WINNER: query='{user_query}' match='{scored[0][1]['name']}' (primary='{_primary}' in #1 but not #2)")
                     _log_event("found", "fuzzy_obvious", scored[0][1], top_score / 100.0)
