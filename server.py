@@ -655,6 +655,31 @@ def print_db_fingerprint():
 
 print_db_fingerprint()
 
+
+def _run_pricebook_migrations(conn):
+    """Add bundle_size column to pricebook_items (idempotent)."""
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name='pricebook_items' AND column_name='bundle_size'
+                ) THEN
+                    ALTER TABLE pricebook_items ADD COLUMN bundle_size INTEGER;
+                END IF;
+            END $$;
+        """)
+        conn.commit()
+        print("PRICEBOOK MIGRATIONS: OK (bundle_size)")
+    except Exception as e:
+        print("PRICEBOOK MIGRATION ERROR:", repr(e))
+        conn.rollback()
+    finally:
+        cur.close()
+
+
 # Run pricebook migrations at startup (idempotent)
 try:
     _mig_conn = get_conn()
@@ -5398,30 +5423,6 @@ def toggle_bot(
 # ─────────────────────────────────────────────────────────────
 # ONBOARDING endpoints
 # ─────────────────────────────────────────────────────────────
-
-def _run_pricebook_migrations(conn):
-    """Add bundle_size column to pricebook_items (idempotent)."""
-    cur = conn.cursor()
-    try:
-        cur.execute("""
-            DO $$
-            BEGIN
-                IF NOT EXISTS (
-                    SELECT 1 FROM information_schema.columns
-                    WHERE table_name='pricebook_items' AND column_name='bundle_size'
-                ) THEN
-                    ALTER TABLE pricebook_items ADD COLUMN bundle_size INTEGER;
-                END IF;
-            END $$;
-        """)
-        conn.commit()
-        print("PRICEBOOK MIGRATIONS: OK (bundle_size)")
-    except Exception as e:
-        print("PRICEBOOK MIGRATION ERROR:", repr(e))
-        conn.rollback()
-    finally:
-        cur.close()
-
 
 def _run_onboarding_migrations(conn):
     """Add onboarding columns to companies table (idempotent)."""
