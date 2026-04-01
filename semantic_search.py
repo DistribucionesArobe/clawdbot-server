@@ -55,7 +55,7 @@ def _singulars_es(word: str):
 OPENAI_API_KEY = (os.getenv("OPENAI_API_KEY") or "").strip()
 openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
-EMBED_MODEL = "text-embedding-3-small"
+EMBED_MODEL = "text-embedding-3-large"
 
 
 def build_product_text(name: str, sku: str = "", unit: str = "", synonyms: str = "") -> str:
@@ -269,6 +269,319 @@ def semantic_search_candidates(conn, company_id: str, user_query: str,
     print(f"SEMANTIC CANDIDATES: query='{user_query}' found={len(candidates)}")
     print(f"SEMANTIC CANDS DETAIL: {[(c['name'], round(c['similarity'],3)) for c in candidates]}")
     return candidates
+
+
+# ─── HYBRID SEARCH v2: keyword + vector + RRF + LLM reranker ────────────────
+
+def _vector_candidates(conn, company_id: str, query_text: str, limit: int = 20) -> list:
+    """Get top-N candidates from pgvector cosine similarity."""
+    try:
+        query_vector = get_embedding(query_text)
+    except Exception as e:
+        print(f"VECTOR CANDIDATES ERROR (embedding): {repr(e)}")
+        return []
+    vector_str = "[" + ",".join(str(x) for x in query_vector) + "]"
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT sku, name, unit, price, vat_rate,
+                   1 - (embedding <=> %s::vector) AS similarity
+            FROM pricebook_items
+            WHERE company_id = %s AND embedding IS NOT NULL
+            ORDER BY embedding <=> %s::vector
+            LIMIT %s
+            """,
+            (vector_str, company_id, vector_str, limit),
+        )
+        rows = cur.fetchall()
+    finally:
+        cur.close()
+    results = []
+    for r in rows:
+        results.append({
+            "sku": r[0], "name": r[1], "unit": r[2],
+            "price": float(r[3]) if r[3] is not None else None,
+            "vat_rate": float(r[4]) if r[4] is not None else None,
+            "similarity": float(r[5]),
+        })
+    return results
+
+
+def _keyword_candidates(conn, company_id: str, query_phonetic: str,
+                         q_tokens: list, limit: int = 20) -> list:
+    """Get top-N candidates from ILIKE multi-token search."""
+    from rapidfuzz import fuzz
+    _NS_SQL = f"""SELECT sku, name, unit, price, vat_rate FROM pricebook_items
+                  WHERE company_id = %s
+                    AND lower({_sql_translate('name')}) LIKE lower(%s)
+                  LIMIT 10"""
+    seen = set()
+    merged = []
+    cur = conn.cursor()
+    try:
+        for tok in q_tokens:
+            if len(tok) < 3 or tok.replace(".", "").isdigit():
+                continue
+            tok_phon = _phonetic(tok)
+            cur.execute(_NS_SQL, (company_id, f"%{tok_phon}%"))
+            for r in cur.fetchall():
+                key = (r[0] or "", r[1] or "")
+                if key not in seen:
+                    seen.add(key)
+                    merged.append(r)
+            # Also try singular
+            for sg in _singulars_es(tok_phon):
+                cur.execute(_NS_SQL, (company_id, f"%{sg}%"))
+                for r in cur.fetchall():
+                    key = (r[0] or "", r[1] or "")
+                    if key not in seen:
+                        seen.add(key)
+                        merged.append(r)
+    finally:
+        cur.close()
+    # Score with fuzzy + build dicts
+    results = []
+    for r in merged:
+        name_phon = _phonetic((r[1] or "").lower())
+        score = max(fuzz.token_set_ratio(query_phonetic, name_phon),
+                    fuzz.partial_ratio(query_phonetic, name_phon))
+        results.append({
+            "sku": r[0], "name": r[1], "unit": r[2],
+            "price": float(r[3]) if r[3] is not None else None,
+            "vat_rate": float(r[4]) if r[4] is not None else None,
+            "keyword_score": score / 100.0,
+        })
+    results.sort(key=lambda x: x["keyword_score"], reverse=True)
+    return results[:limit]
+
+
+def _rrf_merge(keyword_results: list, vector_results: list, k: int = 60) -> list:
+    """Reciprocal Rank Fusion: combine keyword + vector rankings."""
+    scores = {}  # name → {rrf_score, item}
+    for rank, item in enumerate(keyword_results):
+        name = item["name"]
+        scores[name] = {
+            "rrf": 1.0 / (k + rank + 1),
+            "item": item,
+            "kw_rank": rank + 1,
+            "vec_rank": None,
+            "vec_sim": 0,
+        }
+    for rank, item in enumerate(vector_results):
+        name = item["name"]
+        vec_score = 1.0 / (k + rank + 1)
+        if name in scores:
+            scores[name]["rrf"] += vec_score
+            scores[name]["vec_rank"] = rank + 1
+            scores[name]["vec_sim"] = item.get("similarity", 0)
+        else:
+            scores[name] = {
+                "rrf": vec_score,
+                "item": item,
+                "kw_rank": None,
+                "vec_rank": rank + 1,
+                "vec_sim": item.get("similarity", 0),
+            }
+    # Sort by RRF score descending
+    ranked = sorted(scores.values(), key=lambda x: x["rrf"], reverse=True)
+    return ranked
+
+
+def _llm_rerank(conn, company_id: str, user_query: str, candidates: list,
+                cart_context: str = "", max_candidates: int = 10) -> dict:
+    """
+    LLM reranker: send top candidates to GPT-4o-mini to pick the best match.
+    Returns {"status": "found"/"ambiguous"/"not_found", "item": ..., "candidates": [...]}
+    """
+    if not openai_client or not candidates:
+        return {"status": "not_found", "item": None, "candidates": []}
+
+    top_n = candidates[:max_candidates]
+    catalog_lines = []
+    for i, c in enumerate(top_n):
+        item = c["item"]
+        name = item.get("name", "")
+        unit = item.get("unit", "")
+        unit_txt = f" ({unit})" if unit else ""
+        kw = f"kw#{c['kw_rank']}" if c.get("kw_rank") else ""
+        vec = f"vec#{c['vec_rank']}:{c['vec_sim']:.2f}" if c.get("vec_rank") else ""
+        catalog_lines.append(f"{i + 1}. {name}{unit_txt} [{kw} {vec}]")
+    catalog_str = "\n".join(catalog_lines)
+
+    context_block = ""
+    if cart_context:
+        context_block = (
+            f"CONTEXTO DEL PEDIDO: {cart_context}\n"
+            f"Usa este contexto para inferir la categoría del producto buscado.\n\n"
+        )
+
+    try:
+        resp = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Eres un ferretero mexicano experto. El cliente busca un producto. "
+                        "Te doy los mejores candidatos del catálogo ordenados por relevancia.\n\n"
+                        "REGLAS:\n"
+                        "- Si HAY una coincidencia clara → responde SOLO ese número (ej: '3')\n"
+                        "- Si hay 2-3 opciones del MISMO producto en diferentes medidas → números por coma (ej: '3,5,7')\n"
+                        "- Si NINGUNO corresponde → responde: NO\n"
+                        "- NUNCA expliques. Solo número(s) o NO.\n\n"
+                        "IMPORTANTE: Conoces la jerga mexicana de construcción:\n"
+                        "- 'pasta para durock/tablaroca' = basecoat/compuesto para juntas\n"
+                        "- 'malla para durock/tablaroca' = cinta de fibra de vidrio\n"
+                        "- 'tanque' puede ser 'tinaco'\n"
+                        "- 'RH'/'HR' = resistente a humedad = anti-moho\n"
+                        "- Usa el contexto del pedido para desambiguar"
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"{context_block}"
+                        f"Candidatos:\n{catalog_str}\n\n"
+                        f"El cliente busca: \"{user_query}\"\n"
+                        "¿Cuál número? (número, números por coma, o NO)"
+                    ),
+                },
+            ],
+            temperature=0.0,
+            max_tokens=20,
+        )
+        raw = (resp.choices[0].message.content or "").strip().upper()
+        print(f"LLM RERANK: query='{user_query}' response='{raw}' candidates={[c['item']['name'] for c in top_n[:5]]}")
+
+        if raw == "NO" or not raw:
+            return {"status": "not_found", "item": None, "candidates": []}
+
+        parts = [p.strip() for p in raw.split(",") if p.strip().isdigit()]
+        picked = []
+        for p in parts:
+            idx = int(p) - 1
+            if 0 <= idx < len(top_n):
+                picked.append(top_n[idx]["item"])
+
+        if len(picked) == 1:
+            return {"status": "found", "item": picked[0], "candidates": []}
+        elif picked:
+            return {"status": "ambiguous", "item": None, "candidates": picked}
+        else:
+            return {"status": "not_found", "item": None, "candidates": []}
+
+    except Exception as e:
+        print(f"LLM RERANK ERROR: {repr(e)}")
+        return {"status": "not_found", "item": None, "candidates": []}
+
+
+def _auto_learn_synonym(conn, company_id: str, query_raw: str, product_name: str):
+    """Auto-save successful match to jerga_local for instant future lookups."""
+    try:
+        q = _phonetic(query_raw.lower().strip())
+        if not q or len(q) < 3:
+            return
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                """INSERT INTO diccionario_jerga_local (company_id, termino_original, termino_normalizado, source, usage_count)
+                   VALUES (%s, %s, %s, 'auto_learn', 1)
+                   ON CONFLICT (company_id, termino_original)
+                   DO UPDATE SET usage_count = diccionario_jerga_local.usage_count + 1,
+                                 termino_normalizado = EXCLUDED.termino_normalizado""",
+                (company_id, q, product_name),
+            )
+            print(f"AUTO-LEARN: '{q}' → '{product_name}' (tenant={company_id[:8]})")
+        finally:
+            cur.close()
+    except Exception as e:
+        print(f"AUTO-LEARN ERROR: {repr(e)}")
+
+
+def hybrid_search(conn, company_id: str, user_query: str, q_normalized: str,
+                   q_tokens: list, q_medida: str = None, q_cal: str = None,
+                   cart_context: str = "") -> dict:
+    """
+    Hybrid search v2: keyword + vector + RRF + LLM reranker.
+    Returns {"status": "found"/"ambiguous"/"not_found", "item": ..., "candidates": [...]}
+    """
+    import re as _re
+    from rapidfuzz import fuzz
+
+    q_phonetic = _phonetic(q_normalized)
+
+    # ── Step 1: Get candidates from both sources in parallel-ish ──────────
+    kw_cands = _keyword_candidates(conn, company_id, q_phonetic, q_tokens, limit=20)
+    vec_cands = _vector_candidates(conn, company_id, q_normalized, limit=20)
+
+    print(f"HYBRID: keyword={len(kw_cands)} vector={len(vec_cands)} query='{user_query}'")
+    if vec_cands:
+        print(f"HYBRID VEC TOP-3: {[(c['name'], round(c['similarity'],3)) for c in vec_cands[:3]]}")
+    if kw_cands:
+        print(f"HYBRID KW TOP-3: {[(c['name'], round(c['keyword_score'],3)) for c in kw_cands[:3]]}")
+
+    # ── Step 2: RRF merge ─────────────────────────────────────────────────
+    merged = _rrf_merge(kw_cands, vec_cands)
+    if not merged:
+        return {"status": "not_found", "item": None, "candidates": []}
+
+    # ── Step 3: Apply spec bonus to RRF scores ────────────────────────────
+    for entry in merged:
+        name = (entry["item"].get("name") or "").lower()
+        bonus = 0
+        if q_medida:
+            if " " in q_medida or "/" in q_medida:
+                if q_medida in name:
+                    bonus += 0.01
+                else:
+                    bonus -= 0.005
+            else:
+                if _re.search(rf"\b{_re.escape(q_medida)}\b", name):
+                    bonus += 0.01
+                else:
+                    bonus -= 0.005
+        if q_cal and _re.search(rf"\bcal\s*{q_cal}\b", name):
+            bonus += 0.015
+        entry["rrf"] += bonus
+
+    merged.sort(key=lambda x: x["rrf"], reverse=True)
+    top = merged[0]
+    second = merged[1] if len(merged) > 1 else None
+
+    print(f"HYBRID MERGED TOP-3: {[(e['item']['name'], round(e['rrf'],4)) for e in merged[:3]]}")
+
+    # ── Step 4: Auto-resolve if clear winner ──────────────────────────────
+    # High vector similarity + clear gap = obvious match
+    vec_sim = top.get("vec_sim", 0)
+    rrf_gap = (top["rrf"] - second["rrf"]) if second else 999
+
+    # Obvious: vector similarity > 0.85 and big RRF gap
+    if vec_sim >= 0.85 and rrf_gap >= 0.005:
+        print(f"HYBRID RESOLVED (high vec): query='{user_query}' match='{top['item']['name']}' vec={vec_sim:.3f} gap={rrf_gap:.4f}")
+        return {"status": "found", "item": top["item"], "candidates": []}
+
+    # Obvious: both keyword and vector agree on #1, decent scores
+    if top.get("kw_rank") and top.get("vec_rank"):
+        if top["kw_rank"] <= 2 and top["vec_rank"] <= 2 and vec_sim >= 0.70 and rrf_gap >= 0.003:
+            print(f"HYBRID RESOLVED (kw+vec agree): query='{user_query}' match='{top['item']['name']}' kw#{top['kw_rank']} vec#{top['vec_rank']} sim={vec_sim:.3f}")
+            return {"status": "found", "item": top["item"], "candidates": []}
+
+    # Obvious: only one candidate has both keyword AND vector match
+    dual_match = [e for e in merged[:5] if e.get("kw_rank") and e.get("vec_rank")]
+    if len(dual_match) == 1 and dual_match[0]["vec_sim"] >= 0.60:
+        print(f"HYBRID RESOLVED (only dual): query='{user_query}' match='{dual_match[0]['item']['name']}'")
+        return {"status": "found", "item": dual_match[0]["item"], "candidates": []}
+
+    # ── Step 5: LLM reranker for ambiguous cases ──────────────────────────
+    print(f"HYBRID → LLM RERANK: query='{user_query}' top_rrf={top['rrf']:.4f} gap={rrf_gap:.4f}")
+    result = _llm_rerank(conn, company_id, user_query, merged[:10], cart_context)
+
+    # ── Step 6: Auto-learn from successful LLM picks ──────────────────────
+    if result["status"] == "found" and result.get("item"):
+        _auto_learn_synonym(conn, company_id, user_query, result["item"]["name"])
+
+    return result
 
 
 def fuzzy_search_best(conn, company_id: str, user_query: str, threshold: int = 95) -> Optional[dict]:
@@ -1533,71 +1846,31 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
             _log_event("ambiguous", "fuzzy_ambiguous")
             return {"status": "ambiguous", "item": None, "candidates": [item for _, item in candidates]}
 
-        # ── PASO 3: Semántico ─────────────────────────────────────────────────
-        words = user_query.strip().split()
-        cand_threshold = 0.55 if len(words) == 1 else 0.60 if len(words) == 2 else 0.65
+        # ── PASO 3: HYBRID SEARCH (keyword + vector + RRF + LLM reranker) ────
+        print(f"→ HYBRID SEARCH: query='{user_query}' q='{q}'")
+        hybrid_result = hybrid_search(
+            conn, company_id, user_query, q, q_tokens,
+            q_medida=q_medida, q_cal=q_cal, cart_context=cart_context,
+        )
 
-        candidates = semantic_search_candidates(conn, company_id, user_query,
-                                                threshold=cand_threshold, limit=5)
-        if candidates and candidates[0].get("similarity", 0) >= 0.60:
-            print(f"SEMANTIC CANDIDATES: query='{user_query}' found={len(candidates)}")
-            _log_event("ambiguous", "semantic", None, candidates[0].get("similarity"))
-            return {"status": "ambiguous", "item": None, "candidates": candidates}
+        if hybrid_result["status"] == "found" and hybrid_result.get("item"):
+            matched = hybrid_result["item"]
+            print(f"HYBRID FOUND: query='{user_query}' match='{matched['name']}'")
+            _cache_local_mapping(conn, company_id, q_pre_llm, matched["name"])
+            if q != q_pre_llm:
+                _cache_local_mapping(conn, company_id, q, matched["name"])
+            _log_event("found", "hybrid", matched, 0.85)
+            return hybrid_result
 
-        candidates_low = semantic_search_candidates(conn, company_id, user_query,
-                                                    threshold=0.50, limit=3)
-        if candidates_low:
-            print(f"SEMANTIC LOW THRESHOLD: query='{user_query}' found={len(candidates_low)}")
-            _log_event("ambiguous", "semantic_low", None, candidates_low[0].get("similarity"))
-            return {"status": "ambiguous", "item": None, "candidates": candidates_low}
+        if hybrid_result["status"] == "ambiguous" and hybrid_result.get("candidates"):
+            print(f"HYBRID AMBIGUOUS: query='{user_query}' found={len(hybrid_result['candidates'])}")
+            _log_event("ambiguous", "hybrid_ambiguous")
+            return hybrid_result
 
-        # ── PASO 3.5: GPT Catalog Fallback — el LLM ve el catálogo real ────────
-        try:
-            fallback_results = _gpt_catalog_fallback(conn, company_id, q, cart_context)
-            if fallback_results:
-                if len(fallback_results) == 1:
-                    matched = fallback_results[0]
-                    print(f"GPT CATALOG FOUND: query='{user_query}' match='{matched['name']}'")
-                    _cache_local_mapping(conn, company_id, q_pre_llm, matched["name"])
-                    if q != q_pre_llm:
-                        _cache_local_mapping(conn, company_id, q, matched["name"])
-                    _auto_save_synonym(conn, company_id, q, matched["name"])
-                    _log_event("found", "gpt_catalog", matched, 0.85)
-                    return {"status": "found", "item": matched, "candidates": []}
-                else:
-                    print(f"GPT CATALOG AMBIGUOUS: query='{user_query}' found={len(fallback_results)}")
-                    _log_event("ambiguous", "gpt_catalog_ambiguous")
-                    return {"status": "ambiguous", "item": None, "candidates": fallback_results}
-        except Exception as e:
-            print(f"GPT CATALOG FALLBACK ERROR: {repr(e)}")
-
-        # ── PASO 4: no encontrado → buscar sugerencias similares ──────────────
-        # En vez de solo decir "no encontrado", buscar productos similares
-        # por la primera palabra para dar opciones al cliente.
-        suggestions = []
-        try:
-            first_word = q.split()[0] if q.split() else q
-            if len(first_word) >= 3:
-                cur_sug = conn.cursor()
-                try:
-                    cur_sug.execute(
-                        "SELECT sku, name, unit, price, vat_rate FROM pricebook_items "
-                        "WHERE company_id = %s AND lower(name) LIKE lower(%s) LIMIT 5",
-                        (company_id, f"%{first_word}%"),
-                    )
-                    sug_rows = cur_sug.fetchall()
-                finally:
-                    cur_sug.close()
-                if sug_rows:
-                    suggestions = [_make_item(r) for r in sug_rows]
-                    print(f"NOT FOUND WITH SUGGESTIONS: query='{user_query}' suggestions={[s['name'] for s in suggestions]}")
-        except Exception as e:
-            print(f"SUGGESTIONS ERROR: {repr(e)}")
-
-        if not suggestions:
-            print(f"NOT FOUND: query='{user_query}' → sin sugerencias")
-        _log_event("not_found", "not_found_suggestions" if suggestions else "not_found")
-        return {"status": "not_found", "item": None, "candidates": suggestions}
+        # ── PASO 4: not found ─────────────────────────────────────────────────
+        print(f"NOT FOUND: query='{user_query}'")
+        _log_event("not_found", "not_found")
+        return {"status": "not_found", "item": None, "candidates": []}
 
     except Exception as e:
         print(f"SMART SEARCH FATAL ERROR: {repr(e)}")
