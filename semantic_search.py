@@ -538,6 +538,24 @@ def seed_jerga_global(conn):
         ("rejas blancas", "rejacero blanca"),
         ("reja negra", "rejacero negra"),
         ("rejas negras", "rejacero negra"),
+        # Pasta / compuesto para juntas
+        ("pasta para durock", "basecoat"),
+        ("pasta durock", "basecoat"),
+        ("pasta para tablaroca", "basecoat"),
+        ("pasta tablaroca", "basecoat"),
+        ("pasta para juntas", "basecoat"),
+        ("compuesto para juntas", "basecoat"),
+        # Malla / cinta para juntas
+        ("malla para durock", "cinta fibra de vidrio"),
+        ("malla durock", "cinta fibra de vidrio"),
+        ("malla para tablaroca", "cinta fibra de vidrio"),
+        ("malla tablaroca", "cinta fibra de vidrio"),
+        ("cinta para juntas", "cinta fibra de vidrio"),
+        ("cinta para durock", "cinta fibra de vidrio"),
+        ("cinta para tablaroca", "cinta fibra de vidrio"),
+        # Concertina shorthand
+        ("rollos concertina", "concertina"),
+        ("rollo concertina", "concertina"),
     ]
     try:
         cur = conn.cursor()
@@ -1232,11 +1250,25 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                     _log_event("found", "synonym_scored", item, top_s / 100.0)
                     return {"status": "found", "item": item, "candidates": []}
 
-            # 5) Still ambiguous — return candidates for clarification
+            # 5) Still ambiguous — check if candidates are relevant (have primary token)
             if syn_rows:
-                print(f"SYNONYM AMBIGUOUS: query='{user_query}' found={len(syn_rows)}")
-                _log_event("ambiguous", "synonym_ambiguous")
-                return {"status": "ambiguous", "item": None, "candidates": [_make_item(r) for r in syn_rows]}
+                _syn_key = [t for t in q_tokens if len(t) > 3 and not t.replace(".", "").isdigit()]
+                _syn_primary = _syn_key[0] if _syn_key else None
+                if _syn_primary:
+                    _syn_relevant = [r for r in syn_rows
+                                     if _syn_primary in _phonetic((r[1] or "").lower())
+                                     or any(sg in _phonetic((r[1] or "").lower()) for sg in _singulars_es(_syn_primary))]
+                    if not _syn_relevant:
+                        print(f"SYNONYM NO RELEVANT: query='{user_query}' primary='{_syn_primary}' not in any candidate → skipping to ILIKE")
+                        syn_rows = []  # clear so we fall through
+                    else:
+                        print(f"SYNONYM AMBIGUOUS: query='{user_query}' found={len(_syn_relevant)}")
+                        _log_event("ambiguous", "synonym_ambiguous")
+                        return {"status": "ambiguous", "item": None, "candidates": [_make_item(r) for r in _syn_relevant]}
+                else:
+                    print(f"SYNONYM AMBIGUOUS: query='{user_query}' found={len(syn_rows)}")
+                    _log_event("ambiguous", "synonym_ambiguous")
+                    return {"status": "ambiguous", "item": None, "candidates": [_make_item(r) for r in syn_rows]}
             # syn_rows vacío (specs no coincidieron) → seguir a ILIKE/catalog fallback
 
         # ── PASO 1: ILIKE directo + ranking con bonus de specs + tiebreak ─────
@@ -1293,17 +1325,28 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
             min_gap = 15 if (q_medida or q_cal) else 8
             _ilike_key = [t for t in q_tokens if len(t) > 3 and not t.replace(".", "").isdigit()]
 
+            # Helper: check if primary token (or its singular) is in a name
+            def _has_primary(name_lower, primary_tok):
+                if primary_tok in name_lower:
+                    return True
+                for sg in _singulars_es(primary_tok):
+                    if sg in name_lower:
+                        return True
+                return False
+
             if top >= min_score and gap >= min_gap:
                 r = scored[0][1]
                 _ilike_name = _phonetic((r[1] or "").lower())
                 _ilike_overlap = _token_overlap_smart(_ilike_name, _ilike_key)
-                if not _ilike_key or _ilike_overlap >= 0.3:
+                # Also check that PRIMARY token is present — avoid "pasta durock" → "Pija para durock"
+                _primary_ok = (not _ilike_key) or _has_primary(_ilike_name, _ilike_key[0])
+                if _primary_ok and (not _ilike_key or _ilike_overlap >= 0.3):
                     print(f"ILIKE RESOLVED: query='{user_query}' match='{r[1]}' overlap={_ilike_overlap:.0%}")
                     item = _make_item(r)
                     _log_event("found", "ilike", item, top / 100.0)
                     return {"status": "found", "item": item, "candidates": []}
                 else:
-                    print(f"ILIKE REJECTED (low overlap): query='{user_query}' match='{r[1]}' score={top} overlap={_ilike_overlap:.0%} key={_ilike_key}")
+                    print(f"ILIKE REJECTED (primary={_ilike_key[0] if _ilike_key else '?'} ok={_primary_ok} overlap={_ilike_overlap:.0%}): query='{user_query}' match='{r[1]}' score={top} key={_ilike_key}")
 
             # "Obvious winner" path: even if gap is small, if the #1 candidate
             # contains the PRIMARY query token (first significant word) and #2 does NOT,
@@ -1345,11 +1388,23 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
             if top < 65:
                 print(f"ILIKE SCORES TOO LOW ({top:.0f}): query='{user_query}' → skipping to next step")
             else:
-                q_first_token = q.split()[0] if q.split() else q
-                filtered = [(s, r) for s, r in scored[:5] if _phonetic((r[1] or "").lower()).startswith(q_first_token)]
-                candidates = filtered if filtered else scored[:5]
-                _log_event("ambiguous", "ilike_ambiguous")
-                return {"status": "ambiguous", "item": None, "candidates": [_make_item(r) for _, r in candidates]}
+                # Before returning ambiguous, check if ANY candidate has the primary token.
+                # If none do, the results are irrelevant — skip to GPT fallback.
+                _primary_tok = _ilike_key[0] if _ilike_key else None
+                if _primary_tok:
+                    _relevant = [(s, r) for s, r in scored[:5]
+                                 if _has_primary(_phonetic((r[1] or "").lower()), _primary_tok)]
+                    if not _relevant:
+                        print(f"ILIKE NO RELEVANT CANDIDATES: query='{user_query}' primary='{_primary_tok}' not in any of top 5 → skipping to GPT fallback")
+                    else:
+                        _log_event("ambiguous", "ilike_ambiguous")
+                        return {"status": "ambiguous", "item": None, "candidates": [_make_item(r) for _, r in _relevant]}
+                else:
+                    q_first_token = q.split()[0] if q.split() else q
+                    filtered = [(s, r) for s, r in scored[:5] if _phonetic((r[1] or "").lower()).startswith(q_first_token)]
+                    candidates = filtered if filtered else scored[:5]
+                    _log_event("ambiguous", "ilike_ambiguous")
+                    return {"status": "ambiguous", "item": None, "candidates": [_make_item(r) for _, r in candidates]}
 
         # ── PASO 2: tsvector + fuzzy sobre candidatos + tiebreak ─────────────
         _tokens = [t for t in q.split() if len(t) >= 3]
