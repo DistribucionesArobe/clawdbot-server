@@ -1624,6 +1624,21 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                     _log_event("found", "synonym_scored", item, top_s / 100.0)
                     return {"status": "found", "item": item, "candidates": []}
 
+            # 4b) Check if one candidate's name contains ALL query key tokens (exact name match)
+            if len(syn_rows) >= 2:
+                _q_key_tokens = [_phonetic(t) for t in q_tokens if len(t) > 2 and not t.replace(".", "").isdigit()]
+                if _q_key_tokens:
+                    _full_matches = []
+                    for r in syn_rows:
+                        _pname = _phonetic((r[1] or "").lower())
+                        if all(tk in _pname for tk in _q_key_tokens):
+                            _full_matches.append(r)
+                    if len(_full_matches) == 1:
+                        print(f"SYNONYM ALL-TOKEN MATCH: query='{user_query}' match='{_full_matches[0][1]}' tokens={_q_key_tokens}")
+                        item = _make_item(_full_matches[0])
+                        _log_event("found", "synonym_all_token", item, 0.88)
+                        return {"status": "found", "item": item, "candidates": []}
+
             # 5) Still ambiguous — check if candidates are relevant (have primary token)
             if syn_rows:
                 _syn_key = [t for t in q_tokens if len(t) > 3 and not t.replace(".", "").isdigit()]
