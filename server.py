@@ -3015,6 +3015,21 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         return _escalate_non_quote(company_id, wa_from, user_text)
 
 
+@app.post("/api/admin/rebuild-embeddings")
+def rebuild_embeddings_endpoint(company_id: str = "30208e3c-70c6-4203-97d9-172fad7d3c75"):
+    """Re-generate embeddings for all products of a company."""
+    conn = get_conn()
+    try:
+        result = rebuild_embeddings_for_company(conn, company_id)
+        conn.commit()
+        return {"ok": True, **result}
+    except Exception as e:
+        conn.rollback()
+        return {"ok": False, "error": str(e)}
+    finally:
+        conn.close()
+
+
 @app.post("/api/admin/rebuild-synonyms-public")
 def rebuild_synonyms_public(company_id: str = "30208e3c-70c6-4203-97d9-172fad7d3c75"):
     conn = get_conn()
