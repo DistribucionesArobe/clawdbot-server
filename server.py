@@ -655,6 +655,14 @@ def print_db_fingerprint():
 
 print_db_fingerprint()
 
+# Run pricebook migrations at startup (idempotent)
+try:
+    _mig_conn = get_conn()
+    _run_pricebook_migrations(_mig_conn)
+    _mig_conn.close()
+except Exception as e:
+    print(f"PRICEBOOK MIGRATION STARTUP ERROR: {repr(e)}")
+
 # Seed jerga_global con términos críticos al iniciar
 try:
     _seed_conn = get_conn()
