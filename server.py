@@ -281,7 +281,7 @@ def extract_product_query(text: str) -> str:
     return t
 
 
-_BUNDLE_WORDS = {"atado", "atados", "paquete", "paquetes", "bulto", "bultos"}
+_BUNDLE_WORDS = {"atado", "atados", "paquete", "paquetes", "bulto", "bultos", "caja", "cajas"}
 
 def _resolve_bundle_qty(qty: int, is_bundle: bool, item: dict) -> int:
     """If customer ordered in bundles and product has bundle_size, multiply qty."""
@@ -299,7 +299,7 @@ def extract_qty_and_product(text: str):
     qty = int(m.group(1))
     product = m.group(2).strip()
     # Detect bundle: "2 atados de poste" → qty=2, product="poste", is_bundle=True
-    bundle_match = re.match(r"^(atados?|paquetes?|bultos?)\s+(?:de\s+)?(.+)$", product)
+    bundle_match = re.match(r"^(atados?|paquetes?|bultos?|cajas?)\s+(?:de\s+)?(.+)$", product)
     if bundle_match:
         return qty, bundle_match.group(2).strip(), True
     return qty, product, False
@@ -5102,7 +5102,7 @@ def extract_qty_items_robust(text: str):
                     qty = int(m.group(1))
                     prod = m.group(2).replace("_", "/").strip()
                     # Detect bundle words BEFORE stripping them
-                    _is_bun = bool(re.search(r"\b(atados?|paquetes?|bultos?)\b", prod, re.IGNORECASE))
+                    _is_bun = bool(re.search(r"\b(atados?|paquetes?|bultos?|cajas?)\b", prod, re.IGNORECASE))
                     # Solo quitar unidades de EMPAQUE (no de medida/spec)
                     _packaging_re = r"\b(hojas?|piezas?|rollos?|bultos?|sacos?|atados?|paquetes?|costales?|cubetas?|bolsas?|botes?|latas?|tiras?|cajas?|cientos?|millares?)\b"
                     prod = re.sub(_packaging_re, "", prod, flags=re.IGNORECASE).strip()
