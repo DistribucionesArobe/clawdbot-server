@@ -946,33 +946,47 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
             t = text.lower()
             cal = None
             medida = None
-            m_cal = _re.search(r"\bcal(?:ibre)?\s*(\d+)\b", t)
+            m_cal = _re.search(r"\bcal(?:ibre)?\s*(\d+(?:\.\d+)?)\b", t)
             if m_cal:
                 cal = m_cal.group(1)
-            # Match "N metro(s)" / "N m" / "N cm" / "N pulgadas" patterns
-            m_unit = _re.search(r"\b(\d+(?:\.\d+)?)\s*(?:metros?|mts?|m|cm|centimetros?|pulgadas?|pulg|mm)\b", t)
-            if m_unit:
-                medida = m_unit.group(1)
-            elif _re.search(r"(?:de\s+)?(\d+(?:\.\d+)?)\s*(?:metros?|mts?|m)\b", t):
-                medida = _re.search(r"(?:de\s+)?(\d+(?:\.\d+)?)\s*(?:metros?|mts?|m)\b", t).group(1)
+            # Match fractions like "2 1/2", "1 3/8", "1 5/8" FIRST (most specific)
+            m_frac = _re.search(r"\b(\d+\s+\d+/\d+)\b", t)
+            if m_frac:
+                medida = m_frac.group(1)  # e.g. "2 1/2"
             else:
-                # Fallback: any decimal number (e.g., "2.50" in product names)
-                m_med = _re.search(r"\b(\d+\.\d+)\b", t)
-                if m_med:
-                    medida = m_med.group(1)
+                # Match "N metro(s)" / "N m" / "N cm" / "N pulgadas" patterns
+                m_unit = _re.search(r"\b(\d+(?:\.\d+)?)\s*(?:metros?|mts?|m|cm|centimetros?|pulgadas?|pulg|mm)\b", t)
+                if m_unit:
+                    medida = m_unit.group(1)
+                elif _re.search(r"(?:de\s+)?(\d+(?:\.\d+)?)\s*(?:metros?|mts?|m)\b", t):
+                    medida = _re.search(r"(?:de\s+)?(\d+(?:\.\d+)?)\s*(?:metros?|mts?|m)\b", t).group(1)
+                else:
+                    # Fallback: any decimal number (e.g., "2.50" in product names)
+                    m_med = _re.search(r"\b(\d+\.\d+)\b", t)
+                    if m_med:
+                        medida = m_med.group(1)
+            print(f">>> _extract_specs('{text[:60]}') → medida={medida}, cal={cal}")
             return medida, cal
 
         def _spec_bonus(item_name, medida, cal):
             n = item_name.lower()
             bonus = 0
             if medida:
-                # Exact medida in product name (e.g., "2" in "2 metro x 2.50 m")
-                if _re.search(rf"\b{_re.escape(medida)}\s*(?:metros?|mts?|m|cm|mm|pulg)?\b", n):
-                    bonus += 30
-                # Penalize if product has a DIFFERENT leading measurement
-                m_prod = _re.search(r"\b(\d+(?:\.\d+)?)\s*(?:metros?|mts?|m)\b", n)
-                if m_prod and m_prod.group(1) != medida:
-                    bonus -= 20  # Wrong size variant
+                # For fractions like "2 1/2", use simple string containment
+                if " " in medida or "/" in medida:
+                    if medida in n:
+                        bonus += 30
+                    else:
+                        # Penalize: has a different fraction/measurement
+                        bonus -= 20
+                else:
+                    # Exact medida in product name (e.g., "2" in "2 metro x 2.50 m")
+                    if _re.search(rf"\b{_re.escape(medida)}\s*(?:metros?|mts?|m|cm|mm|pulg)?\b", n):
+                        bonus += 30
+                    # Penalize if product has a DIFFERENT leading measurement
+                    m_prod = _re.search(r"\b(\d+(?:\.\d+)?)\s*(?:metros?|mts?|m)\b", n)
+                    if m_prod and m_prod.group(1) != medida:
+                        bonus -= 20  # Wrong size variant
             if cal and (_re.search(rf"\bcal\s*{cal}\b", n)):
                 bonus += 50
             q_tokens = [t for t in q.split() if len(t) >= 4]
@@ -1042,6 +1056,8 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
             if not q_tokens or (len(q_tokens) == 1 and len(q_tokens[0]) <= 2 and not re.search(r"\d", q_tokens[0])):
                 q_tokens = [t for t in q.split() if t not in _soft_stopwords]
             print(f"q_tokens UPDATED after LLM: {q_tokens}")
+            # Recalculate specs from LLM-normalized query (e.g. "cal18" → "calibre 18")
+            q_medida, q_cal = _extract_specs(q)
 
         # Helper para logging de eventos al final de cada paso
         def _log_event(status, paso, item=None, confidence=None):
