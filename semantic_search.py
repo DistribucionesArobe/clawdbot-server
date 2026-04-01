@@ -1333,13 +1333,18 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                 target = float(medida_val)
             except ValueError:
                 return medida_val in n
-            # Find all decimal numbers in the name (but not inside "cal XX" or "abb XX")
-            # Remove cal/calibre and abb sections first to avoid matching caliber as measurement
+            # Remove cal/calibre and abb sections to avoid matching caliber as measurement
             n_no_cal = _re.sub(r'\bcal(?:ibre)?\s*\d+(?:\.\d+)?\b', '', n)
             n_no_cal = _re.sub(r'\babb\s*\d+(?:\.\d+)?\b', '', n_no_cal)
+            # Find all numbers, but skip those that are part of fractions (e.g. "2 1/2" = 2.5)
             for m in _re.finditer(r'\b(\d+(?:\.\d+)?)\b', n_no_cal):
                 try:
-                    if float(m.group(1)) == target:
+                    val = float(m.group(1))
+                    if val == target:
+                        # Check if this number is followed by a fraction (making it e.g. "2 1/2")
+                        after = n_no_cal[m.end():]
+                        if _re.match(r'\s+\d+/\d+', after):
+                            continue  # Skip: this "2" is part of "2 1/2"
                         return True
                 except ValueError:
                     pass
@@ -1429,7 +1434,15 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                 q_tokens = [t for t in q.split() if t not in _soft_stopwords]
             print(f"q_tokens UPDATED after LLM: {q_tokens}")
             # Recalculate specs from LLM-normalized query (e.g. "cal18" → "calibre 18")
+            # But preserve original specs if LLM dropped them
+            _prev_medida, _prev_cal = q_medida, q_cal
             q_medida, q_cal = _extract_specs(q)
+            if not q_medida and _prev_medida:
+                q_medida = _prev_medida
+                print(f"SPEC PRESERVED: medida={q_medida} (LLM dropped it)")
+            if not q_cal and _prev_cal:
+                q_cal = _prev_cal
+                print(f"SPEC PRESERVED: cal={q_cal} (LLM dropped it)")
 
         # Helper para logging de eventos al final de cada paso
         def _log_event(status, paso, item=None, confidence=None):
@@ -1728,7 +1741,24 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                     item = _make_item(_ilike_spec[0][1])
                     _log_event("found", "ilike_spec", item, _ilike_spec[0][0] / 100.0)
                     return {"status": "found", "item": item, "candidates": []}
-                elif _ilike_spec:
+                elif len(_ilike_spec) >= 2:
+                    # Tiebreak: if user didn't mention a qualifier (pvc, inox, etc.)
+                    # and one candidate has it but another doesn't, prefer the simpler one
+                    _q_low = q.lower()
+                    _extra_qualifiers = ["pvc", "inox", "acero-inox", "negro", "blanco", "cromado"]
+                    _unmentioned_q = [qf for qf in _extra_qualifiers if qf not in _q_low]
+                    if _unmentioned_q:
+                        _plain = [(s, r) for s, r in _ilike_spec
+                                  if not any(qf in (r[1] or "").lower() for qf in _unmentioned_q)]
+                        if 1 <= len(_plain) < len(_ilike_spec):
+                            # Some candidates filtered out by unmentioned qualifier
+                            if len(_plain) == 1:
+                                print(f"ILIKE SPEC QUALIFIER RESOLVED: query='{user_query}' match='{_plain[0][1][1]}' (simpler variant)")
+                                item = _make_item(_plain[0][1])
+                                _log_event("found", "ilike_spec_qual", item, _plain[0][0] / 100.0)
+                                return {"status": "found", "item": item, "candidates": []}
+                            else:
+                                _ilike_spec = _plain  # narrowed but not to 1
                     scored = _ilike_spec
 
             # Only return candidates if top score is decent (≥65).
