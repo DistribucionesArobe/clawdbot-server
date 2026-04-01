@@ -907,9 +907,9 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
         q = build_query_text(q)
 
         _stopwords = {"para", "de", "del", "la", "el", "un", "una", "con", "sin", "los", "las"}
+        _soft_stopwords = {"para", "del", "la", "el", "un", "una", "con", "sin", "los", "las"}
         q_tokens = [t for t in q.split() if t not in _stopwords]
         if not q_tokens or (len(q_tokens) == 1 and len(q_tokens[0]) <= 2 and not re.search(r"\d", q_tokens[0])):
-            _soft_stopwords = {"para", "del", "la", "el", "un", "una", "con", "sin", "los", "las"}
             q_tokens = [t for t in q.split() if t not in _soft_stopwords]
         q = " ".join(q_tokens).strip() or q
 
@@ -1036,6 +1036,12 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
         q_llm, norm_source = llm_normalize_query(conn, company_id, q, tenant_context)
         if q_llm != q:
             q = q_llm
+            # Recalculate q_tokens after LLM normalization so new tokens
+            # (e.g. "malla" added to "ciclonica") are included in multi-token fallback
+            q_tokens = [t for t in q.split() if t not in _stopwords]
+            if not q_tokens or (len(q_tokens) == 1 and len(q_tokens[0]) <= 2 and not re.search(r"\d", q_tokens[0])):
+                q_tokens = [t for t in q.split() if t not in _soft_stopwords]
+            print(f"q_tokens UPDATED after LLM: {q_tokens}")
 
         # Helper para logging de eventos al final de cada paso
         def _log_event(status, paso, item=None, confidence=None):
@@ -1211,14 +1217,16 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
         # E.g. "rollos malla ciclonica" → try "rollos", "malla", "ciclonica"
         # This ensures "Malla ciclonica" is found even if "rollos" only matches láminas.
         if not pool_rows:
-            _seen_skus = set()
+            _seen_keys = set()
             _merged = []
             for _tok in q_tokens:
                 if len(_tok) >= 3 and not _tok.replace(".", "").isdigit():
                     _tok_rows = _name_search(_tok)
                     for r in _tok_rows:
-                        if r[0] not in _seen_skus:
-                            _seen_skus.add(r[0])
+                        # Dedup by (sku, name) to handle NULL SKUs correctly
+                        _key = (r[0] or "", r[1] or "")
+                        if _key not in _seen_keys:
+                            _seen_keys.add(_key)
                             _merged.append(r)
             pool_rows = _merged
             if pool_rows:
