@@ -228,7 +228,8 @@ def semantic_search_best(conn, company_id: str, user_query: str,
             "sku": r[0], "name": r[1], "unit": r[2],
             "price": float(r[3]) if r[3] is not None else None,
             "vat_rate": float(r[4]) if r[4] is not None else None,
-            "similarity": float(r[5]),
+            "bundle_size": r[5],
+            "similarity": float(r[6]),
         }
         for r in rows
     ]
@@ -274,7 +275,8 @@ def semantic_search_candidates(conn, company_id: str, user_query: str,
             "sku": r[0], "name": r[1], "unit": r[2],
             "price": float(r[3]) if r[3] is not None else None,
             "vat_rate": float(r[4]) if r[4] is not None else None,
-            "similarity": float(r[5]),
+            "bundle_size": r[5],
+            "similarity": float(r[6]),
         }
         for r in rows
     ]
@@ -315,7 +317,8 @@ def _vector_candidates(conn, company_id: str, query_text: str, limit: int = 20) 
             "sku": r[0], "name": r[1], "unit": r[2],
             "price": float(r[3]) if r[3] is not None else None,
             "vat_rate": float(r[4]) if r[4] is not None else None,
-            "similarity": float(r[5]),
+            "bundle_size": r[5],
+            "similarity": float(r[6]),
         })
     return results
 
@@ -1514,16 +1517,16 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
         cur0 = conn.cursor()
         try:
             cur0.execute(
-                f"SELECT sku, name, unit, price, vat_rate, synonyms, bundle_size FROM pricebook_items WHERE company_id = %s AND lower({_SYN_TRANSLATE}) LIKE lower(%s) LIMIT 5",
-                (company_id, f"%{_phonetic(q)}%"),
+                f"SELECT sku, name, unit, price, vat_rate, synonyms, bundle_size FROM pricebook_items WHERE company_id = %s AND (lower({_SYN_TRANSLATE}) LIKE lower(%s) OR lower({_NAME_TRANSLATE}) LIKE lower(%s)) LIMIT 10",
+                (company_id, f"%{_phonetic(q)}%", f"%{_phonetic(q)}%"),
             )
             syn_rows = cur0.fetchall()
 
             if not syn_rows and q_tokens:
                 first_token = _phonetic(q_tokens[0])
                 cur0.execute(
-                    f"SELECT sku, name, unit, price, vat_rate, synonyms, bundle_size FROM pricebook_items WHERE company_id = %s AND lower({_SYN_TRANSLATE}) LIKE lower(%s) LIMIT 5",
-                    (company_id, f"%{first_token}%"),
+                    f"SELECT sku, name, unit, price, vat_rate, synonyms, bundle_size FROM pricebook_items WHERE company_id = %s AND (lower({_SYN_TRANSLATE}) LIKE lower(%s) OR lower({_NAME_TRANSLATE}) LIKE lower(%s)) LIMIT 10",
+                    (company_id, f"%{first_token}%", f"%{first_token}%"),
                 )
                 syn_rows = cur0.fetchall()
                 if len(syn_rows) > 1 and len(q_tokens) > 1:
@@ -1541,6 +1544,9 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
             query_plain = _phonetic(query)
             name = _phonetic((row[1] or "").lower())
             name_score = max(fuzz.token_set_ratio(query_plain, name), fuzz.partial_ratio(query_plain, name))
+            # Bonus: if product name STARTS with the query, boost score
+            if name.startswith(query_plain):
+                name_score = min(name_score + 15, 100)
             # También comparar contra cada sinónimo individual
             syns_raw = row[5] if len(row) > 5 else ""
             if syns_raw:
