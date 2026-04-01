@@ -117,6 +117,7 @@ def get_embedding(text: str) -> list:
     resp = openai_client.embeddings.create(
         model=EMBED_MODEL,
         input=text,
+        dimensions=1536,
         encoding_format="float",
     )
     return resp.data[0].embedding
@@ -134,6 +135,7 @@ def get_embeddings_batch(texts: list) -> list:
         resp = openai_client.embeddings.create(
             model=EMBED_MODEL,
             input=chunk,
+            dimensions=1536,
             encoding_format="float",
         )
         resp.data.sort(key=lambda x: x.index)
@@ -159,12 +161,15 @@ def rebuild_embeddings_for_company(conn, company_id: str) -> dict:
         for item_id, vector in zip(ids, vectors):
             try:
                 vector_str = "[" + ",".join(str(x) for x in vector) + "]"
+                cur.execute("SAVEPOINT embed_sp")
                 cur.execute(
                     "UPDATE pricebook_items SET embedding = %s::vector WHERE id = %s AND company_id = %s",
                     (vector_str, item_id, company_id),
                 )
+                cur.execute("RELEASE SAVEPOINT embed_sp")
                 updated += 1
             except Exception as e:
+                cur.execute("ROLLBACK TO SAVEPOINT embed_sp")
                 print(f"ERROR embedding item {item_id}: {e}")
                 errors += 1
         print(f"Embeddings rebuilt: company={company_id} updated={updated} errors={errors}")
