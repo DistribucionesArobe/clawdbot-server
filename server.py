@@ -3187,6 +3187,152 @@ def synonyms_audit(company_id: str = "30208e3c-70c6-4203-97d9-172fad7d3c75"):
         conn.close()
 
 
+def _is_junk_synonym(syn: str, product_name: str) -> bool:
+    """Detect garbage synonyms that should be removed."""
+    s = syn.strip().lower()
+    pn = product_name.strip().lower()
+    pn_tokens = set(norm_name(pn).split())
+
+    # Broken: contains parentheses, empty, too short
+    if not s or len(s) < 3:
+        return True
+    if "(" in s or ")" in s:
+        return True
+
+    # Single-word synonym that's just a plural/singular of a product name token
+    if " " not in s:
+        # Check if it's a trivial inflection of any token in the name
+        for tok in pn_tokens:
+            # "laminas" from "lamina", "galvanizadas" from "galvanizado", etc.
+            if s == tok:
+                return True  # exact duplicate of name token
+            # s is tok+"s", tok+"es", or tok minus "s"/"es"
+            if s == tok + "s" or s == tok + "es":
+                return True
+            if tok == s + "s" or tok == s + "es":
+                return True
+            if s.endswith("es") and s[:-2] == tok:
+                return True
+            if tok.endswith("es") and tok[:-2] == s:
+                return True
+            if s.endswith("s") and s[:-1] == tok:
+                return True
+            if tok.endswith("s") and tok[:-1] == s:
+                return True
+            # "galvanizadas" ↔ "galvanizados" (gender swap)
+            if len(s) > 4 and len(tok) > 4:
+                if s[:-1] == tok[:-1] and s[-1] in "aeos" and tok[-1] in "aeos":
+                    return True
+
+    return False
+
+
+@app.post("/api/admin/synonyms-clean")
+def synonyms_clean(
+    company_id: str = "30208e3c-70c6-4203-97d9-172fad7d3c75",
+    dry_run: bool = True
+):
+    """
+    Clean garbage synonyms from pricebook_items.
+
+    Removes:
+    1. Broken auto-plurals (parentheses, too short, etc.)
+    2. Single-word trivial inflections of product name tokens
+    3. Duplicate synonyms that appear in 10+ products (too generic to help)
+
+    Keeps:
+    - Multi-word jerga phrases (e.g. "cinta para durock", "teja roja")
+    - Unique alternative names
+
+    Pass dry_run=false to actually update the database.
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT id, name, synonyms FROM pricebook_items WHERE company_id=%s AND synonyms IS NOT NULL AND synonyms != '' ORDER BY name",
+            (company_id,)
+        )
+        rows = cur.fetchall()
+
+        # First pass: count synonym frequency across products
+        syn_frequency = {}
+        for item_id, name, synonyms in rows:
+            for s in (synonyms or "").split(","):
+                s = s.strip().lower()
+                if s:
+                    syn_frequency[s] = syn_frequency.get(s, 0) + 1
+
+        # Second pass: clean each product
+        changes = []
+        total_removed = 0
+        total_kept = 0
+        removed_examples = []
+
+        for item_id, name, synonyms in rows:
+            original_syns = [s.strip() for s in (synonyms or "").split(",") if s.strip()]
+            kept = []
+            removed = []
+
+            for syn in original_syns:
+                sl = syn.strip().lower()
+                reason = None
+
+                if _is_junk_synonym(syn, name):
+                    reason = "junk_inflection"
+                elif syn_frequency.get(sl, 0) >= 10:
+                    reason = f"too_generic(appears_in_{syn_frequency[sl]}_products)"
+
+                if reason:
+                    removed.append({"synonym": syn, "reason": reason})
+                    total_removed += 1
+                else:
+                    kept.append(syn)
+                    total_kept += 1
+
+            if removed:
+                new_synonyms = ", ".join(kept) if kept else ""
+                changes.append({
+                    "id": item_id,
+                    "name": name,
+                    "original": synonyms,
+                    "cleaned": new_synonyms,
+                    "removed": removed,
+                    "kept": kept
+                })
+                if len(removed_examples) < 30:
+                    removed_examples.append({
+                        "product": name,
+                        "removed": [r["synonym"] + f" ({r['reason']})" for r in removed],
+                        "kept": kept
+                    })
+
+        # Apply changes if not dry_run
+        updated = 0
+        if not dry_run:
+            for change in changes:
+                cur.execute(
+                    "UPDATE pricebook_items SET synonyms=%s, updated_at=NOW() WHERE id=%s",
+                    (change["cleaned"], change["id"])
+                )
+                updated += 1
+            conn.commit()
+
+        return {
+            "dry_run": dry_run,
+            "total_products_analyzed": len(rows),
+            "products_with_changes": len(changes),
+            "total_synonyms_removed": total_removed,
+            "total_synonyms_kept": total_kept,
+            "updated_in_db": updated,
+            "examples": removed_examples,
+            "hint": "Pass dry_run=false to apply changes" if dry_run else "Changes applied! Run rebuild-embeddings next."
+        }
+    finally:
+        cur.close()
+        conn.close()
+
+
 @app.get("/api/_version")
 def _version():
     return {"version": "pricebook-v2-2026-03-10", "unaccent": False}
@@ -4358,21 +4504,20 @@ def pricebook_items(
         if conn: conn.close()
 
 def _auto_plural_singular(name: str) -> list:
-    """Genera variantes plural/singular para los tokens del nombre."""
-    extras = set()
-    tokens = norm_name(name).split()
-    for tok in tokens:
-        if len(tok) < 4 or re.search(r"\d", tok):
-            continue
-        if tok[-1] not in "aeiouáéíóús":
-            extras.add(tok + "es")
-        elif tok[-1] in "aeiouáéíóú":
-            extras.add(tok + "s")
-        elif tok.endswith("es") and len(tok) > 4 and tok[-3] not in "aeiouáéíóú":
-            extras.add(tok[:-2])
-        elif tok.endswith("s") and len(tok) > 3:
-            extras.add(tok[:-1])
-    return list(extras)
+    """
+    Genera variantes plural/singular para los tokens del nombre.
+    Solo genera para tokens limpios (sin caracteres especiales).
+    Returns empty list — we no longer auto-generate plural synonyms
+    because they pollute the synonym field and embeddings without
+    providing meaningful search value (the search already handles
+    plurals via _singulars_es and phonetic matching).
+    """
+    # Disabled: auto-plurals cause more harm than good.
+    # The search system already handles plural/singular via:
+    # - _singulars_es() in synonym matching
+    # - _phonetic() normalization
+    # - ILIKE patterns with wildcards
+    return []
     
 @app.post("/api/pricebook/items")
 def pricebook_item_create(request: Request, body: PricebookItemCreateBody):
