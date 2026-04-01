@@ -5101,7 +5101,19 @@ def extract_qty_items_robust(text: str):
     items = []
     lines = [l.strip() for l in re.split(r"[\n\r]+", t) if l.strip()]
     for line in lines:
-        parts = [p.strip() for p in line.split(",") if p.strip()]
+        # Split by comma, then further split bare parts by " y " (when no digit follows)
+        raw_parts = [p.strip() for p in line.split(",") if p.strip()]
+        parts = []
+        for rp in raw_parts:
+            # Split "marco y cerradura" into ["marco", "cerradura"]
+            # but NOT "2 postes y 3 canales" (those have digits)
+            if not re.match(r"^\s*\d+\s+", rp):
+                # No leading quantity — split by " y " to get individual products
+                y_parts = re.split(r"\s+y\s+", rp, flags=re.IGNORECASE)
+                parts.extend(y_parts)
+            else:
+                parts.append(rp)
+        last_qty = 1  # default qty for items without explicit quantity
         for part in parts:
             sub_parts = re.split(r'(?<=\S)\s+(?=\d+\s)', part.strip())
             for sub in sub_parts:
@@ -5110,16 +5122,23 @@ def extract_qty_items_robust(text: str):
                 m = re.match(r"^\s*(\d+)\s+(.+)$", sub.strip())
                 if m:
                     qty = int(m.group(1))
+                    last_qty = qty
                     prod = m.group(2).replace("_", "/").strip()
-                    # Detect bundle words BEFORE stripping them
-                    _is_bun = bool(re.search(r"\b(atados?|paquetes?|bultos?|cajas?)\b", prod, re.IGNORECASE))
-                    # Solo quitar unidades de EMPAQUE (no de medida/spec)
-                    _packaging_re = r"\b(hojas?|piezas?|rollos?|bultos?|sacos?|atados?|paquetes?|costales?|cubetas?|bolsas?|botes?|latas?|tiras?|cajas?|cientos?|millares?)\b"
-                    prod = re.sub(_packaging_re, "", prod, flags=re.IGNORECASE).strip()
-                    prod = re.sub(r"\bde\b", " ", prod, flags=re.IGNORECASE).strip()
-                    prod = re.sub(r"\s+", " ", prod).strip()
-                    if prod and qty > 0:
-                        items.append((qty, prod, _is_bun))
+                else:
+                    # No leading quantity — inherit from last seen qty (or default 1)
+                    qty = last_qty
+                    prod = sub.strip().replace("_", "/")
+                if not prod:
+                    continue
+                # Detect bundle words BEFORE stripping them
+                _is_bun = bool(re.search(r"\b(atados?|paquetes?|bultos?|cajas?)\b", prod, re.IGNORECASE))
+                # Solo quitar unidades de EMPAQUE (no de medida/spec)
+                _packaging_re = r"\b(hojas?|piezas?|rollos?|bultos?|sacos?|atados?|paquetes?|costales?|cubetas?|bolsas?|botes?|latas?|tiras?|cajas?|cientos?|millares?)\b"
+                prod = re.sub(_packaging_re, "", prod, flags=re.IGNORECASE).strip()
+                prod = re.sub(r"\bde\b", " ", prod, flags=re.IGNORECASE).strip()
+                prod = re.sub(r"\s+", " ", prod).strip()
+                if prod and qty > 0:
+                    items.append((qty, prod, _is_bun))
     return items
 
 @app.post("/api/chat")
