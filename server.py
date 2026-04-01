@@ -3019,6 +3019,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
 def rebuild_embeddings_endpoint(company_id: str = "30208e3c-70c6-4203-97d9-172fad7d3c75"):
     """Re-generate embeddings for all products of a company."""
     conn = get_conn()
+    conn.autocommit = False
     try:
         result = rebuild_embeddings_for_company(conn, company_id)
         conn.commit()
