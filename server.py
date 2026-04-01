@@ -2740,6 +2740,8 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             if cands and 1 <= pick_opt <= len(cands):
                 chosen = cands[pick_opt - 1]
                 qty = int(first.get("qty") or 0)
+                _pick_bundle = first.get("is_bundle", False)
+                qty = _resolve_bundle_qty(qty, _pick_bundle, chosen)
                 state = cart_add_item(state, {
                     "sku": chosen.get("sku"),
                     "name": chosen.get("name"),
@@ -2817,7 +2819,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                         "qty": _fq,
                     })
                 else:
-                    missing.append({"qty": qty, "raw": prod_raw, "candidates": result["candidates"]})
+                    missing.append({"qty": qty, "raw": prod_raw, "is_bundle": _mi_bundle, "candidates": result["candidates"]})
             if missing:
                 state["pending"] = missing
             else:
@@ -2885,7 +2887,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 return _build_reply_with_pending(state, company_id=company_id, wa_from=wa_from)
 
             elif result["status"] == "ambiguous":
-                pending = [{"qty": qty, "raw": prod_query, "candidates": result["candidates"]}]
+                pending = [{"qty": qty, "raw": prod_query, "is_bundle": _is_bundle, "candidates": result["candidates"]}]
                 state = _single_state
                 state["pending"] = pending
                 if wa_from:
@@ -2996,7 +2998,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
 
             elif result["status"] == "ambiguous":
                 state = _fallback_state
-                state["pending"] = [{"qty": qty, "raw": prod_query, "candidates": result["candidates"]}]
+                state["pending"] = [{"qty": qty, "raw": prod_query, "is_bundle": _is_bundle, "candidates": result["candidates"]}]
                 if wa_from:
                     upsert_quote_state(company_id, wa_from, state)
                 return _build_reply_with_pending(state, company_id=company_id, wa_from=wa_from)
@@ -3079,7 +3081,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                             "qty": _fq2,
                         })
                     else:
-                        missing.append({"qty": qty, "raw": prod_raw, "candidates": result["candidates"]})
+                        missing.append({"qty": qty, "raw": prod_raw, "is_bundle": _mi2_bundle, "candidates": result["candidates"]})
                 if missing:
                     state["pending"] = missing
                 else:
