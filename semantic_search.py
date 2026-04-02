@@ -150,6 +150,87 @@ def get_embeddings_batch(texts: list) -> list:
     return all_vectors
 
 
+def auto_generate_context_groups(conn, company_id: str) -> dict:
+    """Auto-generate product context groups using LLM clustering.
+    Groups products that are typically bought together (e.g. tablaroca vs rejacero).
+    Stores result in companies.context_groups JSONB field."""
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT name FROM pricebook_items WHERE company_id = %s AND name IS NOT NULL ORDER BY name",
+            (company_id,),
+        )
+        products = [r[0] for r in cur.fetchall()]
+        if len(products) < 5:
+            return {"status": "skip", "reason": "too few products", "count": len(products)}
+
+        product_list = "\n".join(f"- {p}" for p in products[:200])  # cap at 200
+
+        prompt = f"""Analiza estos productos de una ferretería/tienda de materiales y agrúpalos en categorías de productos que típicamente se compran juntos en un mismo pedido/proyecto.
+
+Productos:
+{product_list}
+
+Responde SOLO con JSON válido, sin explicaciones. Formato:
+{{"grupo1": ["keyword1", "keyword2", ...], "grupo2": [...]}}
+
+Reglas:
+- Cada grupo debe tener un nombre descriptivo en español (ej: "tablaroca", "rejacero", "plomeria", "pintura", "electricidad")
+- Los keywords deben ser palabras que aparecen en los nombres de los productos de ese grupo (minúsculas, sin acentos)
+- Un keyword puede aparecer en máximo 2 grupos si es ambiguo (ej: "poste" puede estar en tablaroca y rejacero)
+- Incluye 5-15 keywords por grupo
+- Máximo 10 grupos"""
+
+        client = OpenAI()
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "Eres un experto en materiales de construcción y ferretería en México. Respondes solo con JSON válido."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.0,
+            max_tokens=1000,
+        )
+        import json
+        raw = (resp.choices[0].message.content or "").strip()
+        # Extract JSON from possible markdown code block
+        if "```" in raw:
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+            raw = raw.strip()
+        groups = json.loads(raw)
+
+        # Validate structure
+        if not isinstance(groups, dict):
+            return {"status": "error", "reason": "LLM returned non-dict"}
+        # Normalize: ensure all keywords are lowercase strings
+        clean_groups = {}
+        for name, keywords in groups.items():
+            if isinstance(keywords, list):
+                clean_groups[_strip_accents(name.lower())] = [
+                    _strip_accents(str(k).lower().strip()) for k in keywords if k
+                ]
+        if not clean_groups:
+            return {"status": "error", "reason": "no valid groups extracted"}
+
+        # Save to DB
+        cur.execute(
+            "UPDATE companies SET context_groups = %s WHERE id = %s",
+            (json.dumps(clean_groups, ensure_ascii=False), company_id),
+        )
+        conn.commit()
+        print(f"CONTEXT GROUPS GENERATED: company={company_id} groups={list(clean_groups.keys())} total_keywords={sum(len(v) for v in clean_groups.values())}")
+        return {"status": "ok", "groups": clean_groups}
+
+    except Exception as e:
+        print(f"CONTEXT GROUPS ERROR: {repr(e)}")
+        conn.rollback()
+        return {"status": "error", "reason": str(e)}
+    finally:
+        cur.close()
+
+
 def rebuild_embeddings_for_company(conn, company_id: str) -> dict:
     cur = conn.cursor()
     try:
@@ -1440,52 +1521,94 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                 "bundle_size": _bs,
             }
 
-        # ── Context bonus: use other cart items to disambiguate ───────────
-        # If cart has "ciclonica, concertina, espadas" → boost fence products
-        _ctx_tokens = set()
-        if cart_context:
-            for w in _phonetic(cart_context.lower()).split():
-                if len(w) >= 4 and not w.replace(".", "").isdigit() and w not in {"para", "metros", "metro", "rollos", "rollo", "piezas", "pieza", "bultos", "bulto", "cajas", "caja"}:
-                    _ctx_tokens.add(w)
-        _ctx_stopwords = {"para", "de", "del", "con", "sin", "los", "las", "una"}
-        _ctx_tokens -= _ctx_stopwords
+        # ── Context: load company context_groups from DB ─────────────────
+        _ctx_groups = {}  # {group_name: [keyword1, keyword2, ...]}
+        try:
+            _cg_cur = conn.cursor()
+            _cg_cur.execute("SELECT context_groups FROM companies WHERE id = %s LIMIT 1", (company_id,))
+            _cg_row = _cg_cur.fetchone()
+            _cg_cur.close()
+            if _cg_row and _cg_row[0]:
+                import json as _json_cg
+                _cg_raw = _cg_row[0]
+                if isinstance(_cg_raw, str):
+                    _cg_raw = _json_cg.loads(_cg_raw)
+                if isinstance(_cg_raw, dict):
+                    _ctx_groups = _cg_raw
+                    print(f"CONTEXT GROUPS LOADED: {list(_ctx_groups.keys())}")
+        except Exception as _cge:
+            print(f"CONTEXT GROUPS LOAD ERROR: {repr(_cge)}")
+            _ctx_groups = {}
 
-        # ── Universal context: use cart product names to boost/penalize ─────
-        # Extract unique significant tokens from ALL cart item names
-        _ctx_name_tokens = set()  # tokens from actual product names in cart
+        # Build reverse index: keyword → set of group names
+        _keyword_to_groups = {}
+        for gname, keywords in _ctx_groups.items():
+            for kw in keywords:
+                kw_ph = _phonetic(kw.lower())
+                _keyword_to_groups.setdefault(kw_ph, set()).add(gname)
+
+        def _item_groups(item_name: str) -> set:
+            """Return which context groups an item belongs to."""
+            name_ph = _phonetic(item_name.lower())
+            groups = set()
+            for kw, gnames in _keyword_to_groups.items():
+                if kw in name_ph:
+                    groups |= gnames
+            return groups
+
+        # Determine which groups the cart context belongs to
+        _cart_groups = set()
+        _ctx_name_tokens = set()
         if cart_context:
             for w in _phonetic(cart_context.lower()).replace(",", " ").split():
                 w = w.strip()
                 if len(w) >= 3 and not w.replace(".", "").isdigit() and w not in {"para", "del", "con", "sin", "los", "las", "una", "metros", "metro", "pieza", "piezas"}:
                     _ctx_name_tokens.add(w)
+            # Identify cart groups from cart product names
+            for w in _ctx_name_tokens:
+                if w in _keyword_to_groups:
+                    _cart_groups |= _keyword_to_groups[w]
+        if _cart_groups:
+            print(f"CART GROUPS DETECTED: {_cart_groups} from tokens: {_ctx_name_tokens}")
 
         def _context_bonus(item_name: str) -> int:
-            """Bonus/penalty based on token overlap with cart items.
-            Products sharing tokens with cart items get boosted.
-            Products with unique tokens NOT in any cart item get penalized."""
-            if not _ctx_name_tokens:
-                return 0
-            name_lower = _phonetic(item_name.lower())
-            name_toks = set(t for t in name_lower.split() if len(t) >= 3
-                           and not t.replace(".", "").isdigit()
-                           and t not in {"para", "del", "con", "sin", "cal"})
-            if not name_toks:
-                return 0
-            # Tokens in this product that also appear in cart context
-            shared = name_toks & _ctx_name_tokens
-            # Tokens in this product that are NOT in cart context (potentially irrelevant)
-            unique = name_toks - _ctx_name_tokens
-            bonus = len(shared) * 10  # boost for shared tokens
-            # Penalize tokens that appear nowhere in the cart context
-            # (e.g. "rejacero" when cart is all tablaroca)
-            for tok in unique:
-                if len(tok) >= 5:  # only penalize distinctive words
-                    bonus -= 15
-            return max(bonus, -40)  # cap penalty
+            """Bonus/penalty based on context groups.
+            If cart belongs to group X, boost items in group X,
+            penalize items in OTHER groups."""
+            if not _cart_groups or not _ctx_groups:
+                # Fallback: simple token overlap if no groups configured
+                if not _ctx_name_tokens:
+                    return 0
+                name_lower = _phonetic(item_name.lower())
+                name_toks = set(t for t in name_lower.split() if len(t) >= 3
+                               and not t.replace(".", "").isdigit()
+                               and t not in {"para", "del", "con", "sin", "cal"})
+                if not name_toks:
+                    return 0
+                shared = name_toks & _ctx_name_tokens
+                unique = name_toks - _ctx_name_tokens
+                bonus = len(shared) * 10
+                for tok in unique:
+                    if len(tok) >= 5:
+                        bonus -= 15
+                return max(bonus, -40)
+
+            # Group-based approach
+            item_g = _item_groups(item_name)
+            if not item_g:
+                return 0  # item not in any known group, neutral
+            # Check overlap between item groups and cart groups
+            shared_groups = item_g & _cart_groups
+            other_groups = item_g - _cart_groups
+            if shared_groups:
+                return 25  # strong boost: same domain as cart
+            elif other_groups:
+                return -30  # strong penalty: different domain than cart
+            return 0
 
         def _context_sort(candidates, context: str):
             """Sort ambiguous candidates by relevance to cart context."""
-            if not context or not _ctx_name_tokens or len(candidates) < 2:
+            if not context or (not _cart_groups and not _ctx_name_tokens) or len(candidates) < 2:
                 return candidates
             def _ctx_score(item):
                 score, r = item if isinstance(item, tuple) else (0, item)

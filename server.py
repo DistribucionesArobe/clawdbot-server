@@ -19,7 +19,7 @@ import psycopg2
 from psycopg2 import IntegrityError
 
 from openai import OpenAI
-from semantic_search import smart_search, rebuild_embeddings_for_company, upsert_single_embedding, seed_jerga_global
+from semantic_search import smart_search, rebuild_embeddings_for_company, upsert_single_embedding, seed_jerga_global, auto_generate_context_groups
 from generate_quote_pdf import build_quote_pdf, generate_folio
 
 from fastapi import (
@@ -657,7 +657,7 @@ print_db_fingerprint()
 
 
 def _run_pricebook_migrations(conn):
-    """Add bundle_size column to pricebook_items (idempotent)."""
+    """Idempotent DB migrations."""
     cur = conn.cursor()
     try:
         cur.execute("""
@@ -669,10 +669,16 @@ def _run_pricebook_migrations(conn):
                 ) THEN
                     ALTER TABLE pricebook_items ADD COLUMN bundle_size INTEGER;
                 END IF;
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name='companies' AND column_name='context_groups'
+                ) THEN
+                    ALTER TABLE companies ADD COLUMN context_groups JSONB;
+                END IF;
             END $$;
         """)
         conn.commit()
-        print("PRICEBOOK MIGRATIONS: OK (bundle_size)")
+        print("PRICEBOOK MIGRATIONS: OK (bundle_size, context_groups)")
     except Exception as e:
         print("PRICEBOOK MIGRATION ERROR:", repr(e))
         conn.rollback()
@@ -3191,9 +3197,28 @@ def rebuild_embeddings_endpoint(company_id: str = "30208e3c-70c6-4203-97d9-172fa
     try:
         result = rebuild_embeddings_for_company(conn, company_id)
         conn.commit()
+        # Auto-generate context groups after rebuilding embeddings
+        try:
+            cg_result = auto_generate_context_groups(conn, company_id)
+            print(f"AUTO CONTEXT GROUPS after rebuild: {cg_result.get('status')}")
+        except Exception as cge:
+            print(f"AUTO CONTEXT GROUPS ERROR: {repr(cge)}")
         return {"ok": True, **result}
     except Exception as e:
         conn.rollback()
+        return {"ok": False, "error": str(e)}
+    finally:
+        conn.close()
+
+
+@app.post("/api/admin/generate-context-groups")
+def generate_context_groups_endpoint(company_id: str = "30208e3c-70c6-4203-97d9-172fad7d3c75"):
+    """Generate context groups for a company using LLM clustering."""
+    conn = get_conn()
+    try:
+        result = auto_generate_context_groups(conn, company_id)
+        return {"ok": result.get("status") == "ok", **result}
+    except Exception as e:
         return {"ok": False, "error": str(e)}
     finally:
         conn.close()
@@ -4245,6 +4270,12 @@ def _rebuild_embeddings_bg(company_id: str):
         try:
             result = rebuild_embeddings_for_company(conn, company_id)
             print(f"BG EMBEDDINGS DONE: {result}")
+            # Auto-generate context groups after rebuilding embeddings
+            try:
+                cg_result = auto_generate_context_groups(conn, company_id)
+                print(f"BG CONTEXT GROUPS: {cg_result.get('status')}")
+            except Exception as cge:
+                print(f"BG CONTEXT GROUPS ERROR: {repr(cge)}")
         finally:
             conn.close()
     except Exception as e:
@@ -4343,14 +4374,15 @@ async def carga_productos_rapida(request: Request, background_tasks: BackgroundT
 
         conn.commit()
 
-        # Rebuild embeddings en background
+        # Rebuild embeddings + context groups en background
         if background_tasks:
             background_tasks.add_task(_rebuild_embeddings_bg, company_id)
         else:
             try:
                 rebuild_embeddings_for_company(conn, company_id)
+                auto_generate_context_groups(conn, company_id)
             except Exception as e:
-                print(f"EMBEDDINGS REBUILD ERROR (rapida): {repr(e)}")
+                print(f"EMBEDDINGS/CTX REBUILD ERROR (rapida): {repr(e)}")
 
         return {
             "ok": True,
@@ -4763,6 +4795,13 @@ def pricebook_bulk_create(request: Request, body: PricebookBulkBody):
                 except Exception as e:
                     print(f"BULK EMBEDDING ERROR for '{name}': {repr(e)}")
         conn.commit()
+        # Auto-generate context groups after bulk product upload
+        if created >= 3:
+            try:
+                cg_result = auto_generate_context_groups(conn, company_id)
+                print(f"BULK CONTEXT GROUPS: {cg_result.get('status')}")
+            except Exception as cge:
+                print(f"BULK CONTEXT GROUPS ERROR: {repr(cge)}")
         return {"ok": True, "created": created}
     except HTTPException:
         raise
