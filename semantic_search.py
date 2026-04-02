@@ -1450,61 +1450,47 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
         _ctx_stopwords = {"para", "de", "del", "con", "sin", "los", "las", "una"}
         _ctx_tokens -= _ctx_stopwords
 
-        # Context category groups for smart disambiguation
-        _CTX_GROUPS = {
-            "tablaroca": {"tablaroca", "plafon", "canal", "poste", "tee", "angulo", "pija", "durock", "basecoat", "redimix", "cinta", "esquinero"},
-            "rejacero": {"rejacero", "reja", "concertina", "espada", "abrazadera", "tension", "arranque", "ganadero"},
-            "plomeria": {"tubo", "codo", "tee", "reduccion", "valvula", "llave", "manguera", "conexion"},
-        }
-
-        def _detect_context_group(context_text: str) -> set:
-            """Detect which product groups are present in cart context."""
-            ctx_low = _phonetic(context_text.lower())
-            groups = set()
-            for group, keywords in _CTX_GROUPS.items():
-                if any(kw in ctx_low for kw in keywords):
-                    groups.add(group)
-            return groups
-
-        _active_groups = _detect_context_group(cart_context) if cart_context else set()
+        # ── Universal context: use cart product names to boost/penalize ─────
+        # Extract unique significant tokens from ALL cart item names
+        _ctx_name_tokens = set()  # tokens from actual product names in cart
+        if cart_context:
+            for w in _phonetic(cart_context.lower()).replace(",", " ").split():
+                w = w.strip()
+                if len(w) >= 3 and not w.replace(".", "").isdigit() and w not in {"para", "del", "con", "sin", "los", "las", "una", "metros", "metro", "pieza", "piezas"}:
+                    _ctx_name_tokens.add(w)
 
         def _context_bonus(item_name: str) -> int:
-            """Bonus/penalty for products based on cart context groups."""
-            if not _ctx_tokens and not _active_groups:
+            """Bonus/penalty based on token overlap with cart items.
+            Products sharing tokens with cart items get boosted.
+            Products with unique tokens NOT in any cart item get penalized."""
+            if not _ctx_name_tokens:
                 return 0
             name_lower = _phonetic(item_name.lower())
-            bonus = 0
-            # Token overlap bonus (original logic)
-            hits = sum(1 for t in _ctx_tokens if t in name_lower)
-            bonus += min(hits * 10, 30)
-            # Group-aware: penalize products from non-active groups
-            if _active_groups:
-                for group, kws in _CTX_GROUPS.items():
-                    if group not in _active_groups:
-                        if any(kw in name_lower for kw in kws):
-                            bonus -= 40  # heavy penalty for wrong context
-            return bonus
+            name_toks = set(t for t in name_lower.split() if len(t) >= 3
+                           and not t.replace(".", "").isdigit()
+                           and t not in {"para", "del", "con", "sin", "cal"})
+            if not name_toks:
+                return 0
+            # Tokens in this product that also appear in cart context
+            shared = name_toks & _ctx_name_tokens
+            # Tokens in this product that are NOT in cart context (potentially irrelevant)
+            unique = name_toks - _ctx_name_tokens
+            bonus = len(shared) * 10  # boost for shared tokens
+            # Penalize tokens that appear nowhere in the cart context
+            # (e.g. "rejacero" when cart is all tablaroca)
+            for tok in unique:
+                if len(tok) >= 5:  # only penalize distinctive words
+                    bonus -= 15
+            return max(bonus, -40)  # cap penalty
 
         def _context_sort(candidates, context: str):
-            """Sort ambiguous candidates by relevance to cart context.
-            E.g. if context=tablaroca, prefer 'Poste 4.10 cal 26' over 'Poste para rejacero'."""
-            if not context or not _active_groups or len(candidates) < 2:
+            """Sort ambiguous candidates by relevance to cart context."""
+            if not context or not _ctx_name_tokens or len(candidates) < 2:
                 return candidates
             def _ctx_score(item):
                 score, r = item if isinstance(item, tuple) else (0, item)
-                name_low = _phonetic(((r[1] if isinstance(r, tuple) else r.get("name", "")) or "").lower())
-                bonus = 0
-                # Boost if product belongs to an active context group
-                for group in _active_groups:
-                    group_kws = _CTX_GROUPS.get(group, set())
-                    if any(kw in name_low for kw in group_kws):
-                        bonus += 50
-                # Penalize if product belongs to a NON-active group
-                for group, kws in _CTX_GROUPS.items():
-                    if group not in _active_groups:
-                        if any(kw in name_low for kw in kws):
-                            bonus -= 30
-                return -bonus  # negative for ascending sort
+                name = (r[1] if isinstance(r, tuple) else r.get("name", "")) or ""
+                return -_context_bonus(name)  # negative for ascending sort
             return sorted(candidates, key=_ctx_score)
 
         q_medida, q_cal = _extract_specs(q)
