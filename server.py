@@ -5130,15 +5130,29 @@ def extract_qty_items_robust(text: str):
                     prod = sub.strip().replace("_", "/")
                 if not prod:
                     continue
-                # Detect bundle words BEFORE stripping them
-                _is_bun = bool(re.search(r"\b(atados?|paquetes?|bultos?|cajas?)\b", prod, re.IGNORECASE))
-                # Solo quitar unidades de EMPAQUE (no de medida/spec)
-                _packaging_re = r"\b(hojas?|piezas?|rollos?|bultos?|sacos?|atados?|paquetes?|costales?|cubetas?|bolsas?|botes?|latas?|tiras?|cajas?|cientos?|millares?)\b"
-                prod = re.sub(_packaging_re, "", prod, flags=re.IGNORECASE).strip()
-                prod = re.sub(r"\bde\b", " ", prod, flags=re.IGNORECASE).strip()
-                prod = re.sub(r"\s+", " ", prod).strip()
-                if prod and qty > 0:
-                    items.append((qty, prod, _is_bun))
+                # Split "tornillos y taquetes de ¼ de plástico" into separate products
+                # Only split on " y " between alphabetic words (not specs like "6x1 y 8x2")
+                _y_split = re.split(r"\s+y\s+(?=[a-záéíóúñ])", prod, flags=re.IGNORECASE)
+                # If split produced multiple parts, check they each have an alpha word
+                if len(_y_split) > 1 and all(re.search(r"[a-záéíóúñ]{3,}", p, re.IGNORECASE) for p in _y_split):
+                    # Shared trailing spec: "tornillos y taquetes de ¼ de plástico"
+                    # The last part keeps its spec, earlier parts get just the word
+                    prod_list = _y_split
+                else:
+                    prod_list = [prod]
+                for _yp in prod_list:
+                    _yp = _yp.strip()
+                    if not _yp:
+                        continue
+                    # Detect bundle words BEFORE stripping them
+                    _is_bun = bool(re.search(r"\b(atados?|paquetes?|bultos?|cajas?)\b", _yp, re.IGNORECASE))
+                    # Solo quitar unidades de EMPAQUE (no de medida/spec)
+                    _packaging_re = r"\b(hojas?|piezas?|rollos?|bultos?|sacos?|atados?|paquetes?|costales?|cubetas?|bolsas?|botes?|latas?|tiras?|cajas?|cientos?|millares?)\b"
+                    _yp = re.sub(_packaging_re, "", _yp, flags=re.IGNORECASE).strip()
+                    _yp = re.sub(r"\bde\b", " ", _yp, flags=re.IGNORECASE).strip()
+                    _yp = re.sub(r"\s+", " ", _yp).strip()
+                    if _yp and qty > 0:
+                        items.append((qty, _yp, _is_bun))
     return items
 
 @app.post("/api/chat")

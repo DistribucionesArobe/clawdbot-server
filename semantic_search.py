@@ -884,6 +884,15 @@ def seed_jerga_global(conn):
         # Concertina shorthand
         ("rollos concertina", "concertina"),
         ("rollo concertina", "concertina"),
+        # Pilas = pijas (very common Mexican construction slang)
+        ("pilas", "pija"),
+        ("pila", "pija"),
+        ("pilas framer", "pija framer"),
+        ("pilas para durock", "pija para durock"),
+        ("pilas para tablaroca", "pija para tablaroca"),
+        ("pilas pata de broca", "pija punta de broca"),
+        ("pija pata de broca", "pija punta de broca"),
+        ("pijas pata de broca", "pija punta de broca"),
     ]
     try:
         cur = conn.cursor()
@@ -1741,8 +1750,8 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                 r = scored[0][1]
                 _ilike_name = _phonetic((r[1] or "").lower())
                 _ilike_overlap = _token_overlap_smart(_ilike_name, _ilike_key)
-                # Also check that PRIMARY token is present — avoid "pasta durock" → "Pija para durock"
-                _primary_ok = (not _ilike_key) or _has_primary(_ilike_name, _ilike_key[0])
+                # Check that at least one key token is present — avoid "pasta durock" → "Pija para durock"
+                _primary_ok = (not _ilike_key) or any(_has_primary(_ilike_name, tk) for tk in _ilike_key)
                 if _primary_ok and (not _ilike_key or _ilike_overlap >= 0.3):
                     print(f"ILIKE RESOLVED: query='{user_query}' match='{r[1]}' overlap={_ilike_overlap:.0%}")
                     item = _make_item(r)
@@ -1814,12 +1823,12 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
             else:
                 # Before returning ambiguous, check if ANY candidate has the primary token.
                 # If none do, the results are irrelevant — skip to GPT fallback.
-                _primary_tok = _ilike_key[0] if _ilike_key else None
-                if _primary_tok:
+                _primary_toks = _ilike_key[:3] if _ilike_key else []
+                if _primary_toks:
                     _relevant = [(s, r) for s, r in scored[:5]
-                                 if _has_primary(_phonetic((r[1] or "").lower()), _primary_tok)]
+                                 if any(_has_primary(_phonetic((r[1] or "").lower()), tk) for tk in _primary_toks)]
                     if not _relevant:
-                        print(f"ILIKE NO RELEVANT CANDIDATES: query='{user_query}' primary='{_primary_tok}' not in any of top 5 → skipping to GPT fallback")
+                        print(f"ILIKE NO RELEVANT CANDIDATES: query='{user_query}' primary={_primary_toks} not in any of top 5 → skipping to GPT fallback")
                     else:
                         _log_event("ambiguous", "ilike_ambiguous")
                         return {"status": "ambiguous", "item": None, "candidates": [_make_item(r) for _, r in _relevant]}
