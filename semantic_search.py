@@ -1752,6 +1752,11 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                 _ilike_overlap = _token_overlap_smart(_ilike_name, _ilike_key)
                 # Check that at least one key token is present — avoid "pasta durock" → "Pija para durock"
                 _primary_ok = (not _ilike_key) or any(_has_primary(_ilike_name, tk) for tk in _ilike_key)
+                # Reject if any significant token (>=5 chars) is completely missing
+                _missing_sig = [tk for tk in _ilike_key if len(tk) >= 5
+                                and not _has_primary(_ilike_name, tk)]
+                if _missing_sig:
+                    _primary_ok = False
                 if _primary_ok and (not _ilike_key or _ilike_overlap >= 0.3):
                     print(f"ILIKE RESOLVED: query='{user_query}' match='{r[1]}' overlap={_ilike_overlap:.0%}")
                     item = _make_item(r)
