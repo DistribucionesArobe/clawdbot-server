@@ -991,11 +991,13 @@ def seed_jerga_global(conn):
         ("pija pata de broca", "pija punta de broca"),
         ("pijas pata de broca", "pija punta de broca"),
         # Pija y taquete — product name, don't let LLM change "y" to "para"
+        ("pija y taquete", "pija y taquete"),
         ("pijas y taquete", "pija y taquete"),
         ("pija y taquetes", "pija y taquete"),
         ("pijas y taquetes", "pija y taquete"),
         ("tornillo y taquete", "pija y taquete"),
         ("tornillos y taquetes", "pija y taquete"),
+        ("tornillos y taquete", "pija y taquete"),
         # Pija tablaroca = Pija 6 x 1 (the standard tablaroca screw)
         ("pija tablaroca", "pija 6 x 1"),
         ("pijas tablaroca", "pija 6 x 1"),
@@ -1563,34 +1565,44 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                 kw_ph = _phonetic(kw.lower())
                 _keyword_to_groups.setdefault(kw_ph, set()).add(gname)
 
-        def _item_groups(item_name: str) -> set:
-            """Return which context groups an item belongs to."""
+        def _item_group_affinity(item_name: str) -> dict:
+            """Return {group_name: keyword_count} — how many keywords from each group match."""
             name_ph = _phonetic(item_name.lower())
-            groups = set()
+            affinity = {}  # group → count of matching keywords
             for kw, gnames in _keyword_to_groups.items():
                 if kw in name_ph:
-                    groups |= gnames
-            return groups
+                    for g in gnames:
+                        affinity[g] = affinity.get(g, 0) + 1
+            return affinity
 
-        # Determine which groups the cart context belongs to
-        _cart_groups = set()
+        # Determine which groups the cart context belongs to, weighted by keyword count
+        _cart_group_weights = {}  # group → count of cart keywords that match
         _ctx_name_tokens = set()
         if cart_context:
             for w in _phonetic(cart_context.lower()).replace(",", " ").split():
                 w = w.strip()
                 if len(w) >= 3 and not w.replace(".", "").isdigit() and w not in {"para", "del", "con", "sin", "los", "las", "una", "metros", "metro", "pieza", "piezas"}:
                     _ctx_name_tokens.add(w)
-            # Identify cart groups from cart product names
+            # Count how many cart tokens belong to each group
             for w in _ctx_name_tokens:
                 if w in _keyword_to_groups:
-                    _cart_groups |= _keyword_to_groups[w]
+                    for g in _keyword_to_groups[w]:
+                        _cart_group_weights[g] = _cart_group_weights.get(g, 0) + 1
+        # Pick dominant cart groups: those with the most keyword matches
+        _cart_groups = set()
+        if _cart_group_weights:
+            max_weight = max(_cart_group_weights.values())
+            # Include groups that have at least 40% of max weight (strong signal)
+            threshold = max(max_weight * 0.4, 2)
+            _cart_groups = {g for g, w in _cart_group_weights.items() if w >= threshold}
         if _cart_groups:
-            print(f"CART GROUPS DETECTED: {_cart_groups} from tokens: {_ctx_name_tokens}")
+            print(f"CART GROUPS DETECTED: {_cart_groups} weights={_cart_group_weights}")
 
         def _context_bonus(item_name: str) -> int:
-            """Bonus/penalty based on context groups.
-            If cart belongs to group X, boost items in group X,
-            penalize items in OTHER groups."""
+            """Bonus/penalty based on context group AFFINITY.
+            Counts how many keywords match cart groups vs non-cart groups.
+            'Poste para rejacero' → rejacero has 2 keywords (poste+rejacero), tablaroca only 1 (poste)
+            So if cart is tablaroca, rejacero affinity is STRONGER → penalize."""
             if not _cart_groups or not _ctx_groups:
                 # Fallback: simple token overlap if no groups configured
                 if not _ctx_name_tokens:
@@ -1609,17 +1621,28 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                         bonus -= 15
                 return max(bonus, -40)
 
-            # Group-based approach
-            item_g = _item_groups(item_name)
-            if not item_g:
+            # Group-based approach with affinity weighting
+            affinity = _item_group_affinity(item_name)
+            if not affinity:
                 return 0  # item not in any known group, neutral
-            # Check overlap between item groups and cart groups
-            shared_groups = item_g & _cart_groups
-            other_groups = item_g - _cart_groups
-            if shared_groups:
-                return 25  # strong boost: same domain as cart
-            elif other_groups:
-                return -30  # strong penalty: different domain than cart
+
+            # Sum keyword matches for cart groups vs non-cart groups
+            cart_score = sum(cnt for g, cnt in affinity.items() if g in _cart_groups)
+            other_score = sum(cnt for g, cnt in affinity.items() if g not in _cart_groups)
+
+            # "Poste para rejacero" with cart=tablaroca:
+            #   cart_score=1 (poste in tablaroca), other_score=2 (poste+rejacero in rejacero)
+            #   → other wins → penalize
+            # "Poste 4.10 x 3.05 cal 20" with cart=tablaroca:
+            #   cart_score=1 (poste in tablaroca), other_score=1 (poste in rejacero)
+            #   → tie → neutral/slight boost
+
+            if cart_score > other_score:
+                return 25   # clearly belongs to cart domain
+            elif other_score > cart_score:
+                return -30  # clearly belongs to OTHER domain
+            elif cart_score > 0:
+                return 5    # ambiguous but at least partially matches cart
             return 0
 
         def _context_sort(candidates, context: str):
