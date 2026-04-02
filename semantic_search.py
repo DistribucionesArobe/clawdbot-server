@@ -893,6 +893,17 @@ def seed_jerga_global(conn):
         ("pilas pata de broca", "pija punta de broca"),
         ("pija pata de broca", "pija punta de broca"),
         ("pijas pata de broca", "pija punta de broca"),
+        # Pija y taquete — product name, don't let LLM change "y" to "para"
+        ("pijas y taquete", "pija y taquete"),
+        ("pija y taquetes", "pija y taquete"),
+        ("pijas y taquetes", "pija y taquete"),
+        ("tornillo y taquete", "pija y taquete"),
+        ("tornillos y taquetes", "pija y taquete"),
+        # Pija tablaroca = Pija 6 x 1 (the standard tablaroca screw)
+        ("pija tablaroca", "pija 6 x 1"),
+        ("pijas tablaroca", "pija 6 x 1"),
+        ("pija para tablaroca", "pija 6 x 1"),
+        ("pijas para tablaroca", "pija 6 x 1"),
     ]
     try:
         cur = conn.cursor()
@@ -1458,12 +1469,21 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
         _active_groups = _detect_context_group(cart_context) if cart_context else set()
 
         def _context_bonus(item_name: str) -> int:
-            """Bonus for products sharing tokens with other cart items."""
-            if not _ctx_tokens:
+            """Bonus/penalty for products based on cart context groups."""
+            if not _ctx_tokens and not _active_groups:
                 return 0
             name_lower = _phonetic(item_name.lower())
+            bonus = 0
+            # Token overlap bonus (original logic)
             hits = sum(1 for t in _ctx_tokens if t in name_lower)
-            return min(hits * 10, 30)  # max 30 bonus from context
+            bonus += min(hits * 10, 30)
+            # Group-aware: penalize products from non-active groups
+            if _active_groups:
+                for group, kws in _CTX_GROUPS.items():
+                    if group not in _active_groups:
+                        if any(kw in name_lower for kw in kws):
+                            bonus -= 40  # heavy penalty for wrong context
+            return bonus
 
         def _context_sort(candidates, context: str):
             """Sort ambiguous candidates by relevance to cart context.
