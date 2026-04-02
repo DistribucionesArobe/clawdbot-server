@@ -164,32 +164,39 @@ def auto_generate_context_groups(conn, company_id: str) -> dict:
         if len(products) < 5:
             return {"status": "skip", "reason": "too few products", "count": len(products)}
 
-        product_list = "\n".join(f"- {p}" for p in products[:200])  # cap at 200
+        product_list = "\n".join(f"- {p}" for p in products[:500])  # cap at 500
 
-        prompt = f"""Analiza estos productos de una ferretería/tienda de materiales y agrúpalos en categorías de productos que típicamente se compran juntos en un mismo pedido/proyecto.
+        prompt = f"""Eres un experto en ferreterías y tiendas de materiales de construcción en México.
 
-Productos:
+Analiza estos productos y agrúpalos en CATEGORÍAS DE PROYECTO — es decir, productos que un cliente típicamente compra JUNTOS en un mismo pedido porque son del mismo tipo de obra/proyecto.
+
+Productos del catálogo:
 {product_list}
 
-Responde SOLO con JSON válido, sin explicaciones. Formato:
-{{"grupo1": ["keyword1", "keyword2", ...], "grupo2": [...]}}
+IMPORTANTE: El objetivo es que si un cliente está comprando productos del grupo "tablaroca" (como canal, plafón, poste), el sistema entienda que productos del grupo "rejacero" (como malla ciclónica, concertina) NO son relevantes, y viceversa.
 
-Reglas:
-- Cada grupo debe tener un nombre descriptivo en español (ej: "tablaroca", "rejacero", "plomeria", "pintura", "electricidad")
-- Los keywords deben ser palabras que aparecen en los nombres de los productos de ese grupo (minúsculas, sin acentos)
-- Un keyword puede aparecer en máximo 2 grupos si es ambiguo (ej: "poste" puede estar en tablaroca y rejacero)
-- Incluye 5-15 keywords por grupo
-- Máximo 10 grupos"""
+Responde SOLO con JSON válido, sin explicaciones. Formato:
+{{"nombre_grupo": ["keyword1", "keyword2", ...], ...}}
+
+Reglas ESTRICTAS:
+1. Los keywords deben ser palabras DISTINTIVAS que aparecen en los nombres de los productos — NO uses palabras genéricas como "sin", "con", "simple", "tipo", "para", "grande", "chico"
+2. Cada keyword debe tener mínimo 4 letras
+3. Incluye las palabras clave del nombre del producto: si un producto se llama "Poste para tablaroca", los keywords son "poste" y "tablaroca"
+4. Grupos típicos en ferreterías mexicanas: tablaroca (canal, poste, plafon, angulo, durock, pija), rejacero (malla, ciclonica, concertina, poste, espada, tension), plomeria (tubo, codo, valvula, llave, pvc, cpvc), pintura (pintura, esmalte, brocha, rodillo, thinner), electricidad (cable, contacto, apagador, caja), herrajes/puertas (cerradura, bisagra, marco, puerta, chapa), laminas (lamina, acanalada, aceroteja, caballete), techos/impermeabilizacion (impermeabilizante, sellador, membrana), tornilleria (pija, tornillo, taquete, clavo, remache), herramienta (martillo, desarmador, pinza, llave)
+5. Un keyword puede estar en MÁXIMO 2 grupos si genuinamente es ambiguo (ej: "poste" en tablaroca Y rejacero)
+6. Mínimo 5 keywords por grupo, máximo 20
+7. Máximo 15 grupos
+8. Todos los keywords en minúsculas, sin acentos"""
 
         client = OpenAI()
         resp = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "Eres un experto en materiales de construcción y ferretería en México. Respondes solo con JSON válido."},
+                {"role": "system", "content": "Eres un experto en materiales de construcción y ferretería en México. Conoces perfectamente qué productos se compran juntos en cada tipo de obra. Respondes solo con JSON válido."},
                 {"role": "user", "content": prompt},
             ],
             temperature=0.0,
-            max_tokens=1000,
+            max_tokens=2000,
         )
         import json
         raw = (resp.choices[0].message.content or "").strip()
@@ -204,13 +211,22 @@ Reglas:
         # Validate structure
         if not isinstance(groups, dict):
             return {"status": "error", "reason": "LLM returned non-dict"}
-        # Normalize: ensure all keywords are lowercase strings
+        # Normalize: ensure all keywords are lowercase strings, filter junk
+        _generic_words = {"para", "tipo", "con", "sin", "grande", "chico", "simple",
+                          "doble", "triple", "nuevo", "viejo", "bueno", "malo",
+                          "pieza", "piezas", "metro", "metros", "rollo", "rollos",
+                          "caja", "cajas", "bulto", "bultos"}
         clean_groups = {}
         for name, keywords in groups.items():
             if isinstance(keywords, list):
-                clean_groups[_strip_accents(name.lower())] = [
-                    _strip_accents(str(k).lower().strip()) for k in keywords if k
-                ]
+                cleaned_kws = []
+                for k in keywords:
+                    kw = _strip_accents(str(k).lower().strip())
+                    # Filter: min 4 chars, not generic, not purely numeric
+                    if kw and len(kw) >= 4 and kw not in _generic_words and not kw.replace(".", "").isdigit():
+                        cleaned_kws.append(kw)
+                if len(cleaned_kws) >= 3:  # only keep groups with enough keywords
+                    clean_groups[_strip_accents(name.lower())] = cleaned_kws
         if not clean_groups:
             return {"status": "error", "reason": "no valid groups extracted"}
 
