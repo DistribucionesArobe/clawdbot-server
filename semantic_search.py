@@ -1261,6 +1261,14 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
         q = _phonetic(user_query.lower().strip())
         q = build_query_text(q)
 
+        # Strip packaging words that cause false matches (cubeta→pintura, rollo→malla)
+        _packaging_words_re = r"\b(hojas?|piezas?|rollos?|bultos?|sacos?|atados?|paquetes?|costales?|cubetas?|cuvetas?|bolsas?|botes?|latas?|tiras?|cajas?|cientos?|millares?)\b"
+        q_stripped = re.sub(_packaging_words_re, "", q, flags=re.IGNORECASE).strip()
+        q_stripped = re.sub(r"\bde\b", " ", q_stripped).strip()
+        q_stripped = re.sub(r"\s+", " ", q_stripped).strip()
+        if q_stripped and len(q_stripped) >= 3:
+            q = q_stripped
+
         _stopwords = {"para", "de", "del", "la", "el", "un", "una", "con", "sin", "los", "las"}
         _soft_stopwords = {"para", "del", "la", "el", "un", "una", "con", "sin", "los", "las"}
         q_tokens = [t for t in q.split() if t not in _stopwords]
@@ -1431,6 +1439,24 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
         _ctx_stopwords = {"para", "de", "del", "con", "sin", "los", "las", "una"}
         _ctx_tokens -= _ctx_stopwords
 
+        # Context category groups for smart disambiguation
+        _CTX_GROUPS = {
+            "tablaroca": {"tablaroca", "plafon", "canal", "poste", "tee", "angulo", "pija", "durock", "basecoat", "redimix", "cinta", "esquinero"},
+            "rejacero": {"rejacero", "reja", "concertina", "espada", "abrazadera", "tension", "arranque", "ganadero"},
+            "plomeria": {"tubo", "codo", "tee", "reduccion", "valvula", "llave", "manguera", "conexion"},
+        }
+
+        def _detect_context_group(context_text: str) -> set:
+            """Detect which product groups are present in cart context."""
+            ctx_low = _phonetic(context_text.lower())
+            groups = set()
+            for group, keywords in _CTX_GROUPS.items():
+                if any(kw in ctx_low for kw in keywords):
+                    groups.add(group)
+            return groups
+
+        _active_groups = _detect_context_group(cart_context) if cart_context else set()
+
         def _context_bonus(item_name: str) -> int:
             """Bonus for products sharing tokens with other cart items."""
             if not _ctx_tokens:
@@ -1438,6 +1464,28 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
             name_lower = _phonetic(item_name.lower())
             hits = sum(1 for t in _ctx_tokens if t in name_lower)
             return min(hits * 10, 30)  # max 30 bonus from context
+
+        def _context_sort(candidates, context: str):
+            """Sort ambiguous candidates by relevance to cart context.
+            E.g. if context=tablaroca, prefer 'Poste 4.10 cal 26' over 'Poste para rejacero'."""
+            if not context or not _active_groups or len(candidates) < 2:
+                return candidates
+            def _ctx_score(item):
+                score, r = item if isinstance(item, tuple) else (0, item)
+                name_low = _phonetic(((r[1] if isinstance(r, tuple) else r.get("name", "")) or "").lower())
+                bonus = 0
+                # Boost if product belongs to an active context group
+                for group in _active_groups:
+                    group_kws = _CTX_GROUPS.get(group, set())
+                    if any(kw in name_low for kw in group_kws):
+                        bonus += 50
+                # Penalize if product belongs to a NON-active group
+                for group, kws in _CTX_GROUPS.items():
+                    if group not in _active_groups:
+                        if any(kw in name_low for kw in kws):
+                            bonus -= 30
+                return -bonus  # negative for ascending sort
+            return sorted(candidates, key=_ctx_score)
 
         q_medida, q_cal = _extract_specs(q)
 
@@ -1454,7 +1502,14 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
             tenant_context = ""
 
         q_pre_llm = q  # guardar query antes de normalizar para cachear después
-        q_llm, norm_source = llm_normalize_query(conn, company_id, q, tenant_context)
+        # Pass original (non-phonetic) query to LLM so it understands the words correctly
+        # (phonetic transforms like b→v confuse the LLM: "brocha"→"vrocha"→LLM thinks "viga")
+        _llm_input = _strip_accents(user_query.lower().strip())
+        _llm_input = re.sub(_packaging_words_re, "", _llm_input, flags=re.IGNORECASE).strip()
+        _llm_input = re.sub(r"\s+", " ", _llm_input).strip()
+        q_llm, norm_source = llm_normalize_query(conn, company_id, _llm_input or q, tenant_context)
+        # Apply phonetic to LLM result for consistency with rest of search
+        q_llm = _phonetic(q_llm)
         if q_llm != q:
             q = q_llm
             # Recalculate q_tokens after LLM normalization so new tokens
@@ -1667,8 +1722,9 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                         syn_rows = []  # clear so we fall through
                     else:
                         print(f"SYNONYM AMBIGUOUS: query='{user_query}' found={len(_syn_relevant)}")
+                        _syn_sorted = _context_sort([(0, r) for r in _syn_relevant], cart_context)
                         _log_event("ambiguous", "synonym_ambiguous")
-                        return {"status": "ambiguous", "item": None, "candidates": [_make_item(r) for r in _syn_relevant]}
+                        return {"status": "ambiguous", "item": None, "candidates": [_make_item(r) for _, r in _syn_sorted]}
                 else:
                     print(f"SYNONYM AMBIGUOUS: query='{user_query}' found={len(syn_rows)}")
                     _log_event("ambiguous", "synonym_ambiguous")
@@ -1835,12 +1891,14 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                     if not _relevant:
                         print(f"ILIKE NO RELEVANT CANDIDATES: query='{user_query}' primary={_primary_toks} not in any of top 5 → skipping to GPT fallback")
                     else:
+                        _relevant = _context_sort(_relevant, cart_context)
                         _log_event("ambiguous", "ilike_ambiguous")
                         return {"status": "ambiguous", "item": None, "candidates": [_make_item(r) for _, r in _relevant]}
                 else:
                     q_first_token = q.split()[0] if q.split() else q
                     filtered = [(s, r) for s, r in scored[:5] if _phonetic((r[1] or "").lower()).startswith(q_first_token)]
                     candidates = filtered if filtered else scored[:5]
+                    candidates = _context_sort(candidates, cart_context)
                     _log_event("ambiguous", "ilike_ambiguous")
                     return {"status": "ambiguous", "item": None, "candidates": [_make_item(r) for _, r in candidates]}
 
