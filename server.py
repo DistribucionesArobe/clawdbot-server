@@ -960,7 +960,7 @@ def get_company_by_phone_number_id(phone_number_id: str):
 
 def send_whatsapp_list(wa_api_key: str, phone_number_id: str, to: str,
                        body_text: str, options: list, button_label: str = "Ver opciones"):
-    rows = [{"id": f"spec_{i}", "title": opt} for i, opt in enumerate(options[:10])]
+    rows = [{"id": f"spec_{i}", "title": opt[:24]} for i, opt in enumerate(options[:10])]
     payload = {
         "messaging_product": "whatsapp", "to": to, "type": "interactive",
         "interactive": {
@@ -2618,7 +2618,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             if bool(row_calc[2]):
                 _calc_opts.append("🎨 Calcular pintura")
             if bool(row_calc[3]):
-                _calc_opts.append("🛡️ Calcular impermeabilizante")
+                _calc_opts.append("🛡️ Calcular imper")
         if not _calc_opts:
             return "No hay calculadoras habilitadas en este momento."
         _calc_opts.append("⬅️ Volver al menú")
@@ -3242,7 +3242,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                     return "Entendido, cancelado. ¿En qué más te ayudo?"
 
         _im_triggers = {"calcular impermeabilizante", "🛡️ calcular impermeabilizante", "impermeabilizante",
-                        "cuanto impermeabilizante", "cuánto impermeabilizante", "calcular imper", "imper"}
+                        "cuanto impermeabilizante", "cuánto impermeabilizante", "calcular imper", "🛡️ calcular imper", "imper"}
         if tnorm in _im_triggers:
             _im_state["imper_state"] = {"step": "m2"}
             upsert_quote_state(company_id, wa_from, _im_state)
