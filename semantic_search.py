@@ -8,6 +8,7 @@ Novedades vs v8:
 
 import re
 import os
+import time
 import unicodedata
 from typing import Optional
 from openai import OpenAI
@@ -56,6 +57,30 @@ OPENAI_API_KEY = (os.getenv("OPENAI_API_KEY") or "").strip()
 openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 EMBED_MODEL = "text-embedding-3-large"
+
+
+def _openai_retry(fn, max_retries=3, base_delay=1.0):
+    """Retry an OpenAI API call with exponential backoff.
+    fn: callable that makes the API call and returns the result.
+    Retries on transient errors (rate limit, server errors, timeouts)."""
+    last_err = None
+    for attempt in range(max_retries):
+        try:
+            return fn()
+        except Exception as e:
+            last_err = e
+            err_str = str(e).lower()
+            # Only retry on transient errors
+            is_transient = any(k in err_str for k in [
+                "rate limit", "429", "500", "502", "503", "504",
+                "timeout", "connection", "overloaded", "server_error"
+            ])
+            if not is_transient or attempt == max_retries - 1:
+                raise
+            delay = base_delay * (2 ** attempt)
+            print(f"OpenAI retry {attempt+1}/{max_retries} after {delay}s: {e}")
+            time.sleep(delay)
+    raise last_err
 
 # Packaging/unit words to skip when selecting the primary token for matching
 _PACKAGING_WORDS = {"rollos", "rollo", "sacos", "saco", "bultos", "bulto",
@@ -121,12 +146,12 @@ def get_embedding(text: str) -> list:
     text = (text or "").strip()
     if not text:
         raise ValueError("texto vacio para embedding")
-    resp = openai_client.embeddings.create(
+    resp = _openai_retry(lambda: openai_client.embeddings.create(
         model=EMBED_MODEL,
         input=text,
         dimensions=1536,
         encoding_format="float",
-    )
+    ))
     return resp.data[0].embedding
 
 
@@ -139,12 +164,13 @@ def get_embeddings_batch(texts: list) -> list:
     chunk_size = 500
     for i in range(0, len(texts), chunk_size):
         chunk = texts[i : i + chunk_size]
-        resp = openai_client.embeddings.create(
+        _chunk = chunk  # capture for lambda
+        resp = _openai_retry(lambda: openai_client.embeddings.create(
             model=EMBED_MODEL,
-            input=chunk,
+            input=_chunk,
             dimensions=1536,
             encoding_format="float",
-        )
+        ))
         resp.data.sort(key=lambda x: x.index)
         all_vectors.extend([d.embedding for d in resp.data])
     return all_vectors
@@ -189,15 +215,16 @@ Reglas ESTRICTAS:
 8. Todos los keywords en minúsculas, sin acentos"""
 
         client = OpenAI()
-        resp = client.chat.completions.create(
+        _prompt = prompt  # capture for lambda
+        resp = _openai_retry(lambda: client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": "Eres un experto en materiales de construcción y ferretería en México. Conoces perfectamente qué productos se compran juntos en cada tipo de obra. Respondes solo con JSON válido."},
-                {"role": "user", "content": prompt},
+                {"role": "user", "content": _prompt},
             ],
             temperature=0.0,
             max_tokens=2000,
-        )
+        ))
         import json
         raw = (resp.choices[0].message.content or "").strip()
         # Extract JSON from possible markdown code block
@@ -529,40 +556,41 @@ def _llm_rerank(conn, company_id: str, user_query: str, candidates: list,
         )
 
     try:
-        resp = openai_client.chat.completions.create(
+        _msgs = [
+            {
+                "role": "system",
+                "content": (
+                    "Eres un ferretero mexicano experto. El cliente busca un producto. "
+                    "Te doy los mejores candidatos del catálogo ordenados por relevancia.\n\n"
+                    "REGLAS:\n"
+                    "- Si HAY una coincidencia clara → responde SOLO ese número (ej: '3')\n"
+                    "- Si hay 2-3 opciones del MISMO producto en diferentes medidas → números por coma (ej: '3,5,7')\n"
+                    "- Si NINGUNO corresponde → responde: NO\n"
+                    "- NUNCA expliques. Solo número(s) o NO.\n\n"
+                    "IMPORTANTE: Conoces la jerga mexicana de construcción:\n"
+                    "- 'pasta para durock/tablaroca' = basecoat/compuesto para juntas\n"
+                    "- 'malla para durock/tablaroca' = cinta de fibra de vidrio\n"
+                    "- 'tanque' puede ser 'tinaco'\n"
+                    "- 'RH'/'HR' = resistente a humedad = anti-moho\n"
+                    "- Usa el contexto del pedido para desambiguar"
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"{context_block}"
+                    f"Candidatos:\n{catalog_str}\n\n"
+                    f"El cliente busca: \"{user_query}\"\n"
+                    "¿Cuál número? (número, números por coma, o NO)"
+                ),
+            },
+        ]
+        resp = _openai_retry(lambda: openai_client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "Eres un ferretero mexicano experto. El cliente busca un producto. "
-                        "Te doy los mejores candidatos del catálogo ordenados por relevancia.\n\n"
-                        "REGLAS:\n"
-                        "- Si HAY una coincidencia clara → responde SOLO ese número (ej: '3')\n"
-                        "- Si hay 2-3 opciones del MISMO producto en diferentes medidas → números por coma (ej: '3,5,7')\n"
-                        "- Si NINGUNO corresponde → responde: NO\n"
-                        "- NUNCA expliques. Solo número(s) o NO.\n\n"
-                        "IMPORTANTE: Conoces la jerga mexicana de construcción:\n"
-                        "- 'pasta para durock/tablaroca' = basecoat/compuesto para juntas\n"
-                        "- 'malla para durock/tablaroca' = cinta de fibra de vidrio\n"
-                        "- 'tanque' puede ser 'tinaco'\n"
-                        "- 'RH'/'HR' = resistente a humedad = anti-moho\n"
-                        "- Usa el contexto del pedido para desambiguar"
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        f"{context_block}"
-                        f"Candidatos:\n{catalog_str}\n\n"
-                        f"El cliente busca: \"{user_query}\"\n"
-                        "¿Cuál número? (número, números por coma, o NO)"
-                    ),
-                },
-            ],
+            messages=_msgs,
             temperature=0.0,
             max_tokens=20,
-        )
+        ))
         raw = (resp.choices[0].message.content or "").strip().upper()
         print(f"LLM RERANK: query='{user_query}' response='{raw}' candidates={[c['item']['name'] for c in top_n[:5]]}")
 
@@ -1157,15 +1185,17 @@ def llm_normalize_query(conn, company_id: str, user_query: str, tenant_context: 
         if tenant_context:
             system += f"\n\nContexto del negocio: {tenant_context}"
 
-        resp = openai_client.chat.completions.create(
+        _system = system
+        _q = q
+        resp = _openai_retry(lambda: openai_client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": q},
+                {"role": "system", "content": _system},
+                {"role": "user", "content": _q},
             ],
             temperature=0.0,
             max_tokens=30,
-        )
+        ))
         normalized = _strip_accents((resp.choices[0].message.content or "").strip().lower())
         if not normalized or normalized == q:
             return user_query, "none"
@@ -1289,49 +1319,50 @@ def _gpt_catalog_fallback(conn, company_id: str, user_query: str,
         )
 
     try:
-        resp = openai_client.chat.completions.create(
+        _fb_msgs = [
+            {
+                "role": "system",
+                "content": (
+                    "Eres asistente de ferretería mexicana con amplio conocimiento de materiales "
+                    "de construcción, plomería, electricidad, herrería y acabados. "
+                    "El cliente busca un producto usando lenguaje coloquial, abreviado o con errores. "
+                    "Usa el contexto del pedido completo para entender a qué categoría pertenece "
+                    "el producto buscado — igual que lo haría un ferretero experimentado.\n\n"
+                    "EQUIVALENCIAS IMPORTANTES que debes conocer:\n"
+                    "- 'resistente a humedad' = 'anti-moho' = 'RH' = 'HR'\n"
+                    "- 'framer' es un tipo de pija/tornillo (Pija framer)\n"
+                    "- 'durock' y 'tablaroca' son tipos de panel diferentes\n"
+                    "- 'pija para tablaroca' ≠ 'pija para durock' (son productos distintos)\n\n"
+                    "Ejemplos de contexto:\n"
+                    "- Pedido con 'tee principal, tee 61' → 'placas' = plafón reticulado\n"
+                    "- Pedido con 'tablaroca, poste, canal' → 'pasta' = redimix/basecoat\n"
+                    "- Pedido con 'tubo conduit, clavija' → 'cinta' = cinta aislante\n\n"
+                    "Reglas:\n"
+                    "- UNA coincidencia clara → responde SOLO ese número (ej: '42')\n"
+                    "- VARIAS opciones del MISMO tipo → números por coma (ej: '42,43,44'). Máximo 5.\n"
+                    "- Nada relevante → responde exactamente: NO\n"
+                    "- NUNCA incluyas productos de tipo diferente al inferido\n"
+                    "- Sé FLEXIBLE con sinónimos: si el cliente dice 'resistente a humedad' "
+                    "y existe 'anti-moho', ESO es una coincidencia.\n"
+                    "- NUNCA expliques. Solo números o NO."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"{context_block}"
+                    f"Catálogo:\n{catalog_str}\n\n"
+                    f"El cliente busca: \"{user_query}\"\n\n"
+                    "¿Qué números corresponden? (números separados por coma, o NO)"
+                ),
+            },
+        ]
+        resp = _openai_retry(lambda: openai_client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "Eres asistente de ferretería mexicana con amplio conocimiento de materiales "
-                        "de construcción, plomería, electricidad, herrería y acabados. "
-                        "El cliente busca un producto usando lenguaje coloquial, abreviado o con errores. "
-                        "Usa el contexto del pedido completo para entender a qué categoría pertenece "
-                        "el producto buscado — igual que lo haría un ferretero experimentado.\n\n"
-                        "EQUIVALENCIAS IMPORTANTES que debes conocer:\n"
-                        "- 'resistente a humedad' = 'anti-moho' = 'RH' = 'HR'\n"
-                        "- 'framer' es un tipo de pija/tornillo (Pija framer)\n"
-                        "- 'durock' y 'tablaroca' son tipos de panel diferentes\n"
-                        "- 'pija para tablaroca' ≠ 'pija para durock' (son productos distintos)\n\n"
-                        "Ejemplos de contexto:\n"
-                        "- Pedido con 'tee principal, tee 61' → 'placas' = plafón reticulado\n"
-                        "- Pedido con 'tablaroca, poste, canal' → 'pasta' = redimix/basecoat\n"
-                        "- Pedido con 'tubo conduit, clavija' → 'cinta' = cinta aislante\n\n"
-                        "Reglas:\n"
-                        "- UNA coincidencia clara → responde SOLO ese número (ej: '42')\n"
-                        "- VARIAS opciones del MISMO tipo → números por coma (ej: '42,43,44'). Máximo 5.\n"
-                        "- Nada relevante → responde exactamente: NO\n"
-                        "- NUNCA incluyas productos de tipo diferente al inferido\n"
-                        "- Sé FLEXIBLE con sinónimos: si el cliente dice 'resistente a humedad' "
-                        "y existe 'anti-moho', ESO es una coincidencia.\n"
-                        "- NUNCA expliques. Solo números o NO."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        f"{context_block}"
-                        f"Catálogo:\n{catalog_str}\n\n"
-                        f"El cliente busca: \"{user_query}\"\n\n"
-                        "¿Qué números corresponden? (números separados por coma, o NO)"
-                    ),
-                },
-            ],
+            messages=_fb_msgs,
             temperature=0.0,
             max_tokens=20,
-        )
+        ))
         raw = (resp.choices[0].message.content or "").strip().upper()
         print(f"GPT FALLBACK RAW: query='{user_query}' context='{cart_context[:50]}' response='{raw}'")
 
