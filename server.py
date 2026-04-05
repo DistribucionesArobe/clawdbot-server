@@ -2782,6 +2782,38 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
 
         return _build_reply_with_pending(state, company_id=company_id, wa_from=wa_from)
 
+    # ── Detect conversational "I want to quote" intent without a specific product ──
+    # Messages like "me podrías cotizar un material", "quiero precio de algo",
+    # "pasame precios", "necesito cotización" — no product name, just intent.
+    _intent_patterns = [
+        r"^(me\s+)?podri?a?s?\s+(pasar|cotizar|dar)\s+(precio|precios|cotizacion)",
+        r"^quiero\s+(cotizar|precio|precios|una?\s+cotizacion)",
+        r"^necesito\s+(cotizar|precio|precios|una?\s+cotizacion)",
+        r"^(pasame|dame|mandame|enviame)\s+(precio|precios|cotizacion)",
+        r"^(cotizar|cotizame|cotizacion)\s*(un\s+)?(material|producto)?$",
+        r"^(un|de\s+un)\s+material$",
+        r"^precio\s+de\s+(un\s+)?(material|producto)$",
+        r"^(me\s+)?podri?a?s?\s+pasar\s+precio\s+de$",
+    ]
+    _tnorm_intent = re.sub(r"[¿?¡!.,]", "", tnorm).strip()
+    if any(re.search(p, _tnorm_intent) for p in _intent_patterns):
+        try:
+            conn_wh = get_conn()
+            cur_wh = conn_wh.cursor()
+            cur_wh.execute("SELECT welcome_products_hint FROM companies WHERE id=%s", (company_id,))
+            row_wh = cur_wh.fetchone()
+            cur_wh.close()
+            conn_wh.close()
+            hint = (row_wh[0] or "").strip() if row_wh else ""
+        except Exception:
+            hint = ""
+        if hint:
+            ejemplos = "\n".join(f"10 {p.strip()}" for p in hint.split(",") if p.strip())
+            hint_txt = f"\n\nEj:\n{ejemplos}"
+        else:
+            hint_txt = "\n\nEj:\n10 cemento\n5 varilla 3/8\n20 block 15x20"
+        return f"¡Claro! Mándame el nombre del material y la cantidad:{hint_txt}\n\nO todo en una línea separado por comas."
+
     # Para mensajes largos o con lenguaje natural, usar NER directo
     _words = user_text.split()
     _looks_long = len(_words) > 12 or "\n" in user_text
