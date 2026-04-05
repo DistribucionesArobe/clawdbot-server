@@ -2153,8 +2153,11 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 raw = (current.get("raw") or "").strip()
                 cands = current.get("candidates") or []
 
+                # Sort by price (cheapest first) as tiebreaker, then limit to 3
+                cands.sort(key=lambda x: float(x.get("price") or 999999))
+                cands = cands[:3]
                 section_rows = []
-                for j, it in enumerate(cands[:5], start=1):
+                for j, it in enumerate(cands, start=1):
                     price = float(it.get("price") or 0.0)
                     unit = it.get("unit") or "unidad"
                     full_name = it["name"]
