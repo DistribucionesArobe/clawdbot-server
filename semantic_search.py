@@ -1788,19 +1788,21 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
             cur0.close()
 
         def _best_syn_score(row, query):
-            """Score considerando nombre Y sinónimos del producto (phonetic-normalized)."""
+            """Score considerando nombre Y sinónimos del producto (phonetic-normalized).
+            Returns score that can exceed 100 (bonuses stack on top of fuzzy base)."""
             query_plain = _phonetic(query)
             name = _phonetic((row[1] or "").lower())
             name_score = max(fuzz.token_set_ratio(query_plain, name), fuzz.partial_ratio(query_plain, name))
             # Bonus: if product name STARTS with the query, boost score strongly
             # "durok" → "Durock USG" should win over "Pija para durock"
+            # NOTE: intentionally allow scores > 100 so bonuses create real gaps
             if name.startswith(query_plain):
-                name_score = min(name_score + 25, 100)
+                name_score += 25
             # Extra bonus: query IS essentially the product name (first word matches)
             name_first_word = name.split()[0] if name.split() else ""
             query_first_word = query_plain.split()[0] if query_plain.split() else ""
             if name_first_word and query_first_word and name_first_word == query_first_word:
-                name_score = min(name_score + 10, 100)
+                name_score += 10
             # También comparar contra cada sinónimo individual
             syns_raw = row[5] if len(row) > 5 else ""
             if syns_raw:
@@ -1947,10 +1949,20 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
 
         if pool_rows:
             scored = []
+            _q_sig_tokens = [_phonetic(t) for t in q_tokens if len(t) >= 3 and not t.replace(".", "").isdigit()]
             for r in pool_rows:
                 name = _phonetic((r[1] or "").lower())
                 base = max(fuzz.token_set_ratio(q, name), fuzz.partial_ratio(q, name))
                 bonus = _spec_bonus(r[1], q_medida, q_cal) + _context_bonus(r[1] or "")
+                # Bonus for containing ALL significant query tokens
+                # "pijas de durok" → "Pija para durock" has pija+durock → +15
+                # "Pija framer" only has pija → +0
+                if len(_q_sig_tokens) >= 2:
+                    _hits = sum(1 for t in _q_sig_tokens if t in name or any(_phonetic(sg) in name for sg in _singulars_es(t)))
+                    if _hits == len(_q_sig_tokens):
+                        bonus += 15  # all tokens present
+                    elif _hits < len(_q_sig_tokens) * 0.5:
+                        bonus -= 10  # most tokens missing
                 scored.append((base + bonus, r))
 
             scored = [(_tiebreak(s, r), r) for s, r in scored]
