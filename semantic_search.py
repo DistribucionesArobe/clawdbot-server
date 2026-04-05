@@ -1646,14 +1646,30 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
             return 0
 
         def _context_sort(candidates, context: str):
-            """Sort ambiguous candidates by relevance to cart context."""
+            """Sort AND FILTER ambiguous candidates by relevance to cart context.
+            If context groups are available, remove candidates from wrong groups."""
             if not context or (not _cart_groups and not _ctx_name_tokens) or len(candidates) < 2:
                 return candidates
-            def _ctx_score(item):
+
+            # Score all candidates
+            scored = []
+            for item in candidates:
                 score, r = item if isinstance(item, tuple) else (0, item)
                 name = (r[1] if isinstance(r, tuple) else r.get("name", "")) or ""
-                return -_context_bonus(name)  # negative for ascending sort
-            return sorted(candidates, key=_ctx_score)
+                bonus = _context_bonus(name)
+                scored.append((bonus, score, r))
+
+            # If we have context groups, FILTER out candidates with negative bonus
+            # but only if there are candidates with positive/neutral bonus remaining
+            if _cart_groups:
+                good = [s for s in scored if s[0] >= 0]
+                if good and len(good) < len(scored):
+                    print(f"CONTEXT FILTER: {len(scored)} → {len(good)} (removed {len(scored)-len(good)} wrong-group candidates)")
+                    scored = good
+
+            # Sort by context bonus descending
+            scored.sort(key=lambda x: -x[0])
+            return [(s[1], s[2]) for s in scored]
 
         q_medida, q_cal = _extract_specs(q)
 
@@ -1776,9 +1792,15 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
             query_plain = _phonetic(query)
             name = _phonetic((row[1] or "").lower())
             name_score = max(fuzz.token_set_ratio(query_plain, name), fuzz.partial_ratio(query_plain, name))
-            # Bonus: if product name STARTS with the query, boost score
+            # Bonus: if product name STARTS with the query, boost score strongly
+            # "durok" → "Durock USG" should win over "Pija para durock"
             if name.startswith(query_plain):
-                name_score = min(name_score + 15, 100)
+                name_score = min(name_score + 25, 100)
+            # Extra bonus: query IS essentially the product name (first word matches)
+            name_first_word = name.split()[0] if name.split() else ""
+            query_first_word = query_plain.split()[0] if query_plain.split() else ""
+            if name_first_word and query_first_word and name_first_word == query_first_word:
+                name_score = min(name_score + 10, 100)
             # También comparar contra cada sinónimo individual
             syns_raw = row[5] if len(row) > 5 else ""
             if syns_raw:
@@ -1852,7 +1874,8 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                 for r in syn_rows:
                     base = _best_syn_score(r, q)
                     bonus = _spec_bonus(r[1], q_medida, q_cal)
-                    scored_syns.append((base + bonus, r))
+                    ctx_b = _context_bonus((r[1] or ""))
+                    scored_syns.append((base + bonus + ctx_b, r))
                 scored_syns.sort(key=lambda x: x[0], reverse=True)
                 top_s = scored_syns[0][0]
                 second_s = scored_syns[1][0]
