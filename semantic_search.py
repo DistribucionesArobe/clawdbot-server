@@ -2094,6 +2094,21 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                     if not _relevant:
                         print(f"ILIKE NO RELEVANT CANDIDATES: query='{user_query}' primary={_primary_toks} not in any of top 5 → skipping to GPT fallback")
                     else:
+                        # ── ALL-TOKEN RESOLVER: if one candidate has ALL query tokens and others don't, pick it ──
+                        if len(_relevant) >= 2 and len(_q_sig_tokens) >= 2:
+                            _atm = [(s, r) for s, r in _relevant
+                                    if all(t in _phonetic((r[1] or "").lower())
+                                           or any(_phonetic(sg) in _phonetic((r[1] or "").lower()) for sg in _singulars_es(t))
+                                           for t in _q_sig_tokens)]
+                            _atm_no = [(s, r) for s, r in _relevant if (s, r) not in _atm]
+                            if len(_atm) == 1 and _atm_no:
+                                print(f"ILIKE ALL-TOKEN RESOLVED: query='{user_query}' match='{_atm[0][1][1]}' tokens={_q_sig_tokens}")
+                                item = _make_item(_atm[0][1])
+                                _log_event("found", "ilike_all_token", item, _atm[0][0] / 100.0)
+                                return {"status": "found", "item": item, "candidates": []}
+                            elif len(_atm) >= 2:
+                                _relevant = _atm  # narrow to only full-match candidates
+                                print(f"ILIKE ALL-TOKEN NARROWED: {len(scored)} → {len(_atm)} (all tokens present)")
                         _relevant = _context_sort(_relevant, cart_context)
                         _log_event("ambiguous", "ilike_ambiguous")
                         return {"status": "ambiguous", "item": None, "candidates": [_make_item(r) for _, r in _relevant]}
@@ -2101,6 +2116,19 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                     q_first_token = q.split()[0] if q.split() else q
                     filtered = [(s, r) for s, r in scored[:5] if _phonetic((r[1] or "").lower()).startswith(q_first_token)]
                     candidates = filtered if filtered else scored[:5]
+                    # ── ALL-TOKEN RESOLVER for this path too ──
+                    if len(candidates) >= 2 and len(_q_sig_tokens) >= 2:
+                        _atm2 = [(s, r) for s, r in candidates
+                                 if all(t in _phonetic((r[1] or "").lower())
+                                        or any(_phonetic(sg) in _phonetic((r[1] or "").lower()) for sg in _singulars_es(t))
+                                        for t in _q_sig_tokens)]
+                        if len(_atm2) == 1:
+                            print(f"ILIKE ALL-TOKEN RESOLVED (2): query='{user_query}' match='{_atm2[0][1][1]}' tokens={_q_sig_tokens}")
+                            item = _make_item(_atm2[0][1])
+                            _log_event("found", "ilike_all_token", item, _atm2[0][0] / 100.0)
+                            return {"status": "found", "item": item, "candidates": []}
+                        elif len(_atm2) >= 2:
+                            candidates = _atm2
                     candidates = _context_sort(candidates, cart_context)
                     _log_event("ambiguous", "ilike_ambiguous")
                     return {"status": "ambiguous", "item": None, "candidates": [_make_item(r) for _, r in candidates]}
