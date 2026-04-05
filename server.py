@@ -1743,8 +1743,11 @@ def _calc_plafon_reticulado(largo: float, ancho: float) -> list:
 
 def _is_construccion_trigger(text: str) -> bool:
     t = norm_name(text)
-    # Exclusiones explícitas del menú principal
+    # Exclusiones explícitas: menú principal y otros módulos de calculadora
     if t in {"cotizar materiales", "🔨 cotizar materiales"}:
+        return False
+    _other_calc_keywords = ["rejacero", "reja", "pintura", "imper", "impermeabilizante", "calculadoras", "📐"]
+    if any(k in t for k in _other_calc_keywords):
         return False
     triggers = [
         "calcula", "calcular",
