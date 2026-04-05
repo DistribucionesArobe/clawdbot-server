@@ -2449,6 +2449,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         "borrar", "borrar carrito", "vaciar carrito",
         "limpiar", "limpiar carrito",
         "🚪 salir", "🔄 nueva cotizacion", "🔄 nueva cotización",
+        "volver al menu", "volver al menú", "⬅️ volver al menu", "⬅️ volver al menú",
     }
     if any(rt == tnorm or rt in tnorm for rt in reset_triggers):
         if wa_from:
@@ -2456,22 +2457,25 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         try:
             conn_co = get_conn()
             cur_co = conn_co.cursor()
-            cur_co.execute("SELECT name, construccion_ligera_enabled, rejacero_enabled FROM companies WHERE id=%s LIMIT 1", (company_id,))
+            cur_co.execute("SELECT name, construccion_ligera_enabled, rejacero_enabled, pintura_enabled, impermeabilizante_enabled FROM companies WHERE id=%s LIMIT 1", (company_id,))
             row_co = cur_co.fetchone()
             cur_co.close()
             conn_co.close()
             company_name = row_co[0] if row_co else "tu ferretería"
             _mod_cl = bool(row_co[1]) if row_co else False
             _mod_rj = bool(row_co[2]) if row_co else False
+            _mod_pt = bool(row_co[3]) if row_co else False
+            _mod_im = bool(row_co[4]) if row_co else False
         except Exception:
             company_name = "tu ferretería"
             _mod_cl = False
             _mod_rj = False
+            _mod_pt = False
+            _mod_im = False
         _menu_opts = ["🔨 Cotizar materiales"]
-        if _mod_cl:
-            _menu_opts.append("🏗️ Calcular m2")
-        if _mod_rj:
-            _menu_opts.append("🧱 Calcular rejacero")
+        _any_calc = _mod_cl or _mod_rj or _mod_pt or _mod_im
+        if _any_calc:
+            _menu_opts.append("📐 Calculadoras")
         _menu_opts.extend(["🕐 Horarios y ubicación", "👤 Hablar con alguien"])
         return {
             "type": "list",
@@ -2594,6 +2598,37 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             "o esperar a que te contacten."
         )
 
+    # Opción "Calculadoras" — submenú dinámico según módulos habilitados
+    if tnorm in {"calculadoras", "📐 calculadoras", "calculadora"}:
+        try:
+            conn_calc = get_conn()
+            cur_calc = conn_calc.cursor()
+            cur_calc.execute("SELECT construccion_ligera_enabled, rejacero_enabled, pintura_enabled, impermeabilizante_enabled FROM companies WHERE id=%s", (company_id,))
+            row_calc = cur_calc.fetchone()
+            cur_calc.close()
+            conn_calc.close()
+        except Exception:
+            row_calc = None
+        _calc_opts = []
+        if row_calc:
+            if bool(row_calc[0]):
+                _calc_opts.append("🏗️ Calcular m2")
+            if bool(row_calc[1]):
+                _calc_opts.append("🧱 Calcular rejacero")
+            if bool(row_calc[2]):
+                _calc_opts.append("🎨 Calcular pintura")
+            if bool(row_calc[3]):
+                _calc_opts.append("🛡️ Calcular impermeabilizante")
+        if not _calc_opts:
+            return "No hay calculadoras habilitadas en este momento."
+        _calc_opts.append("⬅️ Volver al menú")
+        return {
+            "type": "list",
+            "body": "📐 *Calculadoras disponibles*\n\nSelecciona el tipo de cálculo que necesitas:",
+            "options": _calc_opts,
+            "button_label": "Ver calculadoras",
+        }
+
     # Opción "Cotizar materiales" / "Agregar más" del menú principal
     if tnorm in {"cotizar materiales", "🔨 cotizar materiales", "agregar mas", "➕ agregar mas", "➕ agregar más"}:
         try:
@@ -2616,17 +2651,21 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         try:
             conn_co = get_conn()
             cur_co = conn_co.cursor()
-            cur_co.execute("SELECT name, construccion_ligera_enabled, rejacero_enabled FROM companies WHERE id=%s LIMIT 1", (company_id,))
+            cur_co.execute("SELECT name, construccion_ligera_enabled, rejacero_enabled, pintura_enabled, impermeabilizante_enabled FROM companies WHERE id=%s LIMIT 1", (company_id,))
             row_co = cur_co.fetchone()
             cur_co.close()
             conn_co.close()
             company_name = row_co[0] if row_co else "tu ferretería"
             _mod_cl2 = bool(row_co[1]) if row_co else False
             _mod_rj2 = bool(row_co[2]) if row_co else False
+            _mod_pt2 = bool(row_co[3]) if row_co else False
+            _mod_im2 = bool(row_co[4]) if row_co else False
         except Exception:
             company_name = "tu ferretería"
             _mod_cl2 = False
             _mod_rj2 = False
+            _mod_pt2 = False
+            _mod_im2 = False
 
         if wa_from:
             st = get_quote_state(company_id, wa_from) or {}
@@ -2637,10 +2676,9 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             if has_cart:
                 clear_quote_state(company_id, wa_from)
         _menu_opts2 = ["🔨 Cotizar materiales"]
-        if _mod_cl2:
-            _menu_opts2.append("🏗️ Calcular m2")
-        if _mod_rj2:
-            _menu_opts2.append("🧱 Calcular rejacero")
+        _any_calc2 = _mod_cl2 or _mod_rj2 or _mod_pt2 or _mod_im2
+        if _any_calc2:
+            _menu_opts2.append("📐 Calculadoras")
         _menu_opts2.extend(["🕐 Horarios y ubicación", "👤 Hablar con alguien"])
         return {
             "type": "list",
@@ -2932,6 +2970,283 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             _rj_state["rejacero_state"] = {"step": "metros"}
             upsert_quote_state(company_id, wa_from, _rj_state)
             return "📏 ¿Cuántos metros lineales de reja necesitas? (ej: 25)"
+
+    # ── Helper: desglose litros → cubetas + galones + litros ──────────────
+    def _desglose_litros(litros_total):
+        """Desglosa litros en cubetas (19L), galones (3.785L), litros sueltos."""
+        import math
+        cubetas = int(litros_total // 19)
+        resto = litros_total - (cubetas * 19)
+        galones = int(resto // 3.785)
+        resto2 = resto - (galones * 3.785)
+        litros = math.ceil(resto2) if resto2 > 0.1 else 0
+        return cubetas, galones, litros
+
+    def _desglose_texto(cubetas, galones, litros):
+        parts = []
+        if cubetas > 0:
+            parts.append(f"*{cubetas}* cubeta{'s' if cubetas > 1 else ''} (19L)")
+        if galones > 0:
+            parts.append(f"*{galones}* galón{'es' if galones > 1 else ''} (3.785L)")
+        if litros > 0:
+            parts.append(f"*{litros}* litro{'s' if litros > 1 else ''}")
+        return " + ".join(parts) if parts else "*0*"
+
+    # ── Pintura calculator ───────────────────────────────────────────────────
+    try:
+        conn_pt = get_conn()
+        cur_pt = conn_pt.cursor()
+        cur_pt.execute("SELECT pintura_enabled FROM companies WHERE id=%s", (company_id,))
+        row_pt = cur_pt.fetchone()
+        cur_pt.close()
+        conn_pt.close()
+        _pt_enabled = bool(row_pt[0]) if row_pt else False
+    except Exception:
+        _pt_enabled = False
+
+    if _pt_enabled:
+        _pt_state = get_quote_state(company_id, wa_from) if wa_from else {}
+        _pt_state = _pt_state or {}
+
+        if _pt_state.get("pintura_state"):
+            pts = _pt_state["pintura_state"]
+
+            if pts.get("step") == "m2":
+                _m_num = re.match(r"^\s*(\d+(?:\.\d+)?)\s*", user_text.strip())
+                if _m_num:
+                    m2 = float(_m_num.group(1))
+                    pts["m2"] = m2
+                    pts["step"] = "tipo"
+                    _pt_state["pintura_state"] = pts
+                    upsert_quote_state(company_id, wa_from, _pt_state)
+                    return {
+                        "type": "list",
+                        "body": f"📐 *{m2:.0f} m²*. ¿Qué tipo de pintura?",
+                        "options": ["Vinílica", "Esmalte"],
+                        "button_label": "Elegir tipo",
+                    }
+                else:
+                    return "Necesito un número. ¿Cuántos m² vas a pintar? (ej: 120)"
+
+            elif pts.get("step") == "tipo":
+                import math
+                m2 = pts.get("m2", 0)
+                tipo_lower = tnorm.strip()
+                if "esmalte" in tipo_lower:
+                    tipo = "Esmalte"
+                    rendimiento_litro = 8.5  # m2 por litro
+                else:
+                    tipo = "Vinílica"
+                    rendimiento_litro = 80.0 / 19.0  # ~4.21 m2 por litro
+
+                litros_total = math.ceil(m2 / rendimiento_litro)
+                cubetas, galones, litros = _desglose_litros(litros_total)
+
+                resultado = (
+                    f"🎨 *Cálculo de pintura {tipo}*\n"
+                    f"━━━━━━━━━━━━━━━━━━━\n"
+                    f"📐 Superficie: *{m2:.0f} m²*\n"
+                    f"📊 Rendimiento: *{rendimiento_litro:.1f} m²/litro*\n\n"
+                    f"🪣 Total: *{litros_total} litros*\n"
+                    f"📦 Presentación: {_desglose_texto(cubetas, galones, litros)}\n"
+                    f"━━━━━━━━━━━━━━━━━━━"
+                )
+
+                _mat_lines = []
+                if cubetas > 0:
+                    _mat_lines.append(f"{cubetas} cubeta pintura {tipo.lower()}")
+                if galones > 0:
+                    _mat_lines.append(f"{galones} galon pintura {tipo.lower()}")
+                if litros > 0:
+                    _mat_lines.append(f"{litros} litro pintura {tipo.lower()}")
+
+                pts["resultado"] = _mat_lines
+                pts["step"] = "esperando_cotizar"
+                _pt_state["pintura_state"] = pts
+                upsert_quote_state(company_id, wa_from, _pt_state)
+
+                return {
+                    "type": "text_then_buttons",
+                    "text": resultado,
+                    "body": "¿Quieres que cotice estos materiales?",
+                    "buttons": ["🛒 Cotizar materiales", "🔄 Recalcular", "🚪 Salir"],
+                }
+
+            elif pts.get("step") == "esperando_cotizar":
+                if tnorm in {"si", "sí", "yes", "dale", "va", "ok", "cotizar", "cotizar materiales", "🛒 cotizar materiales"}:
+                    _mat_lines = pts.get("resultado") or []
+                    state = _pt_state
+                    conn = get_conn()
+                    try:
+                        for line in _mat_lines:
+                            _lm = re.match(r"^(\d+)\s+(.+)$", line.strip())
+                            if _lm:
+                                _lqty = int(_lm.group(1))
+                                _lname = _lm.group(2)
+                                result = smart_search(conn, company_id, _lname, _lqty,
+                                                      cart_context=_build_cart_context(state))
+                                if result["status"] == "found":
+                                    state = cart_add_item(state, {
+                                        "sku": result["item"].get("sku"),
+                                        "name": result["item"].get("name"),
+                                        "unit": result["item"].get("unit") or "unidad",
+                                        "price": float(result["item"].get("price") or 0.0),
+                                        "vat_rate": result["item"].get("vat_rate"),
+                                        "qty": _lqty,
+                                    })
+                                elif result.get("candidates"):
+                                    pend = state.get("pending") or []
+                                    pend.append({"qty": _lqty, "raw": _lname, "candidates": result["candidates"]})
+                                    state["pending"] = pend
+                    finally:
+                        conn.close()
+                    state.pop("pintura_state", None)
+                    upsert_quote_state(company_id, wa_from, state)
+                    return _build_reply_with_pending(state, company_id=company_id, wa_from=wa_from)
+                elif tnorm in {"recalcular", "🔄 recalcular"}:
+                    _pt_state["pintura_state"] = {"step": "m2"}
+                    upsert_quote_state(company_id, wa_from, _pt_state)
+                    return "📐 ¿Cuántos m² vas a pintar? (ej: 120)"
+                else:
+                    _pt_state.pop("pintura_state", None)
+                    upsert_quote_state(company_id, wa_from, _pt_state)
+                    return "Entendido, cancelado. ¿En qué más te ayudo?"
+
+        _pt_triggers = {"calcular pintura", "🎨 calcular pintura", "pintura", "cuanta pintura",
+                        "cuánta pintura", "calcular pintura m2"}
+        if tnorm in _pt_triggers:
+            _pt_state["pintura_state"] = {"step": "m2"}
+            upsert_quote_state(company_id, wa_from, _pt_state)
+            return "📐 ¿Cuántos m² vas a pintar? (ej: 120)"
+
+    # ── Impermeabilizante calculator ─────────────────────────────────────────
+    try:
+        conn_im = get_conn()
+        cur_im = conn_im.cursor()
+        cur_im.execute("SELECT impermeabilizante_enabled FROM companies WHERE id=%s", (company_id,))
+        row_im = cur_im.fetchone()
+        cur_im.close()
+        conn_im.close()
+        _im_enabled = bool(row_im[0]) if row_im else False
+    except Exception:
+        _im_enabled = False
+
+    if _im_enabled:
+        _im_state = get_quote_state(company_id, wa_from) if wa_from else {}
+        _im_state = _im_state or {}
+
+        if _im_state.get("imper_state"):
+            ims = _im_state["imper_state"]
+
+            if ims.get("step") == "m2":
+                _m_num = re.match(r"^\s*(\d+(?:\.\d+)?)\s*", user_text.strip())
+                if _m_num:
+                    m2 = float(_m_num.group(1))
+                    ims["m2"] = m2
+                    ims["step"] = "tipo"
+                    _im_state["imper_state"] = ims
+                    upsert_quote_state(company_id, wa_from, _im_state)
+                    return {
+                        "type": "list",
+                        "body": f"📐 *{m2:.0f} m²* de azotea. ¿Es primera aplicación o mantenimiento?",
+                        "options": ["Primera aplicación", "Mantenimiento"],
+                        "button_label": "Elegir tipo",
+                    }
+                else:
+                    return "Necesito un número. ¿Cuántos m² de azotea? (ej: 80)"
+
+            elif ims.get("step") == "tipo":
+                import math
+                m2 = ims.get("m2", 0)
+                es_primera = "primera" in tnorm
+
+                # 1 litro por m2
+                litros_total = math.ceil(m2)
+                cubetas, galones, litros = _desglose_litros(litros_total)
+
+                resultado = (
+                    f"🛡️ *Cálculo de impermeabilizante*\n"
+                    f"━━━━━━━━━━━━━━━━━━━\n"
+                    f"📐 Azotea: *{m2:.0f} m²*\n"
+                    f"📊 Rendimiento: *1 litro/m²*\n"
+                    f"🔧 Tipo: *{'Primera aplicación' if es_primera else 'Mantenimiento'}*\n\n"
+                    f"🪣 Impermeabilizante: *{litros_total} litros*\n"
+                    f"📦 Presentación: {_desglose_texto(cubetas, galones, litros)}\n"
+                )
+                if es_primera:
+                    import math as _m
+                    rollos_malla = _m.ceil(m2 / 30)  # 1 rollo ≈ 30 m2
+                    resultado += f"🔗 Malla de refuerzo: *{rollos_malla} rollo{'s' if rollos_malla > 1 else ''}*\n"
+                resultado += "━━━━━━━━━━━━━━━━━━━"
+
+                _mat_lines = []
+                if cubetas > 0:
+                    _mat_lines.append(f"{cubetas} cubeta impermeabilizante")
+                if galones > 0:
+                    _mat_lines.append(f"{galones} galon impermeabilizante")
+                if litros > 0:
+                    _mat_lines.append(f"{litros} litro impermeabilizante")
+                if es_primera:
+                    _mat_lines.append(f"{rollos_malla} rollo malla impermeabilizante")
+
+                ims["resultado"] = _mat_lines
+                ims["step"] = "esperando_cotizar"
+                _im_state["imper_state"] = ims
+                upsert_quote_state(company_id, wa_from, _im_state)
+
+                return {
+                    "type": "text_then_buttons",
+                    "text": resultado,
+                    "body": "¿Quieres que cotice estos materiales?",
+                    "buttons": ["🛒 Cotizar materiales", "🔄 Recalcular", "🚪 Salir"],
+                }
+
+            elif ims.get("step") == "esperando_cotizar":
+                if tnorm in {"si", "sí", "yes", "dale", "va", "ok", "cotizar", "cotizar materiales", "🛒 cotizar materiales"}:
+                    _mat_lines = ims.get("resultado") or []
+                    state = _im_state
+                    conn = get_conn()
+                    try:
+                        for line in _mat_lines:
+                            _lm = re.match(r"^(\d+)\s+(.+)$", line.strip())
+                            if _lm:
+                                _lqty = int(_lm.group(1))
+                                _lname = _lm.group(2)
+                                result = smart_search(conn, company_id, _lname, _lqty,
+                                                      cart_context=_build_cart_context(state))
+                                if result["status"] == "found":
+                                    state = cart_add_item(state, {
+                                        "sku": result["item"].get("sku"),
+                                        "name": result["item"].get("name"),
+                                        "unit": result["item"].get("unit") or "unidad",
+                                        "price": float(result["item"].get("price") or 0.0),
+                                        "vat_rate": result["item"].get("vat_rate"),
+                                        "qty": _lqty,
+                                    })
+                                elif result.get("candidates"):
+                                    pend = state.get("pending") or []
+                                    pend.append({"qty": _lqty, "raw": _lname, "candidates": result["candidates"]})
+                                    state["pending"] = pend
+                    finally:
+                        conn.close()
+                    state.pop("imper_state", None)
+                    upsert_quote_state(company_id, wa_from, state)
+                    return _build_reply_with_pending(state, company_id=company_id, wa_from=wa_from)
+                elif tnorm in {"recalcular", "🔄 recalcular"}:
+                    _im_state["imper_state"] = {"step": "m2"}
+                    upsert_quote_state(company_id, wa_from, _im_state)
+                    return "📐 ¿Cuántos m² de azotea necesitas impermeabilizar? (ej: 80)"
+                else:
+                    _im_state.pop("imper_state", None)
+                    upsert_quote_state(company_id, wa_from, _im_state)
+                    return "Entendido, cancelado. ¿En qué más te ayudo?"
+
+        _im_triggers = {"calcular impermeabilizante", "🛡️ calcular impermeabilizante", "impermeabilizante",
+                        "cuanto impermeabilizante", "cuánto impermeabilizante", "calcular imper", "imper"}
+        if tnorm in _im_triggers:
+            _im_state["imper_state"] = {"step": "m2"}
+            upsert_quote_state(company_id, wa_from, _im_state)
+            return "📐 ¿Cuántos m² de azotea necesitas impermeabilizar? (ej: 80)"
 
     # ── Pick handler (one-at-a-time) ──────────────────────────────────────────
     _quick_picks = _parse_pending_picks(user_text)
@@ -3733,6 +4048,8 @@ class CompanySettingsBody(BaseModel):
     company_name: Optional[str] = None
     construccion_ligera_enabled: Optional[bool] = None
     rejacero_enabled: Optional[bool] = None
+    pintura_enabled: Optional[bool] = None
+    impermeabilizante_enabled: Optional[bool] = None
     @validator('discount_threshold', 'discount_percent', pre=True)
     def coerce_empty_to_none(cls, v):
         if v == '' or v is None:
@@ -3772,6 +4089,8 @@ def company_settings_update(request: Request, body: CompanySettingsBody):
     # Module toggles — only update if explicitly sent
     cl_enabled = body.construccion_ligera_enabled
     rj_enabled = body.rejacero_enabled
+    pint_enabled = body.pintura_enabled
+    imper_enabled = body.impermeabilizante_enabled
 
     conn = None
     cur = None
@@ -3780,7 +4099,7 @@ def company_settings_update(request: Request, body: CompanySettingsBody):
         cur = conn.cursor()
 
         # Ensure module columns exist (idempotent migration)
-        for _mcol in ("construccion_ligera_enabled", "rejacero_enabled"):
+        for _mcol in ("construccion_ligera_enabled", "rejacero_enabled", "pintura_enabled", "impermeabilizante_enabled"):
             cur.execute(f"""
                 DO $$ BEGIN
                     IF NOT EXISTS (SELECT 1 FROM information_schema.columns
@@ -3803,6 +4122,12 @@ def company_settings_update(request: Request, body: CompanySettingsBody):
         if rj_enabled is not None:
             _extra_sets += ", rejacero_enabled=%s"
             _extra_vals.append(rj_enabled)
+        if pint_enabled is not None:
+            _extra_sets += ", pintura_enabled=%s"
+            _extra_vals.append(pint_enabled)
+        if imper_enabled is not None:
+            _extra_sets += ", impermeabilizante_enabled=%s"
+            _extra_vals.append(imper_enabled)
 
         cur.execute(
             f"""
@@ -5800,6 +6125,8 @@ def _run_onboarding_migrations(conn):
             ("onboarding_completed", "BOOLEAN DEFAULT FALSE"),
             ("construccion_ligera_enabled", "BOOLEAN DEFAULT FALSE"),
             ("rejacero_enabled", "BOOLEAN DEFAULT FALSE"),
+            ("pintura_enabled", "BOOLEAN DEFAULT FALSE"),
+            ("impermeabilizante_enabled", "BOOLEAN DEFAULT FALSE"),
         ]:
             cur.execute(f"""
                 DO $$
