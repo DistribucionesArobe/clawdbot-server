@@ -2456,17 +2456,27 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         try:
             conn_co = get_conn()
             cur_co = conn_co.cursor()
-            cur_co.execute("SELECT name FROM companies WHERE id=%s LIMIT 1", (company_id,))
+            cur_co.execute("SELECT name, construccion_ligera_enabled, rejacero_enabled FROM companies WHERE id=%s LIMIT 1", (company_id,))
             row_co = cur_co.fetchone()
             cur_co.close()
             conn_co.close()
             company_name = row_co[0] if row_co else "tu ferretería"
+            _mod_cl = bool(row_co[1]) if row_co else False
+            _mod_rj = bool(row_co[2]) if row_co else False
         except Exception:
             company_name = "tu ferretería"
+            _mod_cl = False
+            _mod_rj = False
+        _menu_opts = ["🔨 Cotizar materiales"]
+        if _mod_cl:
+            _menu_opts.append("🏗️ Calcular m2")
+        if _mod_rj:
+            _menu_opts.append("🧱 Calcular rejacero")
+        _menu_opts.extend(["🕐 Horarios y ubicación", "👤 Hablar con alguien"])
         return {
             "type": "list",
             "body": f"👋 ¡Hola! Soy el Cotizabot de *{company_name}*\n\n¿En qué te puedo ayudar?",
-            "options": ["🔨 Cotizar materiales", "🏗️ Calcular m2", "🕐 Horarios y ubicación", "👤 Hablar con alguien"],
+            "options": _menu_opts,
             "button_label": "Ver opciones",
         }
 
@@ -2606,28 +2616,36 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         try:
             conn_co = get_conn()
             cur_co = conn_co.cursor()
-            cur_co.execute("SELECT name FROM companies WHERE id=%s LIMIT 1", (company_id,))
+            cur_co.execute("SELECT name, construccion_ligera_enabled, rejacero_enabled FROM companies WHERE id=%s LIMIT 1", (company_id,))
             row_co = cur_co.fetchone()
             cur_co.close()
             conn_co.close()
             company_name = row_co[0] if row_co else "tu ferretería"
+            _mod_cl2 = bool(row_co[1]) if row_co else False
+            _mod_rj2 = bool(row_co[2]) if row_co else False
         except Exception:
             company_name = "tu ferretería"
+            _mod_cl2 = False
+            _mod_rj2 = False
 
         if wa_from:
             st = get_quote_state(company_id, wa_from) or {}
             has_pending = bool(st.get("pending"))
             has_cart = bool(st.get("cart"))
             if has_pending:
-                # Don't reset — remind user of pending clarifications
                 return _build_reply_with_pending(st, company_id=company_id, wa_from=wa_from)
             if has_cart:
-                # Cart exists but no pending clarifications — let them start fresh
                 clear_quote_state(company_id, wa_from)
+        _menu_opts2 = ["🔨 Cotizar materiales"]
+        if _mod_cl2:
+            _menu_opts2.append("🏗️ Calcular m2")
+        if _mod_rj2:
+            _menu_opts2.append("🧱 Calcular rejacero")
+        _menu_opts2.extend(["🕐 Horarios y ubicación", "👤 Hablar con alguien"])
         return {
             "type": "list",
             "body": f"👋 ¡Hola! Soy el Cotizabot de *{company_name}*\n\n¿En qué te puedo ayudar?",
-            "options": ["🔨 Cotizar materiales", "🏗️ Calcular m2", "🕐 Horarios y ubicación", "👤 Hablar con alguien"],
+            "options": _menu_opts2,
             "button_label": "Ver opciones",
         }
 
@@ -2771,6 +2789,150 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             upsert_quote_state(company_id, wa_from, _cs_state)
             return _handle_construccion(company_id, user_text, wa_from)
         
+    # ── Rejacero calculator ─────────────────────────────────────────────────
+    try:
+        conn_rj = get_conn()
+        cur_rj = conn_rj.cursor()
+        cur_rj.execute("SELECT rejacero_enabled FROM companies WHERE id=%s", (company_id,))
+        row_rj = cur_rj.fetchone()
+        cur_rj.close()
+        conn_rj.close()
+        _rj_enabled = bool(row_rj[0]) if row_rj else False
+    except Exception:
+        _rj_enabled = False
+
+    if _rj_enabled:
+        _rj_state = get_quote_state(company_id, wa_from) if wa_from else {}
+        _rj_state = _rj_state or {}
+
+        # Step flow: rejacero_state.step = "metros" | "altura"
+        if _rj_state.get("rejacero_state"):
+            rjs = _rj_state["rejacero_state"]
+
+            if rjs.get("step") == "metros":
+                # Expecting meters number
+                _m_num = re.match(r"^\s*(\d+(?:\.\d+)?)\s*", user_text.strip())
+                if _m_num:
+                    metros = float(_m_num.group(1))
+                    rjs["metros"] = metros
+                    rjs["step"] = "altura"
+                    _rj_state["rejacero_state"] = rjs
+                    upsert_quote_state(company_id, wa_from, _rj_state)
+                    return {
+                        "type": "list",
+                        "body": f"📏 *{metros:.0f} metros lineales*. ¿Cuál es la altura de la reja?",
+                        "options": ["1.00 m", "1.50 m", "2.00 m", "2.50 m"],
+                        "button_label": "Elegir altura",
+                    }
+                else:
+                    return "Necesito un número. ¿Cuántos metros lineales de reja? (ej: 25)"
+
+            elif rjs.get("step") == "altura":
+                # Parse height from selection or text
+                _h_match = re.search(r"(\d+(?:\.\d+)?)", user_text.strip())
+                if _h_match:
+                    altura = float(_h_match.group(1))
+                    metros = rjs.get("metros", 0)
+
+                    # Calculate
+                    import math
+                    rejas = math.ceil(metros / 2.50)
+                    postes = rejas + 1
+                    # Abrazaderas per post based on height
+                    if altura >= 2.50:
+                        abr_per_post = 5
+                    elif altura >= 2.00:
+                        abr_per_post = 4
+                    elif altura >= 1.50:
+                        abr_per_post = 3
+                    else:
+                        abr_per_post = 2
+                    abrazaderas = postes * abr_per_post
+
+                    resultado = (
+                        f"🧱 *Cálculo de rejacero*\n"
+                        f"━━━━━━━━━━━━━━━━━━━\n"
+                        f"📏 Metros lineales: *{metros:.0f} m*\n"
+                        f"📐 Altura: *{altura:.2f} m*\n\n"
+                        f"🔩 Rejas: *{rejas}*\n"
+                        f"📍 Postes: *{postes}*\n"
+                        f"🔗 Abrazaderas: *{abrazaderas}* ({abr_per_post} por poste)\n"
+                        f"━━━━━━━━━━━━━━━━━━━"
+                    )
+
+                    # Build material list for quoting
+                    _mat_lines = []
+                    _mat_lines.append(f"{rejas} reja ciclonica {altura:.2f}")
+                    _mat_lines.append(f"{postes} poste rejacero")
+                    _mat_lines.append(f"{abrazaderas} abrazadera")
+                    rjs["resultado"] = _mat_lines
+                    rjs["step"] = "esperando_cotizar"
+                    _rj_state["rejacero_state"] = rjs
+                    upsert_quote_state(company_id, wa_from, _rj_state)
+
+                    return {
+                        "type": "text_then_buttons",
+                        "text": resultado,
+                        "body": "¿Quieres que cotice estos materiales?",
+                        "buttons": ["🛒 Cotizar materiales", "🔄 Recalcular", "🚪 Salir"],
+                    }
+                else:
+                    return {
+                        "type": "list",
+                        "body": "No entendí la altura. Elige una opción:",
+                        "options": ["1.00 m", "1.50 m", "2.00 m", "2.50 m"],
+                        "button_label": "Elegir altura",
+                    }
+
+            elif rjs.get("step") == "esperando_cotizar":
+                if tnorm in {"si", "sí", "yes", "dale", "va", "ok", "cotizar", "cotizar materiales", "🛒 cotizar materiales"}:
+                    _mat_lines = rjs.get("resultado") or []
+                    state = _rj_state
+                    conn = get_conn()
+                    try:
+                        for line in _mat_lines:
+                            # Parse "N producto" format
+                            _lm = re.match(r"^(\d+)\s+(.+)$", line.strip())
+                            if _lm:
+                                _lqty = int(_lm.group(1))
+                                _lname = _lm.group(2)
+                                result = smart_search(conn, company_id, _lname, _lqty,
+                                                      cart_context=_build_cart_context(state))
+                                if result["status"] == "found":
+                                    state = cart_add_item(state, {
+                                        "sku": result["item"].get("sku"),
+                                        "name": result["item"].get("name"),
+                                        "unit": result["item"].get("unit") or "unidad",
+                                        "price": float(result["item"].get("price") or 0.0),
+                                        "vat_rate": result["item"].get("vat_rate"),
+                                        "qty": _lqty,
+                                    })
+                                elif result.get("candidates"):
+                                    pend = state.get("pending") or []
+                                    pend.append({"qty": _lqty, "raw": _lname, "candidates": result["candidates"]})
+                                    state["pending"] = pend
+                    finally:
+                        conn.close()
+                    state.pop("rejacero_state", None)
+                    upsert_quote_state(company_id, wa_from, state)
+                    return _build_reply_with_pending(state, company_id=company_id, wa_from=wa_from)
+                elif tnorm in {"recalcular", "🔄 recalcular"}:
+                    _rj_state["rejacero_state"] = {"step": "metros"}
+                    upsert_quote_state(company_id, wa_from, _rj_state)
+                    return "📏 ¿Cuántos metros lineales de reja necesitas? (ej: 25)"
+                else:
+                    _rj_state.pop("rejacero_state", None)
+                    upsert_quote_state(company_id, wa_from, _rj_state)
+                    return "Entendido, cancelado. ¿En qué más te ayudo?"
+
+        # Trigger rejacero calculator
+        _rj_triggers = {"calcular rejacero", "🧱 calcular rejacero", "rejacero", "reja ciclonica",
+                        "reja ciclónica", "calcular reja", "calcular rejas"}
+        if tnorm in _rj_triggers:
+            _rj_state["rejacero_state"] = {"step": "metros"}
+            upsert_quote_state(company_id, wa_from, _rj_state)
+            return "📏 ¿Cuántos metros lineales de reja necesitas? (ej: 25)"
+
     # ── Pick handler (one-at-a-time) ──────────────────────────────────────────
     _quick_picks = _parse_pending_picks(user_text)
     # Also handle bare number "1", "2" etc. as pick for the first pending item
@@ -3568,6 +3730,8 @@ class CompanySettingsBody(BaseModel):
     brand_color: Optional[str] = None
     discount_threshold: Optional[float] = None
     discount_percent: Optional[float] = None
+    construccion_ligera_enabled: Optional[bool] = None
+    rejacero_enabled: Optional[bool] = None
     @validator('discount_threshold', 'discount_percent', pre=True)
     def coerce_empty_to_none(cls, v):
         if v == '' or v is None:
@@ -3601,23 +3765,39 @@ def company_settings_update(request: Request, body: CompanySettingsBody):
     discount_percent   = float(body.discount_percent)   if body.discount_percent   is not None and 0 < body.discount_percent <= 100 else None
     welcome_hint = (body.welcome_products_hint or "").strip() or None
 
+    # Module toggles — only update if explicitly sent
+    cl_enabled = body.construccion_ligera_enabled
+    rj_enabled = body.rejacero_enabled
+
     conn = None
     cur = None
     try:
         conn = get_conn()
         cur = conn.cursor()
+
+        # Build dynamic SET clause for module toggles
+        _extra_sets = ""
+        _extra_vals = []
+        if cl_enabled is not None:
+            _extra_sets += ", construccion_ligera_enabled=%s"
+            _extra_vals.append(cl_enabled)
+        if rj_enabled is not None:
+            _extra_sets += ", rejacero_enabled=%s"
+            _extra_vals.append(rj_enabled)
+
         cur.execute(
-            """
+            f"""
             UPDATE companies
             SET hours_text=%s, address_text=%s, google_maps_url=%s, mercadopago_url=%s,
                 bank_name=%s, bank_account_name=%s, bank_clabe=%s, bank_account_number=%s,
                 owner_phone=%s, email=%s, rfc=%s, brand_color=%s,
-                discount_threshold=%s, discount_percent=%s, welcome_products_hint=%s, updated_at=now()
+                discount_threshold=%s, discount_percent=%s, welcome_products_hint=%s{_extra_sets}, updated_at=now()
             WHERE id=%s
             RETURNING id
             """,
             (hours, addr, maps, mp_url, bank_name, bank_acc_name, bank_clabe, bank_acc_num,
-             owner_phone, email, rfc, brand_color, discount_threshold, discount_percent, welcome_hint, company_id),
+             owner_phone, email, rfc, brand_color, discount_threshold, discount_percent, welcome_hint,
+             *_extra_vals, company_id),
         )
         row = cur.fetchone()
         if not row:
@@ -5599,6 +5779,8 @@ def _run_onboarding_migrations(conn):
             ("ciudad", "TEXT"),
             ("descripcion", "TEXT"),
             ("onboarding_completed", "BOOLEAN DEFAULT FALSE"),
+            ("construccion_ligera_enabled", "BOOLEAN DEFAULT FALSE"),
+            ("rejacero_enabled", "BOOLEAN DEFAULT FALSE"),
         ]:
             cur.execute(f"""
                 DO $$
