@@ -4063,34 +4063,65 @@ class CompanySettingsBody(BaseModel):
 @app.post("/api/company/settings")
 def company_settings_update(request: Request, body: CompanySettingsBody):
     company_id = require_company_id(request)
-    hours = (body.hours_text or "").strip() or None
-    addr  = (body.address_text or "").strip() or None
-    maps  = (body.google_maps_url or "").strip() or None
-    mp_url = (body.mercadopago_url or "").strip() or None
-    bank_name = (body.bank_name or "").strip() or None
-    bank_acc_name = (body.bank_account_name or "").strip() or None
-    bank_clabe = (body.bank_clabe or "").strip().replace(" ", "") or None
-    bank_acc_num = (body.bank_account_number or "").strip().replace(" ", "") or None
-    owner_phone = (body.owner_phone or "").strip().replace(" ", "") or None
 
-    if bank_clabe and (not bank_clabe.isdigit() or len(bank_clabe) != 18):
-        raise HTTPException(status_code=400, detail="CLABE inválida (debe ser 18 dígitos)")
+    # Build fully dynamic SET clause — only update fields that were actually sent
+    # This prevents module toggle requests from wiping unrelated settings to NULL
+    _sets = []
+    _vals = []
 
-    email       = (body.email or "").strip() or None
-    rfc         = (body.rfc or "").strip().upper() or None
-    brand_color = (body.brand_color or "").strip() or None
-    discount_threshold = float(body.discount_threshold) if body.discount_threshold is not None and body.discount_threshold > 0 else None
-    discount_percent   = float(body.discount_percent)   if body.discount_percent   is not None and 0 < body.discount_percent <= 100 else None
-    welcome_hint = (body.welcome_products_hint or "").strip() or None
+    # Helper: add field to SET clause only if it was explicitly provided
+    def _add_str(field_val, col_name, strip_spaces=False, upper_case=False):
+        if field_val is not None:
+            v = field_val.strip()
+            if strip_spaces:
+                v = v.replace(" ", "")
+            if upper_case:
+                v = v.upper()
+            _sets.append(f"{col_name}=%s")
+            _vals.append(v or None)
 
-    # Company name (commercial name used in bot greeting)
-    company_name = (body.company_name or "").strip() or None
+    def _add_bool(field_val, col_name):
+        if field_val is not None:
+            _sets.append(f"{col_name}=%s")
+            _vals.append(field_val)
 
-    # Module toggles — only update if explicitly sent
-    cl_enabled = body.construccion_ligera_enabled
-    rj_enabled = body.rejacero_enabled
-    pint_enabled = body.pintura_enabled
-    imper_enabled = body.impermeabilizante_enabled
+    _add_str(body.hours_text, "hours_text")
+    _add_str(body.address_text, "address_text")
+    _add_str(body.google_maps_url, "google_maps_url")
+    _add_str(body.mercadopago_url, "mercadopago_url")
+    _add_str(body.bank_name, "bank_name")
+    _add_str(body.bank_account_name, "bank_account_name")
+    _add_str(body.bank_clabe, "bank_clabe", strip_spaces=True)
+    _add_str(body.bank_account_number, "bank_account_number", strip_spaces=True)
+    _add_str(body.owner_phone, "owner_phone", strip_spaces=True)
+    _add_str(body.email, "email")
+    _add_str(body.rfc, "rfc", upper_case=True)
+    _add_str(body.brand_color, "brand_color")
+    _add_str(body.welcome_products_hint, "welcome_products_hint")
+    _add_str(body.company_name, "name")
+
+    # Numeric fields
+    if body.discount_threshold is not None:
+        _sets.append("discount_threshold=%s")
+        _vals.append(float(body.discount_threshold) if body.discount_threshold > 0 else None)
+    if body.discount_percent is not None:
+        _sets.append("discount_percent=%s")
+        _vals.append(float(body.discount_percent) if 0 < body.discount_percent <= 100 else None)
+
+    # Module toggles
+    _add_bool(body.construccion_ligera_enabled, "construccion_ligera_enabled")
+    _add_bool(body.rejacero_enabled, "rejacero_enabled")
+    _add_bool(body.pintura_enabled, "pintura_enabled")
+    _add_bool(body.impermeabilizante_enabled, "impermeabilizante_enabled")
+
+    if not _sets:
+        return {"ok": True}
+
+    # CLABE validation
+    if body.bank_clabe is not None:
+        clabe_clean = body.bank_clabe.strip().replace(" ", "")
+        if clabe_clean and (not clabe_clean.isdigit() or len(clabe_clean) != 18):
+            raise HTTPException(status_code=400, detail="CLABE inválida (debe ser 18 dígitos)")
 
     conn = None
     cur = None
@@ -4110,38 +4141,12 @@ def company_settings_update(request: Request, body: CompanySettingsBody):
             """)
         conn.commit()
 
-        # Build dynamic SET clause for optional fields
-        _extra_sets = ""
-        _extra_vals = []
-        if company_name is not None:
-            _extra_sets += ", name=%s"
-            _extra_vals.append(company_name)
-        if cl_enabled is not None:
-            _extra_sets += ", construccion_ligera_enabled=%s"
-            _extra_vals.append(cl_enabled)
-        if rj_enabled is not None:
-            _extra_sets += ", rejacero_enabled=%s"
-            _extra_vals.append(rj_enabled)
-        if pint_enabled is not None:
-            _extra_sets += ", pintura_enabled=%s"
-            _extra_vals.append(pint_enabled)
-        if imper_enabled is not None:
-            _extra_sets += ", impermeabilizante_enabled=%s"
-            _extra_vals.append(imper_enabled)
-
+        _sets.append("updated_at=now()")
+        _vals.append(company_id)
+        set_clause = ", ".join(_sets)
         cur.execute(
-            f"""
-            UPDATE companies
-            SET hours_text=%s, address_text=%s, google_maps_url=%s, mercadopago_url=%s,
-                bank_name=%s, bank_account_name=%s, bank_clabe=%s, bank_account_number=%s,
-                owner_phone=%s, email=%s, rfc=%s, brand_color=%s,
-                discount_threshold=%s, discount_percent=%s, welcome_products_hint=%s{_extra_sets}, updated_at=now()
-            WHERE id=%s
-            RETURNING id
-            """,
-            (hours, addr, maps, mp_url, bank_name, bank_acc_name, bank_clabe, bank_acc_num,
-             owner_phone, email, rfc, brand_color, discount_threshold, discount_percent, welcome_hint,
-             *_extra_vals, company_id),
+            f"UPDATE companies SET {set_clause} WHERE id=%s RETURNING id",
+            tuple(_vals),
         )
         row = cur.fetchone()
         if not row:
@@ -4491,11 +4496,17 @@ def company_me(request: Request):
     try:
         conn = get_conn()
         cur = conn.cursor()
-        cur.execute("SELECT id::text, name, slug, twilio_phone, plan_code FROM companies WHERE id=%s LIMIT 1", (company_id,))
+        cur.execute("SELECT id::text, name, slug, twilio_phone, plan_code, construccion_ligera_enabled, rejacero_enabled, pintura_enabled, impermeabilizante_enabled FROM companies WHERE id=%s LIMIT 1", (company_id,))
         row = cur.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Company no encontrada")
-        return {"ok": True, "company": {"id": row[0], "name": row[1], "slug": row[2], "twilio_phone": row[3], "plan_code": row[4]}}
+        return {"ok": True, "company": {
+            "id": row[0], "name": row[1], "slug": row[2], "twilio_phone": row[3], "plan_code": row[4],
+            "construccion_ligera_enabled": bool(row[5]) if row[5] is not None else False,
+            "rejacero_enabled": bool(row[6]) if row[6] is not None else False,
+            "pintura_enabled": bool(row[7]) if row[7] is not None else False,
+            "impermeabilizante_enabled": bool(row[8]) if row[8] is not None else False,
+        }}
     finally:
         if cur: cur.close()
         if conn: conn.close()
