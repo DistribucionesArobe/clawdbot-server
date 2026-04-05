@@ -3730,6 +3730,7 @@ class CompanySettingsBody(BaseModel):
     brand_color: Optional[str] = None
     discount_threshold: Optional[float] = None
     discount_percent: Optional[float] = None
+    company_name: Optional[str] = None
     construccion_ligera_enabled: Optional[bool] = None
     rejacero_enabled: Optional[bool] = None
     @validator('discount_threshold', 'discount_percent', pre=True)
@@ -3765,6 +3766,9 @@ def company_settings_update(request: Request, body: CompanySettingsBody):
     discount_percent   = float(body.discount_percent)   if body.discount_percent   is not None and 0 < body.discount_percent <= 100 else None
     welcome_hint = (body.welcome_products_hint or "").strip() or None
 
+    # Company name (commercial name used in bot greeting)
+    company_name = (body.company_name or "").strip() or None
+
     # Module toggles — only update if explicitly sent
     cl_enabled = body.construccion_ligera_enabled
     rj_enabled = body.rejacero_enabled
@@ -3787,9 +3791,12 @@ def company_settings_update(request: Request, body: CompanySettingsBody):
             """)
         conn.commit()
 
-        # Build dynamic SET clause for module toggles
+        # Build dynamic SET clause for optional fields
         _extra_sets = ""
         _extra_vals = []
+        if company_name is not None:
+            _extra_sets += ", name=%s"
+            _extra_vals.append(company_name)
         if cl_enabled is not None:
             _extra_sets += ", construccion_ligera_enabled=%s"
             _extra_vals.append(cl_enabled)
