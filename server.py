@@ -2167,6 +2167,13 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                         "description": full_name[:72],
                     })
 
+                # Add "Ninguno" skip option
+                section_rows.append({
+                    "id": "pick_A0",
+                    "title": "❌ Ninguno",
+                    "description": "No es ninguno, saltar este producto",
+                })
+
                 # Build contextual header
                 resumen_lines = []
                 if cart_count > 0:
@@ -2738,6 +2745,11 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
     _bare_num = re.match(r"^\s*(\d)\s*$", user_text.strip())
     if _bare_num and not _quick_picks:
         _quick_picks = [("A", int(_bare_num.group(1)))]
+    # Handle "ninguno"/"no"/"no está" as pick_A0 (skip) when there are pending options
+    _skip_words = {"no", "ninguno", "ninguna", "no esta", "no está", "no lo tienen",
+                   "no lo tengo", "no es", "saltar", "skip", "no aplica", "no hay"}
+    if tnorm in _skip_words and not _quick_picks:
+        _quick_picks = [("A", 0)]
 
     _state_picks = get_quote_state(company_id, wa_from) if wa_from else {}
     _state_picks = _state_picks or {}
@@ -2756,7 +2768,11 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         if pick_opt is not None and pend:
             first = pend[0]
             cands = first.get("candidates") or []
-            if cands and 1 <= pick_opt <= len(cands):
+            if pick_opt == 0:
+                # "Ninguno" — skip this product, mark as not-found
+                first.pop("candidates", None)  # remove candidates so it shows as ❌
+                pend = pend[1:]  # Remove from pending
+            elif cands and 1 <= pick_opt <= len(cands):
                 chosen = cands[pick_opt - 1]
                 qty = int(first.get("qty") or 0)
                 _pick_bundle = first.get("is_bundle", False)
