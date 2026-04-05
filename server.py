@@ -3775,6 +3775,18 @@ def company_settings_update(request: Request, body: CompanySettingsBody):
         conn = get_conn()
         cur = conn.cursor()
 
+        # Ensure module columns exist (idempotent migration)
+        for _mcol in ("construccion_ligera_enabled", "rejacero_enabled"):
+            cur.execute(f"""
+                DO $$ BEGIN
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                                   WHERE table_name='companies' AND column_name='{_mcol}')
+                    THEN ALTER TABLE companies ADD COLUMN {_mcol} BOOLEAN DEFAULT FALSE;
+                    END IF;
+                END $$;
+            """)
+        conn.commit()
+
         # Build dynamic SET clause for module toggles
         _extra_sets = ""
         _extra_vals = []
