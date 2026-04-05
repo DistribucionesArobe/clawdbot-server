@@ -2232,15 +2232,12 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             }
     
 
-        msg += (
-            "\n\n¿Agregamos algo más?\n"
-            "🧭 Comandos:\n"
-            "• 'quitar [producto]' → ej: quitar cemento\n"
-            "• 'cambiar [cantidad] [producto]' → ej: cambiar 10 varilla\n"
-            "• 'nueva cotizacion' → empezar de cero\n"
-            "• 'salir' → cancelar"
-        )
-        return msg
+        return {
+            "type": "text_then_buttons",
+            "text": msg if msg else "No encontré ninguno de los productos. Intenta con otros nombres.",
+            "body": "¿Qué deseas hacer?",
+            "buttons": ["➕ Agregar más", "🔄 Nueva cotización", "🚪 Salir"],
+        }
     
 
     tnorm = norm_name(user_text).replace("cotización", "cotizacion")
@@ -2289,9 +2286,32 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         if wa_from:
             upsert_quote_state(company_id, wa_from, _edit_state)
 
-    # Si estamos esperando que el usuario escriba qué quitar, tratar su mensaje como remoción
+    # Si estamos esperando que el usuario seleccione qué quitar
     if _edit_state.get("awaiting_removal"):
         _edit_state.pop("awaiting_removal", None)
+        # Handle interactive list selection (remove_0, remove_1, etc.)
+        _rm_match = re.match(r"^remove_(\d+)$", tnorm.strip())
+        if _rm_match:
+            _rm_idx = int(_rm_match.group(1))
+            if 0 <= _rm_idx < len(_cart):
+                _removed = _cart.pop(_rm_idx)
+                _edit_state["cart"] = _cart
+                if wa_from:
+                    upsert_quote_state(company_id, wa_from, _edit_state)
+                if not _cart:
+                    return {
+                        "type": "text_then_buttons",
+                        "text": f"✅ Eliminé *{_removed['name']}*. Tu carrito quedó vacío.",
+                        "body": "¿Qué deseas hacer?",
+                        "buttons": ["🔨 Cotizar materiales", "🚪 Salir"],
+                    }
+                _quote = cart_render_quote(_edit_state, company_id=company_id, client_phone=wa_from)
+                return {
+                    "type": "text_then_buttons",
+                    "text": _quote + f"\n\n✅ Quité *{_removed['name']}*",
+                    "body": "¿Qué deseas hacer?",
+                    "buttons": ["💳 Pagar", "➕ Agregar más", "🗑️ Quitar producto"],
+                }
         if wa_from:
             upsert_quote_state(company_id, wa_from, _edit_state)
         # Si no escribió "quitar X", agregamos el prefijo para que lo procese la regex
@@ -2428,6 +2448,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         "nueva cotizacion", "nuevo", "empezar de nuevo",
         "borrar", "borrar carrito", "vaciar carrito",
         "limpiar", "limpiar carrito",
+        "🚪 salir", "🔄 nueva cotizacion", "🔄 nueva cotización",
     }
     if any(rt == tnorm or rt in tnorm for rt in reset_triggers):
         if wa_from:
@@ -2451,15 +2472,12 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
 
     thanks_triggers = {"gracias", "muchas gracias", "mil gracias", "thx", "thanks"}
     if tnorm in thanks_triggers:
-        return (
-            "¡Con gusto! 🙌\n"
-            "Si quieres otra cotización, mándame: 10 cemento, 5 varilla 3/8\n\n"
-            "🧭 Comandos:\n"
-            "• 'quitar [producto]' → ej: quitar cemento\n"
-            "• 'cambiar [cantidad] [producto]' → ej: cambiar 10 varilla\n"
-            "• 'nueva cotizacion' → empezar de cero\n"
-            "• 'salir' → cancelar"
-        )
+        return {
+            "type": "text_then_buttons",
+            "text": "¡Con gusto! 🙌",
+            "body": "¿Necesitas algo más?",
+            "buttons": ["🔨 Cotizar materiales", "🕐 Horarios y ubicación", "👤 Hablar con alguien"],
+        }
 
     if tnorm in {"🗑️ quitar producto", "quitar producto"}:
         _cart_q = (_edit_state.get("cart") or [])
@@ -2468,8 +2486,22 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         _edit_state["awaiting_removal"] = True
         if wa_from:
             upsert_quote_state(company_id, wa_from, _edit_state)
-        lines = "\n".join(f"• {it['name']}" for it in _cart_q)
-        return f"¿Cuál producto quieres quitar?\n\n{lines}\n\nEscribe el nombre del producto:"
+        # Show as interactive list so user doesn't have to type
+        _removal_rows = []
+        for _ri, _item in enumerate(_cart_q[:10]):
+            _rname = (_item.get("name") or "Producto")
+            _rqty = int(_item.get("qty") or 0)
+            _removal_rows.append({
+                "id": f"remove_{_ri}",
+                "title": _rname[:24],
+                "description": f"{_rqty}x — click para quitar"[:72],
+            })
+        return {
+            "type": "list",
+            "body": "¿Cuál producto quieres quitar?",
+            "sections": [{"title": "Tu carrito", "rows": _removal_rows}],
+            "button_label": "Ver productos",
+        }
     escalation_triggers = {
         "asesor", "asesor humano", "humano", "persona", "agente",
         "hablar con alguien", "hablar con una persona", "quiero hablar",
@@ -2552,8 +2584,8 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             "o esperar a que te contacten."
         )
 
-    # Opción "Cotizar materiales" del menú principal
-    if tnorm in {"cotizar materiales", "🔨 cotizar materiales"}:
+    # Opción "Cotizar materiales" / "Agregar más" del menú principal
+    if tnorm in {"cotizar materiales", "🔨 cotizar materiales", "agregar mas", "➕ agregar mas", "➕ agregar más"}:
         try:
             conn_wh = get_conn()
             cur_wh = conn_wh.cursor()
@@ -2766,12 +2798,13 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 break
 
         if pick_opt is not None and pend:
-            first = pend[0]
+            # Find the first pending item WITH candidates (matches what _build_reply shows)
+            first_idx = next((i for i, p in enumerate(pend) if p.get("candidates")), 0)
+            first = pend[first_idx]
             cands = first.get("candidates") or []
             if pick_opt == 0:
-                # "Ninguno" — skip this product, mark as not-found
-                first.pop("candidates", None)  # remove candidates so it shows as ❌
-                pend = pend[1:]  # Remove from pending
+                # "Ninguno" — skip this product, remove from pending
+                pend.pop(first_idx)
             elif cands and 1 <= pick_opt <= len(cands):
                 chosen = cands[pick_opt - 1]
                 qty = int(first.get("qty") or 0)
@@ -2785,7 +2818,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                     "vat_rate": chosen.get("vat_rate"),
                     "qty": qty,
                 })
-                pend = pend[1:]  # Remove the resolved item
+                pend.pop(first_idx)  # Remove the resolved item
             # else: invalid option number, keep it pending
 
         if pend:
@@ -2975,14 +3008,12 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             for it in items[:8]:
                 unit = f" / {it['unit']}" if it.get("unit") else ""
                 lines.append(f"- {it['name']}: ${float(it['price']):,.2f}{unit}")
-            return (
-                "Encontré estos precios:\n"
-                + "\n".join(lines)
-                + "\n\nDime cantidades para cotizar (ej: 10 cemento, 5 varilla 3/8).\n\n"
-                "🧭 Comandos:\n"
-                "• 'nueva cotizacion' → empezar de cero\n"
-                "• 'salir' → cancelar"
-            )
+            return {
+                "type": "text_then_buttons",
+                "text": "Encontré estos precios:\n" + "\n".join(lines),
+                "body": "¿Quieres cotizar alguno?",
+                "buttons": ["🔨 Cotizar materiales", "➕ Agregar más", "🚪 Salir"],
+            }
 
     state = get_quote_state(company_id, wa_from) if wa_from else None
     if state and state.get("pending"):
