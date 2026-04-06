@@ -1982,6 +1982,20 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         if _bot_state.get("bot_active") is False:
             return ""
 
+    # Flush stale message buffer (>15s old) — prepend to current message
+    if wa_from:
+        import time as _tflush
+        _flush_state = get_quote_state(company_id, wa_from) or {}
+        _flush_buf = _flush_state.get("_msg_buffer")
+        if _flush_buf:
+            _flush_age = _tflush.time() - (_flush_buf.get("ts") or 0)
+            if _flush_age > 15:
+                _old = _flush_buf.get("texts") or []
+                if _old:
+                    user_text = " ".join(_old) + " " + user_text
+                _flush_state.pop("_msg_buffer", None)
+                upsert_quote_state(company_id, wa_from, _flush_state)
+
     if is_interactive:
         user_text = (user_text or "").strip()
     else:
@@ -3335,6 +3349,71 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         else:
             hint_txt = "\n\nEj:\n10 cemento\n5 varilla 3/8\n20 block 15x20"
         return f"¡Claro! Mándame el nombre del material y la cantidad:{hint_txt}\n\nO todo en una línea separado por comas."
+
+    # ── Message accumulator for rapid-fire short messages ─────────────────────
+    # People sometimes type in fragments: "me puedes" / "pasar" / "precio" / "de material"
+    # We buffer short messages (no numbers, ≤4 words) and concatenate within 8s window
+    import time as _time
+    _msg_words = user_text.strip().split()
+    _has_digits = bool(re.search(r"\d", user_text))
+    _is_short_fragment = len(_msg_words) <= 4 and not _has_digits and len(user_text.strip()) < 30
+
+    if _is_short_fragment and wa_from:
+        _buf_state = get_quote_state(company_id, wa_from) or {}
+        _buf = _buf_state.get("_msg_buffer") or {}
+        _buf_ts = _buf.get("ts") or 0
+        _buf_texts = _buf.get("texts") or []
+        _now = _time.time()
+
+        if _buf_texts and (_now - _buf_ts) < 8:
+            # Append to existing buffer
+            _buf_texts.append(user_text.strip())
+            _combined = " ".join(_buf_texts)
+            # Check if combined text matches a conversational intent
+            _combined_norm = re.sub(r"[¿?¡!.,]", "", norm_name(_combined)).strip()
+            _is_intent = any(re.search(p, _combined_norm) for p in _intent_patterns)
+            if _is_intent:
+                # Clear buffer and redirect to cotizar
+                _buf_state.pop("_msg_buffer", None)
+                upsert_quote_state(company_id, wa_from, _buf_state)
+                try:
+                    conn_wh = get_conn()
+                    cur_wh = conn_wh.cursor()
+                    cur_wh.execute("SELECT welcome_products_hint FROM companies WHERE id=%s", (company_id,))
+                    row_wh = cur_wh.fetchone()
+                    cur_wh.close()
+                    conn_wh.close()
+                    hint = (row_wh[0] or "").strip() if row_wh else ""
+                except Exception:
+                    hint = ""
+                if hint:
+                    ejemplos = "\n".join(f"10 {p.strip()}" for p in hint.split(",") if p.strip())
+                    hint_txt = f"\n\nEj:\n{ejemplos}"
+                else:
+                    hint_txt = "\n\nEj:\n10 cemento\n5 varilla 3/8\n20 block 15x20"
+                return f"¡Claro! Mándame el nombre del material y la cantidad:{hint_txt}"
+            else:
+                # Keep buffering — don't respond yet
+                _buf_state["_msg_buffer"] = {"ts": _buf_ts, "texts": _buf_texts}
+                upsert_quote_state(company_id, wa_from, _buf_state)
+                return None  # Signal to webhook: don't send any reply
+        else:
+            # Start new buffer
+            _buf_state["_msg_buffer"] = {"ts": _now, "texts": [user_text.strip()]}
+            upsert_quote_state(company_id, wa_from, _buf_state)
+            return None  # Signal to webhook: don't send any reply
+
+    # Clear any stale buffer since we got a real message (with numbers or long enough)
+    if wa_from:
+        _buf_state2 = get_quote_state(company_id, wa_from) or {}
+        if _buf_state2.get("_msg_buffer"):
+            # There was a buffer — prepend buffered text to current message
+            _old_texts = _buf_state2["_msg_buffer"].get("texts") or []
+            if _old_texts:
+                user_text = " ".join(_old_texts) + " " + user_text
+                tnorm = norm_name(user_text)
+            _buf_state2.pop("_msg_buffer", None)
+            upsert_quote_state(company_id, wa_from, _buf_state2)
 
     # Para mensajes largos o con lenguaje natural, usar NER directo
     _words = user_text.split()
