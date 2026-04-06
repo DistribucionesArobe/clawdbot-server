@@ -5854,6 +5854,9 @@ def ner_extract_items(user_text: str):
 
 def extract_qty_items_robust(text: str):
     t = (text or "").strip()
+    # Strip invisible unicode chars (word joiners, zero-width spaces, etc.)
+    # WhatsApp bullet lists inject \u2060 (word joiner) and \u200b (zero-width space)
+    t = re.sub(r"[\u2060\u200b\u200c\u200d\ufeff\u00a0]", " ", t)
     t = re.sub(r"[•;]", "\n", t)
     t = re.sub(r"^\s*(ocupo|necesito|quiero|quisiera|dame|deme|manda|mandame|mandeme|pasame|pásame|paseme|necesitamos|queremos|ocupamos|me puede dar|me pueden dar|me das|me mandas|favor de|necesito cotizar|quiero cotizar)\s+", "", t, flags=re.IGNORECASE)
     t = re.sub(r"^\s*(me\s+)?(puede[ns]?|podría[ns]?|podrías)\s+(cotizar|dar|mandar|pasar)\s+", "", t, flags=re.IGNORECASE)
@@ -5889,7 +5892,11 @@ def extract_qty_items_robust(text: str):
                 parts.append(rp)
         last_qty = 1  # default qty for items without explicit quantity
         for part in parts:
-            sub_parts = re.split(r'(?<=\S)\s+(?=\d+\s)', part.strip())
+            # Split "5 cemento 3 varilla" into ["5 cemento", "3 varilla"]
+            # but NOT "postes 635 calibre 26" (635 is a product spec, not qty)
+            # Only split when digit is followed by a letter-word (product name)
+            _spec_words = r"(?:cal(?:ibre)?|x|mm|cm|m|mts?|kg|pulgadas?|pulg|metros?|litros?|lts?|gal)"
+            sub_parts = re.split(rf'(?<=\S)\s+(?=\d+\s+(?!{_spec_words}\b)[a-záéíóúñ])', part.strip())
             for sub in sub_parts:
                 # Restaurar specs protegidas: SPEC_2_metros → "2 metros"
                 sub = re.sub(r"SPEC_(\d+(?:\.\d+)?)_(\w+)", r"\1 \2", sub)
