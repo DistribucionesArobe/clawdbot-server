@@ -4185,6 +4185,25 @@ def company_settings_get(request: Request):
     try:
         conn = get_conn()
         cur = conn.cursor()
+
+        # Ensure new columns exist before querying them
+        for _mcol, _mtype in [
+            ("construccion_ligera_enabled", "BOOLEAN DEFAULT FALSE"),
+            ("rejacero_enabled", "BOOLEAN DEFAULT FALSE"),
+            ("pintura_enabled", "BOOLEAN DEFAULT FALSE"),
+            ("impermeabilizante_enabled", "BOOLEAN DEFAULT FALSE"),
+            ("welcome_message", "TEXT"),
+        ]:
+            cur.execute(f"""
+                DO $$ BEGIN
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                                   WHERE table_name='companies' AND column_name='{_mcol}')
+                    THEN ALTER TABLE companies ADD COLUMN {_mcol} {_mtype};
+                    END IF;
+                END $$;
+            """)
+        conn.commit()
+
         cur.execute(
             """
             SELECT hours_text, address_text, google_maps_url,
@@ -4517,6 +4536,23 @@ def company_me(request: Request):
     try:
         conn = get_conn()
         cur = conn.cursor()
+        # Ensure module columns exist
+        for _mcol, _mtype in [
+            ("construccion_ligera_enabled", "BOOLEAN DEFAULT FALSE"),
+            ("rejacero_enabled", "BOOLEAN DEFAULT FALSE"),
+            ("pintura_enabled", "BOOLEAN DEFAULT FALSE"),
+            ("impermeabilizante_enabled", "BOOLEAN DEFAULT FALSE"),
+            ("welcome_message", "TEXT"),
+        ]:
+            cur.execute(f"""
+                DO $$ BEGIN
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                                   WHERE table_name='companies' AND column_name='{_mcol}')
+                    THEN ALTER TABLE companies ADD COLUMN {_mcol} {_mtype};
+                    END IF;
+                END $$;
+            """)
+        conn.commit()
         cur.execute("SELECT id::text, name, slug, twilio_phone, plan_code, construccion_ligera_enabled, rejacero_enabled, pintura_enabled, impermeabilizante_enabled FROM companies WHERE id=%s LIMIT 1", (company_id,))
         row = cur.fetchone()
         if not row:
