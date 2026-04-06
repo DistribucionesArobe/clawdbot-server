@@ -3066,10 +3066,11 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 litros_total = math.ceil(m2 / rendimiento_litro)
                 cubetas, galones, litros = _desglose_litros(litros_total)
 
-                # Brocha/rodillo suggestion proportional to area
+                # Brocha/rodillo suggestion: mix of 4" and 2"
                 import math as _mp
                 _rodillos = max(1, _mp.ceil(m2 / 40))
-                _brochas = max(1, _mp.ceil(m2 / 80))
+                _brochas_4 = max(1, _mp.ceil(m2 / 120))
+                _brochas_2 = max(1, _mp.ceil(m2 / 120))
 
                 resultado = (
                     f"🎨 *Cálculo de pintura {tipo}*\n"
@@ -3078,19 +3079,23 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                     f"📊 Rendimiento: *{rendimiento_litro:.1f} m²/litro*\n\n"
                     f"🪣 Total: *{litros_total} litros*\n"
                     f"📦 Presentación: {_desglose_texto(cubetas, galones, litros)}\n"
-                    f"🖌️ Sugerido: *{_rodillos} rodillo{'s' if _rodillos > 1 else ''}* + *{_brochas} brocha{'s' if _brochas > 1 else ''}*\n"
+                    f"🖌️ Sugerido: *{_rodillos} rodillo{'s' if _rodillos > 1 else ''}*, *{_brochas_4} brocha{'s' if _brochas_4 > 1 else ''} 4\"*, *{_brochas_2} brocha{'s' if _brochas_2 > 1 else ''} 2\"*\n"
                     f"━━━━━━━━━━━━━━━━━━━"
                 )
 
+                # Use specific search terms: "pintura vinilica cubeta" not "cubeta pintura vinílica"
+                _tipo_search = "vinilica" if tipo == "Vinílica" else "esmalte"
                 _mat_lines = []
                 if cubetas > 0:
-                    _mat_lines.append(f"{cubetas} cubeta pintura {tipo.lower()}")
+                    _mat_lines.append(f"{cubetas} pintura {_tipo_search} cubeta")
                 if galones > 0:
-                    _mat_lines.append(f"{galones} galon pintura {tipo.lower()}")
+                    _mat_lines.append(f"{galones} pintura {_tipo_search} galon")
                 if litros > 0:
-                    _mat_lines.append(f"{litros} litro pintura {tipo.lower()}")
-                _mat_lines.append(f"{_rodillos} rodillo para pintura")
-                _mat_lines.append(f"{_brochas} brocha para pintura")
+                    _mat_lines.append(f"{litros} pintura {_tipo_search} litro")
+                # Brochas and rodillos — search with specific sizes
+                _mat_lines.append(f"{_rodillos} rodillo")
+                _mat_lines.append(f"{_brochas_4} brocha 4")
+                _mat_lines.append(f"{_brochas_2} brocha 2")
 
                 # Auto-cotizar: search and add to cart directly
                 state = _pt_state
@@ -3195,24 +3200,26 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                     rollos_malla = _m.ceil(m2 / 100)  # 1 rollo ≈ 100 m2
                     resultado += f"🔗 Malla de refuerzo: *{rollos_malla} rollo{'s' if rollos_malla > 1 else ''}*\n"
 
-                # Brocha/rodillo suggestion proportional to area
+                # Brocha/rodillo suggestion: mix of 4" and 2"
                 import math as _mi
                 _rodillos_im = max(1, _mi.ceil(m2 / 40))
-                _brochas_im = max(1, _mi.ceil(m2 / 80))
-                resultado += f"🖌️ Sugerido: *{_rodillos_im} rodillo{'s' if _rodillos_im > 1 else ''}* + *{_brochas_im} brocha{'s' if _brochas_im > 1 else ''}*\n"
+                _brochas_4_im = max(1, _mi.ceil(m2 / 120))
+                _brochas_2_im = max(1, _mi.ceil(m2 / 120))
+                resultado += f"🖌️ Sugerido: *{_rodillos_im} rodillo{'s' if _rodillos_im > 1 else ''}*, *{_brochas_4_im} brocha{'s' if _brochas_4_im > 1 else ''} 4\"*, *{_brochas_2_im} brocha{'s' if _brochas_2_im > 1 else ''} 2\"*\n"
                 resultado += "━━━━━━━━━━━━━━━━━━━"
 
                 _mat_lines = []
                 if cubetas > 0:
-                    _mat_lines.append(f"{cubetas} cubeta impermeabilizante")
+                    _mat_lines.append(f"{cubetas} impermeabilizante cubeta")
                 if galones > 0:
-                    _mat_lines.append(f"{galones} galon impermeabilizante")
+                    _mat_lines.append(f"{galones} impermeabilizante galon")
                 if litros > 0:
-                    _mat_lines.append(f"{litros} litro impermeabilizante")
+                    _mat_lines.append(f"{litros} impermeabilizante litro")
                 if es_primera:
-                    _mat_lines.append(f"{rollos_malla} rollo malla impermeabilizante")
-                _mat_lines.append(f"{_rodillos_im} rodillo para impermeabilizante")
-                _mat_lines.append(f"{_brochas_im} brocha para impermeabilizante")
+                    _mat_lines.append(f"{rollos_malla} malla impermeabilizante rollo")
+                _mat_lines.append(f"{_rodillos_im} rodillo")
+                _mat_lines.append(f"{_brochas_4_im} brocha 4")
+                _mat_lines.append(f"{_brochas_2_im} brocha 2")
 
                 # Auto-cotizar: search and add to cart directly
                 state = _im_state
