@@ -2460,7 +2460,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         try:
             conn_co = get_conn()
             cur_co = conn_co.cursor()
-            cur_co.execute("SELECT name, construccion_ligera_enabled, rejacero_enabled, pintura_enabled, impermeabilizante_enabled FROM companies WHERE id=%s LIMIT 1", (company_id,))
+            cur_co.execute("SELECT name, construccion_ligera_enabled, rejacero_enabled, pintura_enabled, impermeabilizante_enabled, welcome_message FROM companies WHERE id=%s LIMIT 1", (company_id,))
             row_co = cur_co.fetchone()
             cur_co.close()
             conn_co.close()
@@ -2469,20 +2469,23 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             _mod_rj = bool(row_co[2]) if row_co else False
             _mod_pt = bool(row_co[3]) if row_co else False
             _mod_im = bool(row_co[4]) if row_co else False
+            _welcome = (row_co[5] or "").strip() if row_co else ""
         except Exception:
             company_name = "tu ferretería"
             _mod_cl = False
             _mod_rj = False
             _mod_pt = False
             _mod_im = False
+            _welcome = ""
         _menu_opts = ["🔨 Cotizar materiales"]
         _any_calc = _mod_cl or _mod_rj or _mod_pt or _mod_im
         if _any_calc:
             _menu_opts.append("📐 Calculadoras")
         _menu_opts.extend(["🕐 Horarios y ubicación", "👤 Hablar con alguien"])
+        _greeting = _welcome if _welcome else f"👋 ¡Hola! Soy el asistente de *{company_name}*\n\n¿En qué te puedo ayudar?"
         return {
             "type": "list",
-            "body": f"👋 ¡Hola! Soy el Cotizabot de *{company_name}*\n\n¿En qué te puedo ayudar?",
+            "body": _greeting,
             "options": _menu_opts,
             "button_label": "Ver opciones",
         }
@@ -2654,7 +2657,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         try:
             conn_co = get_conn()
             cur_co = conn_co.cursor()
-            cur_co.execute("SELECT name, construccion_ligera_enabled, rejacero_enabled, pintura_enabled, impermeabilizante_enabled FROM companies WHERE id=%s LIMIT 1", (company_id,))
+            cur_co.execute("SELECT name, construccion_ligera_enabled, rejacero_enabled, pintura_enabled, impermeabilizante_enabled, welcome_message FROM companies WHERE id=%s LIMIT 1", (company_id,))
             row_co = cur_co.fetchone()
             cur_co.close()
             conn_co.close()
@@ -2663,12 +2666,14 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             _mod_rj2 = bool(row_co[2]) if row_co else False
             _mod_pt2 = bool(row_co[3]) if row_co else False
             _mod_im2 = bool(row_co[4]) if row_co else False
+            _welcome2 = (row_co[5] or "").strip() if row_co else ""
         except Exception:
             company_name = "tu ferretería"
             _mod_cl2 = False
             _mod_rj2 = False
             _mod_pt2 = False
             _mod_im2 = False
+            _welcome2 = ""
 
         if wa_from:
             st = get_quote_state(company_id, wa_from) or {}
@@ -2683,9 +2688,10 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         if _any_calc2:
             _menu_opts2.append("📐 Calculadoras")
         _menu_opts2.extend(["🕐 Horarios y ubicación", "👤 Hablar con alguien"])
+        _greeting2 = _welcome2 if _welcome2 else f"👋 ¡Hola! Soy el asistente de *{company_name}*\n\n¿En qué te puedo ayudar?"
         return {
             "type": "list",
-            "body": f"👋 ¡Hola! Soy el Cotizabot de *{company_name}*\n\n¿En qué te puedo ayudar?",
+            "body": _greeting2,
             "options": _menu_opts2,
             "button_label": "Ver opciones",
         }
@@ -4053,6 +4059,7 @@ class CompanySettingsBody(BaseModel):
     rejacero_enabled: Optional[bool] = None
     pintura_enabled: Optional[bool] = None
     impermeabilizante_enabled: Optional[bool] = None
+    welcome_message: Optional[str] = None
     @validator('discount_threshold', 'discount_percent', pre=True)
     def coerce_empty_to_none(cls, v):
         if v == '' or v is None:
@@ -4102,6 +4109,7 @@ def company_settings_update(request: Request, body: CompanySettingsBody):
     _add_str(body.brand_color, "brand_color")
     _add_str(body.welcome_products_hint, "welcome_products_hint")
     _add_str(body.company_name, "name")
+    _add_str(body.welcome_message, "welcome_message")
 
     # Numeric fields
     if body.discount_threshold is not None:
@@ -4142,6 +4150,15 @@ def company_settings_update(request: Request, body: CompanySettingsBody):
                     END IF;
                 END $$;
             """)
+        # welcome_message column (TEXT)
+        cur.execute("""
+            DO $$ BEGIN
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                               WHERE table_name='companies' AND column_name='welcome_message')
+                THEN ALTER TABLE companies ADD COLUMN welcome_message TEXT;
+                END IF;
+            END $$;
+        """)
         conn.commit()
 
         _sets.append("updated_at=now()")
@@ -4173,7 +4190,7 @@ def company_settings_get(request: Request):
             SELECT hours_text, address_text, google_maps_url,
                    mercadopago_url, bank_name, bank_account_name, bank_clabe, bank_account_number,
                    owner_phone, email, rfc, brand_color, logo_url,
-                   discount_threshold, discount_percent, welcome_products_hint
+                   discount_threshold, discount_percent, welcome_products_hint, welcome_message
             FROM companies WHERE id=%s LIMIT 1
             """,
             (company_id,),
@@ -4191,6 +4208,7 @@ def company_settings_get(request: Request):
                 "discount_threshold": float(row[13]) if row[13] else None,
                 "discount_percent":   float(row[14]) if row[14] else None,
                 "welcome_products_hint": row[15] or None,
+                "welcome_message": row[16] or None,
             },
         }
     finally:
