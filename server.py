@@ -5937,16 +5937,23 @@ def extract_qty_items_robust(text: str):
                             r"\bde\s+(\d+)\s+(?:pzas?|piezas?|pzs?)\s*$",
                             _yp, re.IGNORECASE
                         )
+                    _already_multiplied = False
                     if _pkg_mult:
                         _mult_val = int(_pkg_mult.group(1))
                         if _mult_val > 1:
                             qty = qty * _mult_val
+                            _already_multiplied = True
                             # Remove the multiplier text from product name
                             _yp = _yp[:_pkg_mult.start()] + _yp[_pkg_mult.end():]
                             _yp = _yp.strip()
 
                     # Detect bundle words BEFORE stripping them
-                    _is_bun = bool(re.search(r"\b(atados?|paquetes?|bultos?|cajas?|bolsas?)\b", _yp, re.IGNORECASE))
+                    # If already multiplied by explicit piece count, DON'T flag as bundle
+                    # to avoid double-multiplication with bundle_size
+                    if _already_multiplied:
+                        _is_bun = False
+                    else:
+                        _is_bun = bool(re.search(r"\b(atados?|paquetes?|bultos?|cajas?|bolsas?)\b", _yp, re.IGNORECASE))
                     # Solo quitar unidades de EMPAQUE (no de medida/spec)
                     _packaging_re = r"\b(hojas?|piezas?|rollos?|bultos?|sacos?|atados?|paquetes?|costales?|cubetas?|bolsas?|botes?|latas?|tiras?|cajas?|cientos?|millares?)\b"
                     _yp = re.sub(_packaging_re, "", _yp, flags=re.IGNORECASE).strip()
