@@ -3406,19 +3406,14 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             _buf_state2.pop("_msg_buffer", None)
             upsert_quote_state(company_id, wa_from, _buf_state2)
 
-    # Para mensajes largos o con lenguaje natural, usar NER directo
-    _words = user_text.split()
-    _looks_long = len(_words) > 12 or "\n" in user_text
-    
-    if _looks_long:
+    # Always try deterministic parser first, fall back to NER for natural language
+    multi = extract_qty_items_robust(user_text)
+    _parser_used = "robust"
+    if not multi:
         multi = ner_extract_items(user_text)
-        if not multi:
-            multi = extract_qty_items_robust(user_text)
-    else:
-        multi = extract_qty_items_robust(user_text)
-        if not multi:
-            multi = ner_extract_items(user_text)
+        _parser_used = "ner"
     if multi:
+        print(f"MULTI ITEMS ({_parser_used}): {[(q, p) for q, p, *_ in multi]}")
         conn = get_conn()
         try:
             state = get_quote_state(company_id, wa_from) if wa_from else None
