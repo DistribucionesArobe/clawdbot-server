@@ -2495,7 +2495,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         _menu_opts = ["🔨 Cotizar materiales"]
         _any_calc = _mod_cl or _mod_rj or _mod_pt or _mod_im
         if _any_calc:
-            _menu_opts.append("📐 Calculadoras")
+            _menu_opts.append("📐 Cotizar cálculo")
         _menu_opts.extend(["🕐 Horarios y ubicación", "👤 Hablar con alguien"])
         _greeting = _welcome if _welcome else f"👋 ¡Hola! Soy el asistente de *{company_name}*\n\n¿En qué te puedo ayudar?"
         return {
@@ -2619,8 +2619,8 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             "o esperar a que te contacten."
         )
 
-    # Opción "Calculadoras" — submenú dinámico según módulos habilitados
-    if tnorm in {"calculadoras", "📐 calculadoras", "calculadora"}:
+    # Opción "Cotizar cálculo" — submenú dinámico según módulos habilitados
+    if tnorm in {"calculadoras", "📐 calculadoras", "calculadora", "cotizar calculo", "📐 cotizar calculo", "📐 cotizar cálculo", "cotizar cálculo"}:
         try:
             conn_calc = get_conn()
             cur_calc = conn_calc.cursor()
@@ -2645,9 +2645,9 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         _calc_opts.append("⬅️ Volver al menú")
         return {
             "type": "list",
-            "body": "📐 *Calculadoras disponibles*\n\nSelecciona el tipo de cálculo que necesitas:",
+            "body": "📐 *Cálculos disponibles*\n\nSelecciona el tipo de cálculo que necesitas:",
             "options": _calc_opts,
-            "button_label": "Ver calculadoras",
+            "button_label": "Ver opciones",
         }
 
     # Opción "Cotizar materiales" / "Agregar más" del menú principal
@@ -2701,7 +2701,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         _menu_opts2 = ["🔨 Cotizar materiales"]
         _any_calc2 = _mod_cl2 or _mod_rj2 or _mod_pt2 or _mod_im2
         if _any_calc2:
-            _menu_opts2.append("📐 Calculadoras")
+            _menu_opts2.append("📐 Cotizar cálculo")
         _menu_opts2.extend(["🕐 Horarios y ubicación", "👤 Hablar con alguien"])
         _greeting2 = _welcome2 if _welcome2 else f"👋 ¡Hola! Soy el asistente de *{company_name}*\n\n¿En qué te puedo ayudar?"
         return {
@@ -3163,100 +3163,81 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             if ims.get("step") == "m2":
                 _m_num = re.match(r"^\s*(\d+(?:\.\d+)?)\s*", user_text.strip())
                 if _m_num:
+                    import math
                     m2 = float(_m_num.group(1))
-                    ims["m2"] = m2
-                    ims["step"] = "tipo"
-                    _im_state["imper_state"] = ims
-                    upsert_quote_state(company_id, wa_from, _im_state)
-                    return {
-                        "type": "list",
-                        "body": f"📐 *{m2:.0f} m²* de azotea. ¿Es primera aplicación o mantenimiento?",
-                        "options": ["Primera aplicación", "Mantenimiento"],
-                        "button_label": "Elegir tipo",
-                    }
+
+                    # Calculate directly — no type question, always include malla
+                    litros_total = math.ceil(m2)
+                    cubetas, galones, litros = _desglose_litros(litros_total)
+                    rollos_malla = math.ceil(m2 / 100)  # 1 rollo ≈ 100 m2
+
+                    # Brocha/rodillo suggestion: mix of 4" and 2"
+                    _rodillos_im = max(1, math.ceil(m2 / 40))
+                    _brochas_4_im = max(1, math.ceil(m2 / 120))
+                    _brochas_2_im = max(1, math.ceil(m2 / 120))
+
+                    resultado = (
+                        f"🛡️ *Cálculo de impermeabilizante*\n"
+                        f"━━━━━━━━━━━━━━━━━━━\n"
+                        f"📐 Azotea: *{m2:.0f} m²*\n"
+                        f"📊 Rendimiento: *1 litro/m²*\n\n"
+                        f"🪣 Impermeabilizante: *{litros_total} litros*\n"
+                        f"📦 Presentación: {_desglose_texto(cubetas, galones, litros)}\n"
+                        f"🔗 Malla de refuerzo: *{rollos_malla} rollo{'s' if rollos_malla > 1 else ''}*\n"
+                        f"🖌️ Sugerido: *{_rodillos_im} rodillo{'s' if _rodillos_im > 1 else ''}*, *{_brochas_4_im} brocha{'s' if _brochas_4_im > 1 else ''} 4\"*, *{_brochas_2_im} brocha{'s' if _brochas_2_im > 1 else ''} 2\"*\n"
+                        f"━━━━━━━━━━━━━━━━━━━"
+                    )
+
+                    _mat_lines = []
+                    if cubetas > 0:
+                        _mat_lines.append(f"{cubetas} impermeabilizante cubeta")
+                    if galones > 0:
+                        _mat_lines.append(f"{galones} impermeabilizante galon")
+                    if litros > 0:
+                        _mat_lines.append(f"{litros} impermeabilizante litro")
+                    _mat_lines.append(f"{rollos_malla} malla para impermeabilizar")
+                    _mat_lines.append(f"{_rodillos_im} rodillo")
+                    _mat_lines.append(f"{_brochas_4_im} brocha 4")
+                    _mat_lines.append(f"{_brochas_2_im} brocha 2")
+
+                    # Auto-cotizar: search and add to cart directly
+                    state = _im_state
+                    conn = get_conn()
+                    try:
+                        for line in _mat_lines:
+                            _lm = re.match(r"^(\d+)\s+(.+)$", line.strip())
+                            if _lm:
+                                _lqty = int(_lm.group(1))
+                                _lname = _lm.group(2)
+                                result = smart_search(conn, company_id, _lname, _lqty,
+                                                      cart_context=_build_cart_context(state))
+                                if result["status"] == "found":
+                                    state = cart_add_item(state, {
+                                        "sku": result["item"].get("sku"),
+                                        "name": result["item"].get("name"),
+                                        "unit": result["item"].get("unit") or "unidad",
+                                        "price": float(result["item"].get("price") or 0.0),
+                                        "vat_rate": result["item"].get("vat_rate"),
+                                        "qty": _lqty,
+                                    })
+                                elif result.get("candidates"):
+                                    pend = state.get("pending") or []
+                                    pend.append({"qty": _lqty, "raw": _lname, "candidates": result["candidates"]})
+                                    state["pending"] = pend
+                    finally:
+                        conn.close()
+                    state.pop("imper_state", None)
+                    upsert_quote_state(company_id, wa_from, state)
+
+                    # Send result text first, then the pending/cart reply
+                    _reply = _build_reply_with_pending(state, company_id=company_id, wa_from=wa_from)
+                    if isinstance(_reply, dict):
+                        _reply["text"] = resultado + "\n\n" + (_reply.get("text") or "")
+                    else:
+                        _reply = resultado + "\n\n" + str(_reply)
+                    return _reply
                 else:
                     return "Necesito un número. ¿Cuántos m² de azotea? (ej: 80)"
-
-            elif ims.get("step") == "tipo":
-                import math
-                m2 = ims.get("m2", 0)
-                es_primera = "primera" in tnorm
-
-                # 1 litro por m2
-                litros_total = math.ceil(m2)
-                cubetas, galones, litros = _desglose_litros(litros_total)
-
-                resultado = (
-                    f"🛡️ *Cálculo de impermeabilizante*\n"
-                    f"━━━━━━━━━━━━━━━━━━━\n"
-                    f"📐 Azotea: *{m2:.0f} m²*\n"
-                    f"📊 Rendimiento: *1 litro/m²*\n"
-                    f"🔧 Tipo: *{'Primera aplicación' if es_primera else 'Mantenimiento'}*\n\n"
-                    f"🪣 Impermeabilizante: *{litros_total} litros*\n"
-                    f"📦 Presentación: {_desglose_texto(cubetas, galones, litros)}\n"
-                )
-                if es_primera:
-                    import math as _m
-                    rollos_malla = _m.ceil(m2 / 100)  # 1 rollo ≈ 100 m2
-                    resultado += f"🔗 Malla de refuerzo: *{rollos_malla} rollo{'s' if rollos_malla > 1 else ''}*\n"
-
-                # Brocha/rodillo suggestion: mix of 4" and 2"
-                import math as _mi
-                _rodillos_im = max(1, _mi.ceil(m2 / 40))
-                _brochas_4_im = max(1, _mi.ceil(m2 / 120))
-                _brochas_2_im = max(1, _mi.ceil(m2 / 120))
-                resultado += f"🖌️ Sugerido: *{_rodillos_im} rodillo{'s' if _rodillos_im > 1 else ''}*, *{_brochas_4_im} brocha{'s' if _brochas_4_im > 1 else ''} 4\"*, *{_brochas_2_im} brocha{'s' if _brochas_2_im > 1 else ''} 2\"*\n"
-                resultado += "━━━━━━━━━━━━━━━━━━━"
-
-                _mat_lines = []
-                if cubetas > 0:
-                    _mat_lines.append(f"{cubetas} impermeabilizante cubeta")
-                if galones > 0:
-                    _mat_lines.append(f"{galones} impermeabilizante galon")
-                if litros > 0:
-                    _mat_lines.append(f"{litros} impermeabilizante litro")
-                if es_primera:
-                    _mat_lines.append(f"{rollos_malla} malla impermeabilizante rollo")
-                _mat_lines.append(f"{_rodillos_im} rodillo")
-                _mat_lines.append(f"{_brochas_4_im} brocha 4")
-                _mat_lines.append(f"{_brochas_2_im} brocha 2")
-
-                # Auto-cotizar: search and add to cart directly
-                state = _im_state
-                conn = get_conn()
-                try:
-                    for line in _mat_lines:
-                        _lm = re.match(r"^(\d+)\s+(.+)$", line.strip())
-                        if _lm:
-                            _lqty = int(_lm.group(1))
-                            _lname = _lm.group(2)
-                            result = smart_search(conn, company_id, _lname, _lqty,
-                                                  cart_context=_build_cart_context(state))
-                            if result["status"] == "found":
-                                state = cart_add_item(state, {
-                                    "sku": result["item"].get("sku"),
-                                    "name": result["item"].get("name"),
-                                    "unit": result["item"].get("unit") or "unidad",
-                                    "price": float(result["item"].get("price") or 0.0),
-                                    "vat_rate": result["item"].get("vat_rate"),
-                                    "qty": _lqty,
-                                })
-                            elif result.get("candidates"):
-                                pend = state.get("pending") or []
-                                pend.append({"qty": _lqty, "raw": _lname, "candidates": result["candidates"]})
-                                state["pending"] = pend
-                finally:
-                    conn.close()
-                state.pop("imper_state", None)
-                upsert_quote_state(company_id, wa_from, state)
-
-                # Send result text first, then the pending/cart reply
-                _reply = _build_reply_with_pending(state, company_id=company_id, wa_from=wa_from)
-                if isinstance(_reply, dict):
-                    _reply["text"] = resultado + "\n\n" + (_reply.get("text") or "")
-                else:
-                    _reply = resultado + "\n\n" + str(_reply)
-                return _reply
 
         _im_triggers = {"calcular impermeabilizante", "🛡️ calcular impermeabilizante", "impermeabilizante",
                         "cuanto impermeabilizante", "cuánto impermeabilizante", "calcular imper", "🛡️ calcular imper", "imper"}
