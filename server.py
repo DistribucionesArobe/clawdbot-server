@@ -3126,12 +3126,12 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 state.pop("pintura_state", None)
                 upsert_quote_state(company_id, wa_from, state)
 
-                # Send result text first, then the pending/cart reply
+                # Send cart/pending reply first, then desglose as reference at the end
                 _reply = _build_reply_with_pending(state, company_id=company_id, wa_from=wa_from)
                 if isinstance(_reply, dict):
-                    _reply["text"] = resultado + "\n\n" + (_reply.get("text") or "")
+                    _reply["text"] = (_reply.get("text") or "") + "\n\n" + resultado
                 else:
-                    _reply = resultado + "\n\n" + str(_reply)
+                    _reply = str(_reply) + "\n\n" + resultado
                 return _reply
 
         _pt_triggers = {"calcular pintura", "🎨 calcular pintura", "pintura", "cuanta pintura",
@@ -3229,12 +3229,12 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                     state.pop("imper_state", None)
                     upsert_quote_state(company_id, wa_from, state)
 
-                    # Send result text first, then the pending/cart reply
+                    # Send cart/pending reply first, then desglose as reference at the end
                     _reply = _build_reply_with_pending(state, company_id=company_id, wa_from=wa_from)
                     if isinstance(_reply, dict):
-                        _reply["text"] = resultado + "\n\n" + (_reply.get("text") or "")
+                        _reply["text"] = (_reply.get("text") or "") + "\n\n" + resultado
                     else:
-                        _reply = resultado + "\n\n" + str(_reply)
+                        _reply = str(_reply) + "\n\n" + resultado
                     return _reply
                 else:
                     return "Necesito un número. ¿Cuántos m² de azotea? (ej: 80)"
