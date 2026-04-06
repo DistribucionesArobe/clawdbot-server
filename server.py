@@ -2172,8 +2172,11 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 cands = current.get("candidates") or []
 
                 # Sort by price (cheapest first) as tiebreaker, then limit to 3
+                # IMPORTANT: save sorted+truncated list back to state so pick handler
+                # uses the same order as what was displayed to the user
                 cands.sort(key=lambda x: float(x.get("price") or 999999))
                 cands = cands[:3]
+                current["candidates"] = cands  # sync state with displayed order
                 section_rows = []
                 for j, it in enumerate(cands, start=1):
                     price = float(it.get("price") or 0.0)
