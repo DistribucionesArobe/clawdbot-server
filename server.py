@@ -2922,38 +2922,16 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                         f"━━━━━━━━━━━━━━━━━━━"
                     )
 
-                    # Build material list for quoting
+                    # Build material list and auto-cotizar directly
                     _mat_lines = []
                     _mat_lines.append(f"{rejas} reja ciclonica {altura:.2f}")
                     _mat_lines.append(f"{postes} poste rejacero")
                     _mat_lines.append(f"{abrazaderas} abrazadera")
-                    rjs["resultado"] = _mat_lines
-                    rjs["step"] = "esperando_cotizar"
-                    _rj_state["rejacero_state"] = rjs
-                    upsert_quote_state(company_id, wa_from, _rj_state)
 
-                    return {
-                        "type": "text_then_buttons",
-                        "text": resultado,
-                        "body": "¿Quieres que cotice estos materiales?",
-                        "buttons": ["🛒 Cotizar materiales", "🔄 Recalcular", "🚪 Salir"],
-                    }
-                else:
-                    return {
-                        "type": "list",
-                        "body": "No entendí la altura. Elige una opción:",
-                        "options": ["1.00 m", "1.50 m", "2.00 m", "2.50 m"],
-                        "button_label": "Elegir altura",
-                    }
-
-            elif rjs.get("step") == "esperando_cotizar":
-                if tnorm in {"si", "sí", "yes", "dale", "va", "ok", "cotizar", "cotizar materiales", "🛒 cotizar materiales"}:
-                    _mat_lines = rjs.get("resultado") or []
                     state = _rj_state
                     conn = get_conn()
                     try:
                         for line in _mat_lines:
-                            # Parse "N producto" format
                             _lm = re.match(r"^(\d+)\s+(.+)$", line.strip())
                             if _lm:
                                 _lqty = int(_lm.group(1))
@@ -2977,15 +2955,21 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                         conn.close()
                     state.pop("rejacero_state", None)
                     upsert_quote_state(company_id, wa_from, state)
-                    return _build_reply_with_pending(state, company_id=company_id, wa_from=wa_from)
-                elif tnorm in {"recalcular", "🔄 recalcular"}:
-                    _rj_state["rejacero_state"] = {"step": "metros"}
-                    upsert_quote_state(company_id, wa_from, _rj_state)
-                    return "📏 ¿Cuántos metros lineales de reja necesitas? (ej: 25)"
+
+                    # Send cart/pending reply first, then desglose at end
+                    _reply = _build_reply_with_pending(state, company_id=company_id, wa_from=wa_from)
+                    if isinstance(_reply, dict):
+                        _reply["text"] = (_reply.get("text") or "") + "\n\n" + resultado
+                    else:
+                        _reply = str(_reply) + "\n\n" + resultado
+                    return _reply
                 else:
-                    _rj_state.pop("rejacero_state", None)
-                    upsert_quote_state(company_id, wa_from, _rj_state)
-                    return "Entendido, cancelado. ¿En qué más te ayudo?"
+                    return {
+                        "type": "list",
+                        "body": "No entendí la altura. Elige una opción:",
+                        "options": ["1.00 m", "1.50 m", "2.00 m", "2.50 m"],
+                        "button_label": "Elegir altura",
+                    }
 
         # Trigger rejacero calculator
         _rj_triggers = {"calcular rejacero", "🧱 calcular rejacero", "rejacero", "reja ciclonica",
@@ -3053,14 +3037,34 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                     return "Necesito un número. ¿Cuántos m² vas a pintar? (ej: 120)"
 
             elif pts.get("step") == "tipo":
-                import math
-                m2 = pts.get("m2", 0)
                 tipo_lower = tnorm.strip()
                 if "esmalte" in tipo_lower:
-                    tipo = "Esmalte"
+                    pts["tipo"] = "Esmalte"
+                else:
+                    pts["tipo"] = "Vinílica"
+                pts["step"] = "uso"
+                _pt_state["pintura_state"] = pts
+                upsert_quote_state(company_id, wa_from, _pt_state)
+                return {
+                    "type": "text_then_buttons",
+                    "text": f"🎨 Pintura *{pts['tipo']}*. ¿Es para interior o exterior?",
+                    "body": "Elige el uso:",
+                    "buttons": ["🏠 Interior", "☀️ Exterior"],
+                }
+
+            elif pts.get("step") == "uso":
+                import math
+                m2 = pts.get("m2", 0)
+                tipo = pts.get("tipo", "Vinílica")
+                uso_lower = tnorm.strip()
+                if "exterior" in uso_lower:
+                    uso = "Exterior"
+                else:
+                    uso = "Interior"
+
+                if tipo == "Esmalte":
                     rendimiento_litro = 8.5  # m2 por litro
                 else:
-                    tipo = "Vinílica"
                     rendimiento_litro = 80.0 / 19.0  # ~4.21 m2 por litro
 
                 litros_total = math.ceil(m2 / rendimiento_litro)
@@ -3075,7 +3079,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 _brochas_2 = max(1, math.ceil(m2 / 120))
 
                 resultado = (
-                    f"🎨 *Cálculo de pintura {tipo}*\n"
+                    f"🎨 *Cálculo de pintura {tipo} {uso}*\n"
                     f"━━━━━━━━━━━━━━━━━━━\n"
                     f"📐 Superficie: *{m2:.0f} m²*\n"
                     f"📊 Rendimiento: *{rendimiento_litro:.1f} m²/litro*\n\n"
@@ -3086,8 +3090,9 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
 
                 # Cotizar only cubetas (rounded up) — no galones/litros separate
                 _tipo_search = "vinilica" if tipo == "Vinílica" else "esmalte"
+                _uso_search = "interior" if uso == "Interior" else "exterior"
                 _mat_lines = []
-                _mat_lines.append(f"{_cubetas_total} pintura {_tipo_search} cubeta")
+                _mat_lines.append(f"{_cubetas_total} pintura {_tipo_search} {_uso_search} cubeta")
                 _mat_lines.append(f"{_rodillos} rodillo")
                 _mat_lines.append(f"{_brochas_4} brocha 4")
                 _mat_lines.append(f"{_brochas_2} brocha 2")
