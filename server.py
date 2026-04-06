@@ -3448,14 +3448,23 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                     save_search_miss(company_id, prod_raw)
                 if result["status"] == "found":
                     _fq = _resolve_bundle_qty(qty, _mi_bundle, result["item"])
-                    state = cart_add_item(state, {
-                        "sku": result["item"].get("sku"),
-                        "name": result["item"].get("name"),
-                        "unit": result["item"].get("unit") or "unidad",
-                        "price": float(result["item"].get("price") or 0.0),
-                        "vat_rate": result["item"].get("vat_rate"),
-                        "qty": _fq,
-                    })
+                    # If customer used bundle word (bolsa/caja) but product has no bundle_size,
+                    # send to pending so user confirms — we don't know pieces per package
+                    if _mi_bundle and not result["item"].get("bundle_size"):
+                        _unit = (result["item"].get("unit") or "pieza").lower()
+                        missing.append({
+                            "qty": qty, "raw": f"{prod_raw} (se vende por {_unit})",
+                            "is_bundle": False, "candidates": [result["item"]],
+                        })
+                    else:
+                        state = cart_add_item(state, {
+                            "sku": result["item"].get("sku"),
+                            "name": result["item"].get("name"),
+                            "unit": result["item"].get("unit") or "unidad",
+                            "price": float(result["item"].get("price") or 0.0),
+                            "vat_rate": result["item"].get("vat_rate"),
+                            "qty": _fq,
+                        })
                 else:
                     missing.append({"qty": qty, "raw": prod_raw, "is_bundle": _mi_bundle, "candidates": result["candidates"]})
             if missing:
@@ -5930,7 +5939,7 @@ def extract_qty_items_robust(text: str):
                             _yp = _yp.strip()
 
                     # Detect bundle words BEFORE stripping them
-                    _is_bun = bool(re.search(r"\b(atados?|paquetes?|bultos?|cajas?)\b", _yp, re.IGNORECASE))
+                    _is_bun = bool(re.search(r"\b(atados?|paquetes?|bultos?|cajas?|bolsas?)\b", _yp, re.IGNORECASE))
                     # Solo quitar unidades de EMPAQUE (no de medida/spec)
                     _packaging_re = r"\b(hojas?|piezas?|rollos?|bultos?|sacos?|atados?|paquetes?|costales?|cubetas?|bolsas?|botes?|latas?|tiras?|cajas?|cientos?|millares?)\b"
                     _yp = re.sub(_packaging_re, "", _yp, flags=re.IGNORECASE).strip()
