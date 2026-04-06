@@ -2922,10 +2922,14 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                         f"━━━━━━━━━━━━━━━━━━━"
                     )
 
+                    # Poste height is always 0.50m taller than reja
+                    _altura_poste_map = {1.0: 1.50, 1.50: 2.00, 2.0: 2.50, 2.50: 3.00}
+                    _altura_poste = _altura_poste_map.get(altura, altura + 0.50)
+
                     # Build material list and auto-cotizar directly
                     _mat_lines = []
                     _mat_lines.append(f"{rejas} reja ciclonica {altura:.2f}")
-                    _mat_lines.append(f"{postes} poste rejacero")
+                    _mat_lines.append(f"{postes} poste rejacero {_altura_poste:.2f}")
                     _mat_lines.append(f"{abrazaderas} abrazadera")
 
                     state = _rj_state
