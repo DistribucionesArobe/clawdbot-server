@@ -3326,15 +3326,20 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
     # "pasame precios", "necesito cotización" — no product name, just intent.
     _intent_patterns = [
         r"^(me\s+)?podri?a?s?\s+(pasar|cotizar|dar)\s+(precio|precios|cotizacion)",
+        r"^(me\s+)?podri?a?s?\s+cotizar$",  # "me podria cotizar" (without noun)
+        r"^(me\s+)?(puede[ns]?|podrian?)\s+cotizar$",  # "me puede cotizar"
         r"^quiero\s+(cotizar|precio|precios|una?\s+cotizacion)",
         r"^necesito\s+(cotizar|precio|precios|una?\s+cotizacion)",
         r"^(pasame|dame|mandame|enviame)\s+(precio|precios|cotizacion)",
         r"^(cotizar|cotizame|cotizacion)\s*(un\s+)?(material|producto)?$",
+        r"^(me\s+)?cotiza(s|n)?$",  # "me cotiza" / "cotiza"
         r"^(un|de\s+un)\s+material$",
         r"^precio\s+de\s+(un\s+)?(material|producto)$",
         r"^(me\s+)?podri?a?s?\s+pasar\s+precio\s+de$",
     ]
-    _tnorm_intent = re.sub(r"[¿?¡!.,]", "", tnorm).strip()
+    _tnorm_intent = re.sub(r"\b(por\s+favor|porfa|porfavor|plis|please|pls)\b", "", tnorm).strip()
+    _tnorm_intent = re.sub(r"[¿?¡!.,]", "", _tnorm_intent).strip()
+    _tnorm_intent = re.sub(r"\s+", " ", _tnorm_intent).strip()
     if any(re.search(p, _tnorm_intent) for p in _intent_patterns):
         try:
             conn_wh = get_conn()
@@ -3432,6 +3437,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             if not state:
                 state = {}
             state.pop("pending_specs", None)
+            state.pop("pending", None)  # Clear stale pending — new product list takes priority
             missing = []
             _pedido_raw = ", ".join(p for _, p, *_ in multi if p.strip() != "???")
             for _mi in multi:
@@ -5863,6 +5869,9 @@ def extract_qty_items_robust(text: str):
     # WhatsApp bullet lists inject \u2060 (word joiner) and \u200b (zero-width space)
     t = re.sub(r"[\u2060\u200b\u200c\u200d\ufeff\u00a0]", " ", t)
     t = re.sub(r"[•;]", "\n", t)
+    # Convert "* " bullet markers to newlines (WhatsApp inline bullets)
+    # Match * followed by a digit (e.g. "* 5 hojas") or * at line start
+    t = re.sub(r"(?:^|\s)\*\s+(?=\d)", "\n", t)
     t = re.sub(r"^\s*(ocupo|necesito|quiero|quisiera|dame|deme|manda|mandame|mandeme|pasame|pásame|paseme|necesitamos|queremos|ocupamos|me puede dar|me pueden dar|me das|me mandas|favor de|necesito cotizar|quiero cotizar)\s+", "", t, flags=re.IGNORECASE)
     t = re.sub(r"^\s*(me\s+)?(puede[ns]?|podría[ns]?|podrías)\s+(cotizar|dar|mandar|pasar)\s+", "", t, flags=re.IGNORECASE)
     t = re.sub(r"\b(cotiza|cotización|cotizacion|precio|precios|por favor|porfa|pls)\b", " ", t, flags=re.IGNORECASE)
