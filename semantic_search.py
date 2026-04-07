@@ -1549,6 +1549,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
 
         def _spec_bonus(item_name, medida, cal):
             n = item_name.lower()
+            n_ph = _phonetic(n)
             bonus = 0
             if medida:
                 if _medida_matches(medida, item_name):
@@ -1567,6 +1568,15 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                         if sg in n:
                             bonus += 15
                             break
+            # Penalty: product name starts with a DIFFERENT word than the query
+            # e.g. searching "rejacero" but product is "Poste 2.00 para rejacero"
+            # The query term is a suffix/modifier, not the primary product → penalize
+            q_first = _phonetic(q.split()[0]) if q.split() else ""
+            n_first = n_ph.split()[0] if n_ph.split() else ""
+            if q_first and n_first and len(q_first) >= 4 and q_first != n_first:
+                # Check if the product name starts with the query or vice versa
+                if not n_ph.startswith(q_first):
+                    bonus -= 25  # query term is not the primary word in product name
             return bonus
 
         def _tiebreak(s, row_or_item):
