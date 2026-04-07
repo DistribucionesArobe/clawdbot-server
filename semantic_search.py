@@ -1036,6 +1036,24 @@ def seed_jerga_global(conn):
         ("canal de amarre", "canal 6.35"),
         ("canales amarre", "canal 6.35"),
         ("canales de amarre", "canal 6.35"),
+        # Abrazaderas — genérico = rejacero (las de malla se llaman "arranque"/"tensión")
+        ("abrazadera", "abrazadera rejacero"),
+        ("abrazaderas", "abrazadera rejacero"),
+        ("abrazadera de reja", "abrazadera rejacero"),
+        ("abrazaderas de reja", "abrazadera rejacero"),
+        ("abrazadera para reja", "abrazadera rejacero"),
+        ("abrazaderas para reja", "abrazadera rejacero"),
+        # Poste para reja = poste para rejacero
+        ("poste para la reja", "poste para rejacero"),
+        ("poste para reja", "poste para rejacero"),
+        ("postes para reja", "poste para rejacero"),
+        ("postes para la reja", "poste para rejacero"),
+        ("poste de reja", "poste para rejacero"),
+        ("postes de reja", "poste para rejacero"),
+        # Base para poste
+        ("bases para poste", "base para poste"),
+        ("base de poste", "base para poste"),
+        ("bases de poste", "base para poste"),
     ]
     try:
         cur = conn.cursor()
