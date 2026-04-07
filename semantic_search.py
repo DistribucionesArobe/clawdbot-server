@@ -1031,6 +1031,11 @@ def seed_jerga_global(conn):
         ("pijas tablaroca", "pija 6 x 1"),
         ("pija para tablaroca", "pija 6 x 1"),
         ("pijas para tablaroca", "pija 6 x 1"),
+        # Canal de amarre = Canal 6.35 (standard framing channel for tablaroca)
+        ("canal amarre", "canal 6.35"),
+        ("canal de amarre", "canal 6.35"),
+        ("canales amarre", "canal 6.35"),
+        ("canales de amarre", "canal 6.35"),
     ]
     try:
         cur = conn.cursor()

@@ -3453,23 +3453,14 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                     save_search_miss(company_id, prod_raw)
                 if result["status"] == "found":
                     _fq = _resolve_bundle_qty(qty, _mi_bundle, result["item"])
-                    # If customer used bundle word (bolsa/caja) but product has no bundle_size,
-                    # send to pending so user confirms — we don't know pieces per package
-                    if _mi_bundle and not result["item"].get("bundle_size"):
-                        _unit = (result["item"].get("unit") or "pieza").lower()
-                        missing.append({
-                            "qty": qty, "raw": f"{prod_raw} (se vende por {_unit})",
-                            "is_bundle": False, "candidates": [result["item"]],
-                        })
-                    else:
-                        state = cart_add_item(state, {
-                            "sku": result["item"].get("sku"),
-                            "name": result["item"].get("name"),
-                            "unit": result["item"].get("unit") or "unidad",
-                            "price": float(result["item"].get("price") or 0.0),
-                            "vat_rate": result["item"].get("vat_rate"),
-                            "qty": _fq,
-                        })
+                    state = cart_add_item(state, {
+                        "sku": result["item"].get("sku"),
+                        "name": result["item"].get("name"),
+                        "unit": result["item"].get("unit") or "unidad",
+                        "price": float(result["item"].get("price") or 0.0),
+                        "vat_rate": result["item"].get("vat_rate"),
+                        "qty": _fq,
+                    })
                 else:
                     missing.append({"qty": qty, "raw": prod_raw, "is_bundle": _mi_bundle, "candidates": result["candidates"]})
             if missing:
