@@ -675,10 +675,16 @@ def _run_pricebook_migrations(conn):
                 ) THEN
                     ALTER TABLE companies ADD COLUMN context_groups JSONB;
                 END IF;
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name='pricebook_items' AND column_name='is_default'
+                ) THEN
+                    ALTER TABLE pricebook_items ADD COLUMN is_default BOOLEAN DEFAULT FALSE;
+                END IF;
             END $$;
         """)
         conn.commit()
-        print("PRICEBOOK MIGRATIONS: OK (bundle_size, context_groups)")
+        print("PRICEBOOK MIGRATIONS: OK (bundle_size, context_groups, is_default)")
     except Exception as e:
         print("PRICEBOOK MIGRATION ERROR:", repr(e))
         conn.rollback()
@@ -1188,6 +1194,7 @@ class PricebookItemUpdateBody(BaseModel):
     vat_rate: Optional[float] = None
     synonyms: Optional[str] = None
     bundle_size: Optional[int] = None
+    is_default: Optional[bool] = None
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -5336,7 +5343,7 @@ def pricebook_items(
             like = f"%{q.strip()}%"
             cur.execute(
                 """
-                select id, company_id, sku, name, unit, price, vat_rate, source, updated_at, created_at, bundle_size
+                select id, company_id, sku, name, unit, price, vat_rate, source, updated_at, created_at, bundle_size, coalesce(is_default, false)
                 from pricebook_items
                 where company_id = %s and (sku ilike %s or name ilike %s or name_norm ilike %s)
                 order by name asc limit %s
@@ -5345,7 +5352,7 @@ def pricebook_items(
             )
         else:
             cur.execute(
-                "select id, company_id, sku, name, unit, price, vat_rate, source, updated_at, created_at, bundle_size from pricebook_items where company_id = %s order by name asc limit %s",
+                "select id, company_id, sku, name, unit, price, vat_rate, source, updated_at, created_at, bundle_size, coalesce(is_default, false) from pricebook_items where company_id = %s order by name asc limit %s",
                 (company_id, limit),
             )
         rows = cur.fetchall()
@@ -5360,6 +5367,7 @@ def pricebook_items(
                 "updated_at": r[8].isoformat() if r[8] else None,
                 "created_at": r[9].isoformat() if r[9] else None,
                 "bundle_size": r[10],
+                "is_default": bool(r[11]) if len(r) > 11 else False,
             })
         return {"ok": True, "items": items}
     except HTTPException:
@@ -5583,7 +5591,7 @@ def pricebook_item_update(request: Request, item_id: str, body: PricebookItemUpd
     cur = conn.cursor()
     try:
         cur.execute(
-            "SELECT name, sku, unit, price, vat_rate, synonyms, bundle_size FROM pricebook_items WHERE id=%s AND company_id=%s",
+            "SELECT name, sku, unit, price, vat_rate, synonyms, bundle_size, coalesce(is_default, false) FROM pricebook_items WHERE id=%s AND company_id=%s",
             (item_id, company_id),
         )
         row = cur.fetchone()
@@ -5599,6 +5607,7 @@ def pricebook_item_update(request: Request, item_id: str, body: PricebookItemUpd
         bundle_size = body.bundle_size if body.bundle_size is not None else row[6]
         if bundle_size is not None and bundle_size <= 0:
             bundle_size = None
+        is_default = body.is_default if body.is_default is not None else row[7]
 
         # Auto-generar plurales/singulares como sinónimos
         _auto_vars = _auto_plural_singular(name)
@@ -5613,11 +5622,11 @@ def pricebook_item_update(request: Request, item_id: str, body: PricebookItemUpd
         cur.execute(
             """
             UPDATE pricebook_items
-            SET name=%s, name_norm=%s, sku=%s, unit=%s, price=%s, vat_rate=%s, synonyms=%s, bundle_size=%s, updated_at=now()
+            SET name=%s, name_norm=%s, sku=%s, unit=%s, price=%s, vat_rate=%s, synonyms=%s, bundle_size=%s, is_default=%s, updated_at=now()
             WHERE id=%s AND company_id=%s
             RETURNING id
             """,
-            (name, name_norm, sku, unit, price, vat_rate, synonyms, bundle_size, item_id, company_id),
+            (name, name_norm, sku, unit, price, vat_rate, synonyms, bundle_size, is_default, item_id, company_id),
         )
         if not cur.fetchone():
             raise HTTPException(status_code=404, detail="Producto no encontrado")

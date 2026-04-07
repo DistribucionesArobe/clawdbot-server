@@ -451,7 +451,7 @@ def _keyword_candidates(conn, company_id: str, query_phonetic: str,
                          q_tokens: list, limit: int = 20) -> list:
     """Get top-N candidates from ILIKE multi-token search."""
     from rapidfuzz import fuzz
-    _NS_SQL = f"""SELECT sku, name, unit, price, vat_rate, bundle_size FROM pricebook_items
+    _NS_SQL = f"""SELECT sku, name, unit, price, vat_rate, bundle_size, coalesce(is_default, false) FROM pricebook_items
                   WHERE company_id = %s
                     AND lower({_sql_translate('name')}) LIKE lower(%s)
                   LIMIT 10"""
@@ -729,7 +729,7 @@ def fuzzy_search_best(conn, company_id: str, user_query: str, threshold: int = 9
     cur = conn.cursor()
     try:
         cur.execute(
-            "SELECT sku, name, unit, price, vat_rate, synonyms, bundle_size FROM pricebook_items WHERE company_id = %s AND embedding IS NOT NULL",
+            "SELECT sku, name, unit, price, vat_rate, synonyms, bundle_size, coalesce(is_default, false) FROM pricebook_items WHERE company_id = %s AND embedding IS NOT NULL",
             (company_id,),
         )
         rows = cur.fetchall()
@@ -1422,7 +1422,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
             q_tokens = [t for t in q.split() if t not in _soft_stopwords]
         q = " ".join(q_tokens).strip() or q
 
-        _NS_SQL = f"""SELECT sku, name, unit, price, vat_rate, bundle_size FROM pricebook_items
+        _NS_SQL = f"""SELECT sku, name, unit, price, vat_rate, bundle_size, coalesce(is_default, false) FROM pricebook_items
                       WHERE company_id = %s
                         AND lower({_sql_translate('name')}) LIKE lower(%s)
                       LIMIT 25"""
@@ -1565,21 +1565,33 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
 
         def _make_item(r):
             # Rows can be:
-            #   (sku, name, unit, price, vat_rate, bundle_size)           — from _NS_SQL
-            #   (sku, name, unit, price, vat_rate, synonyms, bundle_size) — from synonym queries
-            #   (sku, name, unit, price, vat_rate, bundle_size, similarity) — from vector queries
+            #   (sku, name, unit, price, vat_rate, bundle_size, is_default)           — from _NS_SQL
+            #   (sku, name, unit, price, vat_rate, synonyms, bundle_size, is_default) — from synonym queries
             # bundle_size is always an int or None; synonyms is always a string
+            # is_default is always a bool (last element after bundle_size)
             _bs = None
+            _is_def = False
             for i in range(5, len(r)):
-                if isinstance(r[i], int):
+                if isinstance(r[i], bool):
+                    _is_def = r[i]
+                elif isinstance(r[i], int):
                     _bs = r[i]
-                    break
             return {
                 "sku": r[0], "name": r[1], "unit": r[2],
                 "price": float(r[3]) if r[3] is not None else None,
                 "vat_rate": float(r[4]) if r[4] is not None else None,
                 "bundle_size": _bs,
+                "is_default": _is_def,
             }
+
+        def _resolve_default(candidates_items):
+            """If exactly one candidate has is_default=True, return it as 'found'."""
+            defaults = [c for c in candidates_items if c.get("is_default")]
+            if len(defaults) == 1:
+                print(f"DEFAULT RESOLVED: '{user_query}' → '{defaults[0]['name']}' (is_default=True)")
+                _log_event("found", "default_resolved", defaults[0])
+                return {"status": "found", "item": defaults[0], "candidates": []}
+            return None  # no single default, stay ambiguous
 
         # ── Context: load company context_groups from DB ─────────────────
         _ctx_groups = {}  # {group_name: [keyword1, keyword2, ...]}
@@ -1807,7 +1819,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
         cur0 = conn.cursor()
         try:
             cur0.execute(
-                f"SELECT sku, name, unit, price, vat_rate, synonyms, bundle_size FROM pricebook_items WHERE company_id = %s AND (lower({_SYN_TRANSLATE}) LIKE lower(%s) OR lower({_NAME_TRANSLATE}) LIKE lower(%s)) LIMIT 10",
+                f"SELECT sku, name, unit, price, vat_rate, synonyms, bundle_size, coalesce(is_default, false) FROM pricebook_items WHERE company_id = %s AND (lower({_SYN_TRANSLATE}) LIKE lower(%s) OR lower({_NAME_TRANSLATE}) LIKE lower(%s)) LIMIT 10",
                 (company_id, f"%{_phonetic(q)}%", f"%{_phonetic(q)}%"),
             )
             syn_rows = cur0.fetchall()
@@ -1815,7 +1827,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
             if not syn_rows and q_tokens:
                 first_token = _phonetic(q_tokens[0])
                 cur0.execute(
-                    f"SELECT sku, name, unit, price, vat_rate, synonyms, bundle_size FROM pricebook_items WHERE company_id = %s AND (lower({_SYN_TRANSLATE}) LIKE lower(%s) OR lower({_NAME_TRANSLATE}) LIKE lower(%s)) LIMIT 10",
+                    f"SELECT sku, name, unit, price, vat_rate, synonyms, bundle_size, coalesce(is_default, false) FROM pricebook_items WHERE company_id = %s AND (lower({_SYN_TRANSLATE}) LIKE lower(%s) OR lower({_NAME_TRANSLATE}) LIKE lower(%s)) LIMIT 10",
                     (company_id, f"%{first_token}%", f"%{first_token}%"),
                 )
                 syn_rows = cur0.fetchall()
@@ -1958,12 +1970,18 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                     else:
                         print(f"SYNONYM AMBIGUOUS: query='{user_query}' found={len(_syn_relevant)}")
                         _syn_sorted = _context_sort([(0, r) for r in _syn_relevant], cart_context)
+                        _items = [_make_item(r) for _, r in _syn_sorted]
+                        _def = _resolve_default(_items)
+                        if _def: return _def
                         _log_event("ambiguous", "synonym_ambiguous")
-                        return {"status": "ambiguous", "item": None, "candidates": [_make_item(r) for _, r in _syn_sorted]}
+                        return {"status": "ambiguous", "item": None, "candidates": _items}
                 else:
                     print(f"SYNONYM AMBIGUOUS: query='{user_query}' found={len(syn_rows)}")
+                    _items = [_make_item(r) for r in syn_rows]
+                    _def = _resolve_default(_items)
+                    if _def: return _def
                     _log_event("ambiguous", "synonym_ambiguous")
-                    return {"status": "ambiguous", "item": None, "candidates": [_make_item(r) for r in syn_rows]}
+                    return {"status": "ambiguous", "item": None, "candidates": _items}
             # syn_rows vacío (specs no coincidieron) → seguir a ILIKE/catalog fallback
 
         # ── PASO 1: ILIKE directo + ranking con bonus de specs + tiebreak ─────
@@ -2152,8 +2170,11 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                                 _relevant = _atm  # narrow to only full-match candidates
                                 print(f"ILIKE ALL-TOKEN NARROWED: {len(scored)} → {len(_atm)} (all tokens present)")
                         _relevant = _context_sort(_relevant, cart_context)
+                        _items = [_make_item(r) for _, r in _relevant]
+                        _def = _resolve_default(_items)
+                        if _def: return _def
                         _log_event("ambiguous", "ilike_ambiguous")
-                        return {"status": "ambiguous", "item": None, "candidates": [_make_item(r) for _, r in _relevant]}
+                        return {"status": "ambiguous", "item": None, "candidates": _items}
                 else:
                     q_first_token = q.split()[0] if q.split() else q
                     filtered = [(s, r) for s, r in scored[:5] if _phonetic((r[1] or "").lower()).startswith(q_first_token)]
@@ -2172,8 +2193,11 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                         elif len(_atm2) >= 2:
                             candidates = _atm2
                     candidates = _context_sort(candidates, cart_context)
+                    _items = [_make_item(r) for _, r in candidates]
+                    _def = _resolve_default(_items)
+                    if _def: return _def
                     _log_event("ambiguous", "ilike_ambiguous")
-                    return {"status": "ambiguous", "item": None, "candidates": [_make_item(r) for _, r in candidates]}
+                    return {"status": "ambiguous", "item": None, "candidates": _items}
 
         # ── PASO 2: tsvector + fuzzy sobre candidatos + tiebreak ─────────────
         _tokens = [t for t in q.split() if len(t) >= 3]
@@ -2201,7 +2225,7 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
             cur2_b = conn.cursor()
             try:
                 cur2_b.execute(
-                    f"SELECT sku, name, unit, price, vat_rate, synonyms, bundle_size FROM pricebook_items WHERE company_id = %s AND (lower({_NAME_TRANSLATE}) LIKE lower(%s) OR lower({_SYN_TRANSLATE}) LIKE lower(%s)) LIMIT 30",
+                    f"SELECT sku, name, unit, price, vat_rate, synonyms, bundle_size, coalesce(is_default, false) FROM pricebook_items WHERE company_id = %s AND (lower({_NAME_TRANSLATE}) LIKE lower(%s) OR lower({_SYN_TRANSLATE}) LIKE lower(%s)) LIMIT 30",
                     (company_id, f"%{_phonetic(q)}%", f"%{_phonetic(q)}%"),
                 )
                 rows = cur2_b.fetchall()
@@ -2303,8 +2327,11 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
             q_first_token = q.split()[0] if q.split() else q
             filtered = [(s, item) for s, item in scored[:5] if _phonetic((item.get("name") or "").lower()).startswith(q_first_token)]
             candidates = filtered if filtered else scored[:5]
+            _items = [item for _, item in candidates]
+            _def = _resolve_default(_items)
+            if _def: return _def
             _log_event("ambiguous", "fuzzy_ambiguous")
-            return {"status": "ambiguous", "item": None, "candidates": [item for _, item in candidates]}
+            return {"status": "ambiguous", "item": None, "candidates": _items}
 
         # ── PASO 3: HYBRID SEARCH (keyword + vector + RRF + LLM reranker) ────
         print(f"→ HYBRID SEARCH: query='{user_query}' q='{q}'")
