@@ -1036,9 +1036,18 @@ def extract_text_from_image(image_bytes: bytes) -> str | None:
         print("VISION ERROR:", repr(e))
         return None
 
+def _normalize_mx_phone(phone: str) -> str:
+    """Normalize a Mexican phone number to include country code 52.
+    Handles: 8341891017 → 528341891017, +528341891017 → 528341891017, etc."""
+    p = (phone or "").replace("+", "").replace(" ", "").replace("-", "").replace("whatsapp:", "").strip()
+    # If it's exactly 10 digits (local Mexican number), prepend 52
+    if len(p) == 10 and p.isdigit():
+        p = "52" + p
+    return p
+
 def notify_owner_escalation(wa_api_key: str, phone_number_id: str, owner_phone: str,
                              client_phone: str, reason: str, state: dict):
-    owner_phone_clean = (owner_phone or "").replace("+", "").replace("whatsapp:", "").strip()
+    owner_phone_clean = _normalize_mx_phone(owner_phone)
     cart = (state or {}).get("cart") or []
     cart_txt = ""
     if cart:
@@ -1055,7 +1064,7 @@ def notify_owner_escalation(wa_api_key: str, phone_number_id: str, owner_phone: 
 
 def notify_owner_comprobante(wa_api_key: str, phone_number_id: str, owner_phone: str,
                               client_phone: str, state: dict):
-    owner_phone_clean = (owner_phone or "").replace("+", "").replace("whatsapp:", "").strip()
+    owner_phone_clean = _normalize_mx_phone(owner_phone)
     cart = (state or {}).get("cart") or []
     cart_txt = ""
     if cart:
@@ -2609,7 +2618,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 company_name_esc = "la empresa"
                 _nq_phone = ""
             if _nq_phone:
-                _nq_clean = _nq_phone.replace("+", "").replace(" ", "").replace("-", "")
+                _nq_clean = _normalize_mx_phone(_nq_phone)
                 return (
                     f"Ese tema lo maneja directamente el equipo de *{company_name_esc}* 🙋\n\n"
                     f"Manda mensaje a:\n👉 https://wa.me/{_nq_clean}\n\n"
@@ -2649,7 +2658,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             print("ESCALATION ERROR:", repr(e))
         # Build response with wa.me link if phone is available
         if _atencion_phone:
-            _phone_clean = _atencion_phone.replace("+", "").replace(" ", "").replace("-", "")
+            _phone_clean = _normalize_mx_phone(_atencion_phone)
             return (
                 f"Para atención personalizada manda mensaje a:\n"
                 f"👉 https://wa.me/{_phone_clean}\n\n"
