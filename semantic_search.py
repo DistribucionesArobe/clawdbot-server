@@ -1455,11 +1455,17 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                 cal = m_cal.group(1)
             # Strip calibre portion so it doesn't interfere with medida extraction
             t_no_cal = _re.sub(r"\bcal(?:ibre)?\s*\d+(?:\.\d+)?\b", "", t)
-            # Match fractions like "2 1/2", "1 3/8", "1 5/8" FIRST (most specific)
+            # Match fractions FIRST (most specific)
+            # "2 1/2", "1 3/8" (whole + fraction)
             m_frac = _re.search(r"\b(\d+\s+\d+/\d+)\b", t_no_cal)
             if m_frac:
                 medida = m_frac.group(1)  # e.g. "2 1/2"
             else:
+                # Standalone fractions like "1/2", "3/8", "5/8"
+                m_sfrac = _re.search(r"\b(\d+/\d+)\b", t_no_cal)
+                if m_sfrac:
+                    medida = m_sfrac.group(1)  # e.g. "1/2"
+            if medida is None:
                 # Match "N unit" patterns including altura, largo, ancho
                 m_unit = _re.search(r"\b(\d+(?:\.\d+)?)\s*(?:metros?|mts?|m|cm|centimetros?|pulgadas?|pulg|mm|altura|alto|largo|ancho)\b", t_no_cal)
                 if m_unit:

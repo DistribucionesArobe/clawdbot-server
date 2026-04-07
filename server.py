@@ -2161,9 +2161,6 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             con_opciones = [p for p in pending if p.get("candidates")]
             sin_opciones = [p for p in pending if not p.get("candidates")]
 
-            if wa_from and company_id:
-                upsert_quote_state(company_id, wa_from, state)
-
             # ── Show ONE pending item at a time ──────────────────────
             if con_opciones:
                 current = con_opciones[0]
@@ -2177,6 +2174,12 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 cands.sort(key=lambda x: float(x.get("price") or 999999))
                 cands = cands[:3]
                 current["candidates"] = cands  # sync state with displayed order
+
+                # Persist AFTER candidates are sorted+truncated so pick handler
+                # reads the same order that was displayed to the user
+                if wa_from and company_id:
+                    upsert_quote_state(company_id, wa_from, state)
+
                 section_rows = []
                 for j, it in enumerate(cands, start=1):
                     price = float(it.get("price") or 0.0)
@@ -2219,7 +2222,9 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                     "button_label": "Ver opciones",
                 }
             else:
-                # Only not-found items remain
+                # Only not-found items remain — save state
+                if wa_from and company_id:
+                    upsert_quote_state(company_id, wa_from, state)
                 lines = []
                 if cart_count > 0:
                     lines.append(f"✅ Cotizamos *{cart_count} producto(s)* automáticamente.\n")
