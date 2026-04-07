@@ -2588,23 +2588,33 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             try:
                 conn_esc = get_conn()
                 cur_esc = conn_esc.cursor()
-                cur_esc.execute("SELECT owner_phone, wa_api_key, wa_phone_number_id, name FROM companies WHERE id=%s", (company_id,))
+                cur_esc.execute("SELECT owner_phone, wa_api_key, wa_phone_number_id, name, telefono_atencion FROM companies WHERE id=%s", (company_id,))
                 row_esc = cur_esc.fetchone()
                 cur_esc.close()
                 conn_esc.close()
-                if row_esc and row_esc[0]:
-                    notify_owner_escalation(
-                        wa_api_key=row_esc[1], phone_number_id=row_esc[2], owner_phone=row_esc[0],
-                        client_phone=wa_from,
-                        reason=f"Mensaje no relacionado a cotización: \"{user_text[:100]}\"",
-                        state=state_esc,
-                    )
-                    company_name_esc = row_esc[3] or "la empresa"
-                else:
-                    company_name_esc = "la empresa"
+                _nq_phone = (row_esc[4] or row_esc[0] or "").strip() if row_esc else ""
+                if _nq_phone and row_esc[1] and row_esc[2]:
+                    try:
+                        notify_owner_escalation(
+                            wa_api_key=row_esc[1], phone_number_id=row_esc[2], owner_phone=_nq_phone,
+                            client_phone=wa_from,
+                            reason=f"Mensaje no relacionado a cotización: \"{user_text[:100]}\"",
+                            state=state_esc,
+                        )
+                    except Exception as ne:
+                        print("NON-QUOTE NOTIFY ERROR:", repr(ne))
+                company_name_esc = (row_esc[3] if row_esc else None) or "la empresa"
             except Exception as e:
                 print("NON-QUOTE ESCALATION ERROR:", repr(e))
                 company_name_esc = "la empresa"
+                _nq_phone = ""
+            if _nq_phone:
+                _nq_clean = _nq_phone.replace("+", "").replace(" ", "").replace("-", "")
+                return (
+                    f"Ese tema lo maneja directamente el equipo de *{company_name_esc}* 🙋\n\n"
+                    f"Manda mensaje a:\n👉 https://wa.me/{_nq_clean}\n\n"
+                    "Si quieres cotizar materiales, mándame tu lista con cantidades 📋"
+                )
             return (
                 f"Ese tema lo maneja directamente el equipo de *{company_name_esc}* 🙋\n\n"
                 "Ya les avisé y te contactarán pronto.\n\n"
@@ -2614,20 +2624,37 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
     if any(rt == tnorm or rt in tnorm for rt in escalation_triggers):
         state = get_quote_state(company_id, wa_from) if wa_from else {}
         state = state or {}
+        _atencion_phone = None
+        _company_name_esc = "la empresa"
         try:
             conn = get_conn()
             cur = conn.cursor()
-            cur.execute("SELECT owner_phone, wa_api_key, wa_phone_number_id FROM companies WHERE id=%s", (company_id,))
+            cur.execute("SELECT owner_phone, wa_api_key, wa_phone_number_id, telefono_atencion, name FROM companies WHERE id=%s", (company_id,))
             row = cur.fetchone()
             cur.close()
             conn.close()
-            if row and row[0]:
-                notify_owner_escalation(
-                    wa_api_key=row[1], phone_number_id=row[2], owner_phone=row[0],
-                    client_phone=wa_from, reason="Cliente solicitó hablar con un asesor", state=state,
-                )
+            _atencion_phone = (row[3] or row[0] or "").strip() if row else ""
+            _company_name_esc = row[4] or "la empresa" if row else "la empresa"
+            # Notify owner/attention phone via WhatsApp
+            _notify_phone = (row[3] or row[0] or "").strip() if row else ""
+            if _notify_phone and row[1] and row[2]:
+                try:
+                    notify_owner_escalation(
+                        wa_api_key=row[1], phone_number_id=row[2], owner_phone=_notify_phone,
+                        client_phone=wa_from, reason="Cliente solicitó hablar con un asesor", state=state,
+                    )
+                except Exception as ne:
+                    print("ESCALATION NOTIFY ERROR:", repr(ne))
         except Exception as e:
             print("ESCALATION ERROR:", repr(e))
+        # Build response with wa.me link if phone is available
+        if _atencion_phone:
+            _phone_clean = _atencion_phone.replace("+", "").replace(" ", "").replace("-", "")
+            return (
+                f"Para atención personalizada manda mensaje a:\n"
+                f"👉 https://wa.me/{_phone_clean}\n\n"
+                f"El equipo de *{_company_name_esc}* te atenderá lo más rápido posible 🙏"
+            )
         return (
             "Un asesor te contactará pronto 🙏\n\n"
             "Mientras tanto puedes seguir agregando productos "
@@ -4130,6 +4157,7 @@ class CompanySettingsBody(BaseModel):
     pintura_enabled: Optional[bool] = None
     impermeabilizante_enabled: Optional[bool] = None
     welcome_message: Optional[str] = None
+    telefono_atencion: Optional[str] = None
     @validator('discount_threshold', 'discount_percent', pre=True)
     def coerce_empty_to_none(cls, v):
         if v == '' or v is None:
@@ -4180,6 +4208,7 @@ def company_settings_update(request: Request, body: CompanySettingsBody):
     _add_str(body.welcome_products_hint, "welcome_products_hint")
     _add_str(body.company_name, "name")
     _add_str(body.welcome_message, "welcome_message")
+    _add_str(body.telefono_atencion, "telefono_atencion", strip_spaces=True)
 
     # Numeric fields
     if body.discount_threshold is not None:
@@ -4263,6 +4292,7 @@ def company_settings_get(request: Request):
             ("pintura_enabled", "BOOLEAN DEFAULT FALSE"),
             ("impermeabilizante_enabled", "BOOLEAN DEFAULT FALSE"),
             ("welcome_message", "TEXT"),
+            ("telefono_atencion", "VARCHAR(30)"),
         ]:
             cur.execute(f"""
                 DO $$ BEGIN
@@ -4279,7 +4309,8 @@ def company_settings_get(request: Request):
             SELECT hours_text, address_text, google_maps_url,
                    mercadopago_url, bank_name, bank_account_name, bank_clabe, bank_account_number,
                    owner_phone, email, rfc, brand_color, logo_url,
-                   discount_threshold, discount_percent, welcome_products_hint, welcome_message
+                   discount_threshold, discount_percent, welcome_products_hint, welcome_message,
+                   telefono_atencion
             FROM companies WHERE id=%s LIMIT 1
             """,
             (company_id,),
@@ -4298,6 +4329,7 @@ def company_settings_get(request: Request):
                 "discount_percent":   float(row[14]) if row[14] else None,
                 "welcome_products_hint": row[15] or None,
                 "welcome_message": row[16] or None,
+                "telefono_atencion": row[17] or None,
             },
         }
     finally:
