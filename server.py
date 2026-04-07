@@ -6479,6 +6479,199 @@ def empresa_onboarding_status(request: Request):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# WHATSAPP EMBEDDED SIGNUP — Auto-connect WhatsApp via Meta OAuth
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_META_APP_ID = "1461694011992339"
+_META_APP_SECRET = "28989d2a761e5be1b8ff4eb77c795715"
+_META_GRAPH_VERSION = "v21.0"
+_META_GRAPH_URL = f"https://graph.facebook.com/{_META_GRAPH_VERSION}"
+
+class EmbeddedSignupBody(BaseModel):
+    code: str
+    phone_number_id: Optional[str] = None
+    waba_id: Optional[str] = None
+
+@app.post("/api/whatsapp/embedded-signup")
+def whatsapp_embedded_signup(request: Request, body: EmbeddedSignupBody):
+    """Exchange Meta OAuth code for token, create channel, subscribe webhook."""
+    import requests as http_requests
+    company_id = require_company_id(request)
+    code = (body.code or "").strip()
+    if not code:
+        raise HTTPException(status_code=400, detail="Missing code")
+
+    phone_number_id = (body.phone_number_id or "").strip()
+    waba_id = (body.waba_id or "").strip()
+
+    # Step 1: Exchange code for access token
+    print(f"EMBEDDED SIGNUP: exchanging code for company={company_id}")
+    token_resp = http_requests.get(f"{_META_GRAPH_URL}/oauth/access_token", params={
+        "client_id": _META_APP_ID,
+        "client_secret": _META_APP_SECRET,
+        "code": code,
+    })
+    if token_resp.status_code != 200:
+        print(f"EMBEDDED SIGNUP TOKEN ERROR: {token_resp.status_code} {token_resp.text}")
+        raise HTTPException(status_code=400, detail="Error al obtener token de Meta")
+    token_data = token_resp.json()
+    access_token = token_data.get("access_token")
+    if not access_token:
+        print(f"EMBEDDED SIGNUP: no access_token in response: {token_data}")
+        raise HTTPException(status_code=400, detail="No se obtuvo token de acceso")
+
+    print(f"EMBEDDED SIGNUP: got access token for company={company_id}")
+
+    # Step 2: If we don't have phone_number_id/waba_id from session, try to get from API
+    if not waba_id:
+        # Get shared WABAs
+        try:
+            debug_resp = http_requests.get(
+                f"{_META_GRAPH_URL}/debug_token",
+                params={"input_token": access_token, "access_token": access_token}
+            )
+            debug_data = debug_resp.json().get("data", {})
+            granular = debug_data.get("granular_scopes", [])
+            for scope in granular:
+                if scope.get("scope") == "whatsapp_business_management":
+                    target_ids = scope.get("target_ids", [])
+                    if target_ids:
+                        waba_id = target_ids[0]
+                        break
+            print(f"EMBEDDED SIGNUP: resolved waba_id={waba_id} from debug_token")
+        except Exception as e:
+            print(f"EMBEDDED SIGNUP: debug_token error: {repr(e)}")
+
+    if not phone_number_id and waba_id:
+        # Get phone numbers for this WABA
+        try:
+            phones_resp = http_requests.get(
+                f"{_META_GRAPH_URL}/{waba_id}/phone_numbers",
+                params={"access_token": access_token}
+            )
+            phones_data = phones_resp.json().get("data", [])
+            if phones_data:
+                phone_number_id = phones_data[0].get("id")
+                print(f"EMBEDDED SIGNUP: resolved phone_number_id={phone_number_id}")
+        except Exception as e:
+            print(f"EMBEDDED SIGNUP: phone_numbers error: {repr(e)}")
+
+    if not phone_number_id:
+        print(f"EMBEDDED SIGNUP: could not resolve phone_number_id")
+        raise HTTPException(status_code=400, detail="No se pudo obtener el número de teléfono. Intenta de nuevo.")
+
+    # Step 3: Get phone number display info
+    phone_display = ""
+    try:
+        phone_info_resp = http_requests.get(
+            f"{_META_GRAPH_URL}/{phone_number_id}",
+            params={"access_token": access_token, "fields": "display_phone_number,verified_name"}
+        )
+        phone_info = phone_info_resp.json()
+        phone_display = phone_info.get("display_phone_number", "")
+        verified_name = phone_info.get("verified_name", "")
+        print(f"EMBEDDED SIGNUP: phone={phone_display} name={verified_name}")
+    except Exception as e:
+        print(f"EMBEDDED SIGNUP: phone info error: {repr(e)}")
+
+    # Step 4: Subscribe app to WABA (to receive webhooks)
+    if waba_id:
+        try:
+            sub_resp = http_requests.post(
+                f"{_META_GRAPH_URL}/{waba_id}/subscribed_apps",
+                params={"access_token": access_token}
+            )
+            print(f"EMBEDDED SIGNUP: subscribe app to WABA: {sub_resp.status_code} {sub_resp.text}")
+        except Exception as e:
+            print(f"EMBEDDED SIGNUP: subscribe error: {repr(e)}")
+
+    # Step 5: Register phone number for Cloud API
+    try:
+        reg_resp = http_requests.post(
+            f"{_META_GRAPH_URL}/{phone_number_id}/register",
+            json={"messaging_product": "whatsapp", "pin": "123456"},
+            params={"access_token": access_token}
+        )
+        print(f"EMBEDDED SIGNUP: register phone: {reg_resp.status_code} {reg_resp.text}")
+    except Exception as e:
+        print(f"EMBEDDED SIGNUP: register phone error: {repr(e)}")
+
+    # Step 6: Save to database — create/update channel + update company
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        # Ensure channels table exists with needed columns
+        cur.execute("""
+            DO $$ BEGIN
+                IF NOT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name='channels') THEN
+                    CREATE TABLE channels (
+                        id SERIAL PRIMARY KEY,
+                        company_id UUID NOT NULL REFERENCES companies(id),
+                        provider VARCHAR(50) DEFAULT 'meta',
+                        channel_type VARCHAR(50) DEFAULT 'whatsapp',
+                        meta_phone_number_id VARCHAR(100),
+                        meta_waba_id VARCHAR(100),
+                        address VARCHAR(100),
+                        access_token TEXT,
+                        is_active BOOLEAN DEFAULT TRUE,
+                        created_at TIMESTAMP DEFAULT now(),
+                        updated_at TIMESTAMP DEFAULT now()
+                    );
+                END IF;
+            END $$;
+        """)
+        # Add columns if they don't exist
+        for col, coltype in [
+            ("meta_waba_id", "VARCHAR(100)"),
+            ("access_token", "TEXT"),
+        ]:
+            cur.execute(f"""
+                DO $$ BEGIN
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                        WHERE table_name='channels' AND column_name='{col}')
+                    THEN ALTER TABLE channels ADD COLUMN {col} {coltype};
+                    END IF;
+                END $$;
+            """)
+
+        # Deactivate any existing channels for this company
+        cur.execute("UPDATE channels SET is_active = FALSE WHERE company_id = %s", (company_id,))
+
+        # Insert new channel
+        cur.execute("""
+            INSERT INTO channels (company_id, provider, channel_type, meta_phone_number_id,
+                                  meta_waba_id, address, access_token, is_active)
+            VALUES (%s, 'meta', 'whatsapp', %s, %s, %s, %s, TRUE)
+            RETURNING id
+        """, (company_id, phone_number_id, waba_id, phone_display, access_token))
+        channel_id = cur.fetchone()[0]
+
+        # Also update company's wa fields for backward compat
+        cur.execute("""
+            UPDATE companies
+            SET wa_api_key = %s, wa_phone_number_id = %s, updated_at = now()
+            WHERE id = %s
+        """, (access_token, phone_number_id, company_id))
+
+        conn.commit()
+        print(f"EMBEDDED SIGNUP: SUCCESS company={company_id} channel={channel_id} phone={phone_display}")
+        return {
+            "ok": True,
+            "channel_id": channel_id,
+            "phone_number_id": phone_number_id,
+            "waba_id": waba_id,
+            "phone_display": phone_display,
+        }
+    except Exception as e:
+        conn.rollback()
+        print(f"EMBEDDED SIGNUP DB ERROR: {repr(e)}")
+        raise HTTPException(status_code=500, detail="Error al guardar la configuración")
+    finally:
+        cur.close()
+        conn.close()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # ADMIN PANEL — God mode para CotizaExpress (solo cuentas admin)
 # ═══════════════════════════════════════════════════════════════════════════════
 
