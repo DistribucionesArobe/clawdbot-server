@@ -27,7 +27,12 @@ _SQL_TRANSLATE_TO   = "aeiouAEIOUnNvVsS"
 def _phonetic(s: str) -> str:
     """Accent-strip + phonetic normalize: 'abrasadera' → 'avrasadera'"""
     out = _strip_accents(s)
-    return out.replace("b", "v").replace("B", "V").replace("z", "s").replace("Z", "S")
+    out = out.replace("b", "v").replace("B", "V").replace("z", "s").replace("Z", "S")
+    # Strip dots that are NOT decimal points: "CAL." → "CAL" but "14.5" stays "14.5"
+    import re as _re2
+    out = _re2.sub(r"\.(?!\d)", " ", out)  # dot NOT followed by digit → space
+    out = _re2.sub(r"\s+", " ", out).strip()
+    return out
 
 
 def _sql_translate(col: str) -> str:
