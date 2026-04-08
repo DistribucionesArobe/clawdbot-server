@@ -293,10 +293,10 @@ def extract_qty_and_product(text: str):
     """Extract quantity and product from text like '10 tubos' or '2 atados de poste'.
     Returns (qty, product, is_bundle) where is_bundle=True if customer used bundle words."""
     t = (text or "").strip().lower()
-    m = re.match(r"^\s*(\d+)(?!\.)\s+(.+?)\s*$", t)
+    m = re.match(r"^\s*(\d+(?:\.\d+)?)\s+(.+?)\s*$", t)
     if not m:
         return None, None, False
-    qty = int(m.group(1))
+    qty = int(float(m.group(1)))  # "175.00" → 175
     product = m.group(2).strip()
     # Detect bundle: "2 atados de poste" → qty=2, product="poste", is_bundle=True
     bundle_match = re.match(r"^(atados?|paquetes?|bultos?|cajas?)\s+(?:de\s+)?(.+)$", product)
@@ -1019,6 +1019,8 @@ def extract_text_from_image(image_bytes: bytes) -> str | None:
                         "captura de pantalla, o una foto de un pedido. "
                         "Extrae TODOS los productos con sus cantidades, sin omitir ninguno. "
                         "Formato estricto: CANTIDAD PRODUCTO, un item por línea. "
+                        "La cantidad siempre debe ser un número entero (sin decimales). "
+                        "Si ves '175.00', escribe '175'. Si ves '20.00', escribe '20'. "
                         "Si la imagen es una tabla con columnas (ej: Conceptos | Cantidad), "
                         "lee CADA fila y pon la cantidad antes del nombre del producto. "
                         "Productos comunes: poste, tablaroca, cemento, varilla, block, "
@@ -6014,9 +6016,9 @@ def extract_qty_items_robust(text: str):
             for sub in sub_parts:
                 # Restaurar specs protegidas: SPEC_2_metros → "2 metros"
                 sub = re.sub(r"SPEC_(\d+(?:\.\d+)?)_(\w+)", r"\1 \2", sub)
-                m = re.match(r"^\s*(\d+)\s+(.+)$", sub.strip())
+                m = re.match(r"^\s*(\d+(?:\.\d+)?)\s+(.+)$", sub.strip())
                 if m:
-                    qty = int(m.group(1))
+                    qty = int(float(m.group(1)))  # "175.00" → 175
                     last_qty = qty
                     prod = m.group(2).replace("_", "/").strip()
                 else:
