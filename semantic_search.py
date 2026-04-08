@@ -999,6 +999,13 @@ def seed_jerga_global(conn):
         ("canaleta carga", "canaleta de carga"),
         ("canaletas de carga", "canaleta de carga"),
         ("canaletas carga", "canaleta de carga"),
+        ("canaleta ca", "canaleta de carga"),
+        ("canaleta CA", "canaleta de carga"),
+        # Cinta papel / perfacinta (USG brand for paper tape)
+        ("cinta papel", "perfacinta"),
+        ("cinta de papel", "perfacinta"),
+        ("cinta papel usg", "perfacinta"),
+        ("cinta de papel usg", "perfacinta"),
         # Rejas / rejacero
         ("reja", "rejacero"),
         ("rejas", "rejacero"),
@@ -1210,6 +1217,8 @@ def llm_normalize_query(conn, company_id: str, user_query: str, tenant_context: 
             "- 'tr std' → 'tablaroca estandar'\n"
             "- 'tablarock' → 'tablaroca'\n"
             "- 'panel de yeso' → 'tablaroca'\n"
+            "- 'cinta papel' → 'perfacinta'\n"
+            "- 'canaleta CA' → 'canaleta de carga'\n"
             "- 'durok' → 'durock'\n"
             "- 'pste 6.35' → 'poste 6.35'\n"
             "- 'base coat' → 'basecoat'\n"

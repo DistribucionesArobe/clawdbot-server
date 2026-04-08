@@ -1027,6 +1027,8 @@ def extract_text_from_image(image_bytes: bytes) -> str | None:
                         "malla, perfacinta, redimix, canal, tornillo, clavo, tubo, pija, "
                         "durock, basecoat, ángulo, canaleta, reborde, taquete. "
                         "Conserva medidas y especificaciones tal cual aparecen (ej: 'Cal 26', '1/2\"', '6 x 1', '10 x 1 1/2'). "
+                        "Expande abreviaturas comunes: 'C24' o 'C-24' → 'cal 24', 'C26' → 'cal 26', "
+                        "'CA' → 'carga', 'STD' → 'estandar'. "
                         "Si una palabra parece un producto con error ortográfico, corrígela. "
                         "Ignora encabezados, totales, fechas, logos y textos que no sean productos. "
                         "Si un renglón existe pero no puedes leerlo, escribe: 1 ???. "
