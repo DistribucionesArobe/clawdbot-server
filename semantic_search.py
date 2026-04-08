@@ -972,12 +972,37 @@ def seed_jerga_global(conn):
         ("tornillo para taquete", "pija para taquete"),
         ("tornillo pa taquete", "pija para taquete"),
         ("tornillos para taquete", "pija para taquete"),
-        # Tablaroca / hojas
+        # Tablaroca / hojas / panel de yeso (genérico)
         ("hojas", "tablaroca"),
         ("hoja", "tablaroca"),
         ("hojas tablaroca", "tablaroca"),
         ("hojas de tablaroca", "tablaroca"),
         ("laminas tablaroca", "tablaroca"),
+        ("panel de yeso", "tablaroca"),
+        ("panel yeso", "tablaroca"),
+        ("paneles de yeso", "tablaroca"),
+        ("panel d yeso", "tablaroca"),
+        ("panel de lleso", "tablaroca"),
+        ("lamina de yeso", "tablaroca"),
+        ("laminas de yeso", "tablaroca"),
+        ("hoja de yeso", "tablaroca"),
+        ("hojas de yeso", "tablaroca"),
+        ("placa de yeso", "tablaroca"),
+        ("placas de yeso", "tablaroca"),
+        # Panel Rey brand → tablaroca (competitor brand)
+        ("lightrey", "tablaroca ultralight"),
+        ("light rey", "tablaroca ultralight"),
+        ("panel rey", "tablaroca"),
+        ("panel rey lightrey", "tablaroca ultralight"),
+        ("panel de yeso lightrey", "tablaroca ultralight"),
+        ("panel yeso lightrey", "tablaroca ultralight"),
+        ("panel de yeso light rey", "tablaroca ultralight"),
+        ("panel rey mr", "tablaroca anti-moho"),
+        ("panel rey resistente a humedad", "tablaroca anti-moho"),
+        # Cinta papel (genérico y Panel Rey)
+        ("cinta papel panel rey", "cinta papel"),
+        ("cinta de papel panel rey", "cinta papel"),
+        ("cinta panel rey", "cinta papel"),
         # Canaletas / cargadoras
         ("cargadoras", "canaleta de carga"),
         ("cargadora", "canaleta de carga"),
@@ -1193,6 +1218,9 @@ def llm_normalize_query(conn, company_id: str, user_query: str, tenant_context: 
             "- 'tablaroca rh' → 'tablaroca anti-moho'\n"
             "- 'tr std' → 'tablaroca estandar'\n"
             "- 'tablarock' → 'tablaroca'\n"
+            "- 'panel de yeso' → 'tablaroca'\n"
+            "- 'panel yeso lightrey' → 'tablaroca ultralight'\n"
+            "- 'cinta papel panel rey' → 'cinta papel'\n"
             "- 'durok' → 'durock'\n"
             "- 'pste 6.35' → 'poste 6.35'\n"
             "- 'base coat' → 'basecoat'\n"
