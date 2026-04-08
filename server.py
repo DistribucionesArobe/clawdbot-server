@@ -7211,6 +7211,59 @@ def company_jerga_list(request: Request):
         if cur: cur.close()
         if conn: conn.close()
 
+class BrandSuggestBody(BaseModel):
+    marcas_propias: str = ""
+    giro: str = ""
+
+@app.post("/api/company/suggest-brands")
+def suggest_competitor_brands(request: Request, body: BrandSuggestBody):
+    """Use AI to suggest competitor brands based on the tenant's own brands."""
+    require_company_id(request)
+    if not openai_client:
+        return {"suggestions": []}
+    marcas = (body.marcas_propias or "").strip()
+    giro = (body.giro or "").strip()
+    if not marcas and not giro:
+        return {"suggestions": []}
+    try:
+        prompt = (
+            "Eres experto en el mercado de materiales de construcción, ferretería y distribución en México.\n\n"
+            f"Este negocio vende estas marcas: {marcas}\n"
+        )
+        if giro:
+            prompt += f"Giro del negocio: {giro}\n"
+        prompt += (
+            "\nPara CADA marca que vende, lista las marcas COMPETIDORAS directas en México "
+            "(marcas que venden productos equivalentes/similares). "
+            "Incluye también los nombres comerciales de productos específicos de esas marcas "
+            "que los clientes podrían usar como sinónimo.\n\n"
+            "Ejemplos:\n"
+            "- USG/Tablaroca → competidores: Panel Rey (productos: Lightrey, MR Panel Rey, Volcanrey)\n"
+            "- Redimix USG → competidores: Knauf (Readyfix), Panel Rey (Compuesto PR)\n"
+            "- Coflex → competidores: Rugo, Nacobre\n"
+            "- Truper → competidores: Surtej, Pretul, Surtek\n\n"
+            "Responde SOLO con una lista de marcas/nombres separados por coma, sin explicaciones. "
+            "No repitas las marcas que el negocio ya vende. "
+            "Máximo 15 sugerencias, las más relevantes primero."
+        )
+        resp = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            max_tokens=200,
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+        # Parse comma-separated list, clean up
+        suggestions = [s.strip() for s in raw.split(",") if s.strip()]
+        # Remove any that match the tenant's own brands
+        _own = set(m.strip().lower() for m in marcas.split(",") if m.strip())
+        suggestions = [s for s in suggestions if s.lower() not in _own]
+        return {"suggestions": suggestions[:15]}
+    except Exception as e:
+        print(f"BRAND SUGGEST ERROR: {repr(e)}")
+        return {"suggestions": []}
+
+
 @app.post("/api/company/jerga")
 def company_jerga_create(request: Request, body: JergaLocalBody):
     """Crear/actualizar equivalencia local."""
