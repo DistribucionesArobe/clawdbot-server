@@ -1899,18 +1899,35 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
         # ── PASO -1 + 0.5: Normalización LLM de jerga ────────────────────────
         print(f"SMART SEARCH q='{q}' original='{user_query}' context='{cart_context[:50]}'")
 
+        tenant_context = ""
+        _marcas_propias = ""
+        _marcas_competencia = ""
         try:
             cur_ctx = conn.cursor()
-            cur_ctx.execute("SELECT tenant_context, marcas_propias, marcas_competencia FROM companies WHERE id = %s LIMIT 1", (company_id,))
-            row_ctx = cur_ctx.fetchone()
+            # First try with brand columns; if they don't exist yet, fall back to just tenant_context
+            try:
+                cur_ctx.execute("SELECT tenant_context, marcas_propias, marcas_competencia FROM companies WHERE id = %s LIMIT 1", (company_id,))
+                row_ctx = cur_ctx.fetchone()
+                if row_ctx:
+                    tenant_context = row_ctx[0] or ""
+                    _marcas_propias = row_ctx[1] or ""
+                    _marcas_competencia = row_ctx[2] or ""
+            except Exception:
+                conn.rollback()  # CRITICAL: reset aborted transaction state
+                try:
+                    cur_ctx.execute("SELECT tenant_context FROM companies WHERE id = %s LIMIT 1", (company_id,))
+                    row_ctx = cur_ctx.fetchone()
+                    if row_ctx:
+                        tenant_context = row_ctx[0] or ""
+                except Exception:
+                    conn.rollback()
             cur_ctx.close()
-            tenant_context = (row_ctx[0] or "") if row_ctx else ""
-            _marcas_propias = (row_ctx[1] or "") if row_ctx else ""
-            _marcas_competencia = (row_ctx[2] or "") if row_ctx else ""
-        except Exception:
-            tenant_context = ""
-            _marcas_propias = ""
-            _marcas_competencia = ""
+        except Exception as e:
+            print(f"TENANT CONTEXT ERROR: {repr(e)}")
+            try:
+                conn.rollback()
+            except Exception:
+                pass
 
         q_pre_llm = q  # guardar query antes de normalizar para cachear después
         # Pass original (non-phonetic) query to LLM so it understands the words correctly
