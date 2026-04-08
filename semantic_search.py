@@ -1166,9 +1166,31 @@ def llm_normalize_query(conn, company_id: str, user_query: str, tenant_context: 
 
     # 2.5. Reemplazo parcial: si la query tiene specs (ej "rejas blancas 2 metro"),
     # buscar sub-frases en la jerga global y reemplazarlas, conservando el resto.
+    # SKIP partial matching if query contains competitor brand words — let the LLM
+    # normalizer handle the full translation (e.g. "panel yeso lightrey" → "tablaroca ultralight")
+    _skip_partial = False
+    if marcas_competencia:
+        _comp_brands = [b.strip().lower() for b in marcas_competencia.split(",") if b.strip()]
+        # Extract individual words from brand names (e.g. "Panel Rey" → ["panel", "rey"])
+        _comp_words = set()
+        for b in _comp_brands:
+            for w in b.split():
+                if len(w) >= 4:  # skip short words like "de", "la"
+                    _comp_words.add(w)
+        _q_words = [w for w in q.lower().split() if len(w) >= 4]
+        # Use fuzzy matching to catch OCR typos (e.g. "ligthrey" ≈ "lightrey")
+        for qw in _q_words:
+            for cw in _comp_words:
+                if qw == cw or fuzz.ratio(qw, cw) >= 80:
+                    _skip_partial = True
+                    break
+            if _skip_partial:
+                break
+        if _skip_partial:
+            print(f"PARTIAL SKIP: competitor brand word detected in '{q}', deferring to LLM normalizer")
     try:
         words = q.split()
-        if len(words) >= 2:
+        if len(words) >= 2 and not _skip_partial:
             cur = conn.cursor()
             best_match = None
             best_len = 0
@@ -1836,6 +1858,18 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
 
         q_medida, q_cal = _extract_specs(q)
 
+        # Strip standard sheet/product dimensions from q (same cleanup as _llm_input)
+        # Done AFTER _extract_specs so calibre/medida are already captured
+        _q_before_dim_strip = q
+        q = re.sub(r"\b\d+(?:\.\d+)?\s*(?:cm|mm)\s*x\s*\d+(?:\.\d+)?\s*(?:m|cm|mm|mts?)\b", "", q, flags=re.IGNORECASE)
+        q = re.sub(r"\b\d+(?:\.\d+)?\s*(?:m|mts?)\s*x\s*\d+(?:\.\d+)?\s*(?:m|mts?)\b", "", q, flags=re.IGNORECASE)
+        q = re.sub(r"\b\d+(?:\.\d+)?\s*(?:mm)\b", "", q, flags=re.IGNORECASE)
+        q = re.sub(r"\bx\s*\d+(?:\.\d+)?\s*(?:m|mts?)\b", "", q, flags=re.IGNORECASE)
+        q = re.sub(r"\s+", " ", q).strip()
+        if q != _q_before_dim_strip:
+            print(f"DIM STRIP: '{_q_before_dim_strip}' → '{q}'")
+            q_tokens = [t for t in q.split() if t not in _stopwords]
+
         # ── PASO -2: Near-exact product name match (pre-LLM) ────────────────
         # Before LLM normalize can simplify specific queries like "pija 10 x 1 1/2",
         # check if the cleaned query already matches a product name very closely.
@@ -1883,6 +1917,25 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
         # (phonetic transforms like b→v confuse the LLM: "brocha"→"vrocha"→LLM thinks "viga")
         _llm_input = _strip_accents(user_query.lower().strip())
         _llm_input = re.sub(_packaging_words_re, "", _llm_input, flags=re.IGNORECASE).strip()
+        # Strip standard sheet/product dimensions that come from OCR of competitor tables
+        # e.g. "1.22 M x 2.44 M 12.7 MM", "5.08 CM x 76.25 M", "x 3.05 M"
+        # These add noise — the search engine uses q_medida/q_cal for spec matching separately
+        _llm_input = re.sub(
+            r"\b\d+(?:\.\d+)?\s*(?:cm|mm)\s*x\s*\d+(?:\.\d+)?\s*(?:m|cm|mm|mts?)\b",
+            "", _llm_input, flags=re.IGNORECASE
+        )  # "5.08 CM x 76.25 M"
+        _llm_input = re.sub(
+            r"\b\d+(?:\.\d+)?\s*(?:m|mts?)\s*x\s*\d+(?:\.\d+)?\s*(?:m|mts?)\b",
+            "", _llm_input, flags=re.IGNORECASE
+        )  # "1.22 M x 2.44 M"
+        _llm_input = re.sub(
+            r"\b\d+(?:\.\d+)?\s*(?:mm|MM)\b",
+            "", _llm_input, flags=re.IGNORECASE
+        )  # "12.7 MM" (standalone thickness)
+        _llm_input = re.sub(
+            r"\bx\s*\d+(?:\.\d+)?\s*(?:m|mts?)\b",
+            "", _llm_input, flags=re.IGNORECASE
+        )  # "x 3.05 M" (trailing length)
         _llm_input = re.sub(r"\s+", " ", _llm_input).strip()
         q_llm, norm_source = llm_normalize_query(conn, company_id, _llm_input or q, tenant_context,
                                                     marcas_propias=_marcas_propias,
