@@ -989,20 +989,10 @@ def seed_jerga_global(conn):
         ("hojas de yeso", "tablaroca"),
         ("placa de yeso", "tablaroca"),
         ("placas de yeso", "tablaroca"),
-        # Panel Rey brand → tablaroca (competitor brand)
-        ("lightrey", "tablaroca ultralight"),
-        ("light rey", "tablaroca ultralight"),
-        ("panel rey", "tablaroca"),
-        ("panel rey lightrey", "tablaroca ultralight"),
-        ("panel de yeso lightrey", "tablaroca ultralight"),
-        ("panel yeso lightrey", "tablaroca ultralight"),
-        ("panel de yeso light rey", "tablaroca ultralight"),
-        ("panel rey mr", "tablaroca anti-moho"),
-        ("panel rey resistente a humedad", "tablaroca anti-moho"),
-        # Cinta papel (genérico y Panel Rey)
-        ("cinta papel panel rey", "cinta papel"),
-        ("cinta de papel panel rey", "cinta papel"),
-        ("cinta panel rey", "cinta papel"),
+        # NOTE: Competitor brand mappings (Panel Rey, Crest, etc.) are NOT hardcoded here.
+        # They are handled dynamically by the LLM normalizer using each tenant's
+        # marcas_propias / marcas_competencia configuration. This scales across all
+        # brands and industries without code changes.
         # Canaletas / cargadoras
         ("cargadoras", "canaleta de carga"),
         ("cargadora", "canaleta de carga"),
@@ -1122,7 +1112,8 @@ def _validate_term_in_catalog(conn, normalized: str) -> bool:
         cur.close()
 
 
-def llm_normalize_query(conn, company_id: str, user_query: str, tenant_context: str = ""):
+def llm_normalize_query(conn, company_id: str, user_query: str, tenant_context: str = "",
+                        marcas_propias: str = "", marcas_competencia: str = ""):
     """
     Normaliza jerga del usuario. Retorna tupla (normalized_text, source).
     source: 'local', 'global', 'llm', 'none'
@@ -1219,8 +1210,6 @@ def llm_normalize_query(conn, company_id: str, user_query: str, tenant_context: 
             "- 'tr std' → 'tablaroca estandar'\n"
             "- 'tablarock' → 'tablaroca'\n"
             "- 'panel de yeso' → 'tablaroca'\n"
-            "- 'panel yeso lightrey' → 'tablaroca ultralight'\n"
-            "- 'cinta papel panel rey' → 'cinta papel'\n"
             "- 'durok' → 'durock'\n"
             "- 'pste 6.35' → 'poste 6.35'\n"
             "- 'base coat' → 'basecoat'\n"
@@ -1233,6 +1222,21 @@ def llm_normalize_query(conn, company_id: str, user_query: str, tenant_context: 
             "- 'pija pada tablaroca' → 'pija para tablaroca'\n"
             "Si ya es un término estándar, regrésalo igual."
         )
+        # Brand-aware context: teach the LLM to map competitor brands → tenant's brands
+        if marcas_propias or marcas_competencia:
+            system += "\n\nREGLA DE MARCAS (muy importante):"
+            if marcas_propias:
+                system += f"\nEste negocio vende estas marcas: {marcas_propias}."
+            if marcas_competencia:
+                system += (
+                    f"\nMarcas de la competencia: {marcas_competencia}."
+                    "\nCuando el cliente pida un producto usando una marca de competencia, "
+                    "ELIMINA la marca del producto y deja solo el nombre genérico del producto. "
+                    "Ejemplos: 'panel de yeso lightrey' → 'tablaroca ultralight', "
+                    "'compuesto panel rey' → 'redimix', 'cinta panel rey' → 'cinta papel', "
+                    "'tornillo crest' → 'tornillo'. "
+                    "El objetivo es que el término resultante coincida con un producto del catálogo del negocio."
+                )
         if tenant_context:
             system += f"\n\nContexto del negocio: {tenant_context}"
 
@@ -1253,27 +1257,53 @@ def llm_normalize_query(conn, company_id: str, user_query: str, tenant_context: 
 
         print(f"LLM NORMALIZE: '{q}' → '{normalized}'")
 
-        # Validar que el término normalizado exista en algún catálogo
-        # antes de guardarlo — evita guardar basura como "framer" → "estructura"
-        if _validate_term_in_catalog(conn, normalized):
+        # Determine if this normalization involved competitor brand removal
+        # If so, save to LOCAL jerga (per-tenant) since brand mappings are tenant-specific
+        _is_brand_based = False
+        if marcas_competencia:
+            _comp_brands = [b.strip().lower() for b in marcas_competencia.split(",") if b.strip()]
+            _q_lower = q.lower()
+            _is_brand_based = any(brand in _q_lower for brand in _comp_brands if len(brand) >= 3)
+
+        if _is_brand_based:
+            # Save to LOCAL jerga (per-tenant) — brand mappings differ per business
             try:
                 cur = conn.cursor()
                 cur.execute(
-                    "INSERT INTO diccionario_jerga_global "
-                    "(termino_original, termino_normalizado, is_protected, source, usage_count, success_count) "
-                    "VALUES (%s, %s, FALSE, 'llm', 1, 0) "
-                    "ON CONFLICT (termino_original) DO UPDATE "
+                    "INSERT INTO diccionario_jerga_local "
+                    "(company_id, termino_original, termino_normalizado, source, usage_count) "
+                    "VALUES (%s, %s, %s, 'llm_brand', 1) "
+                    "ON CONFLICT (company_id, termino_original) DO UPDATE "
                     "SET termino_normalizado = EXCLUDED.termino_normalizado, "
-                    "    usage_count = diccionario_jerga_global.usage_count + 1 "
-                    "WHERE NOT diccionario_jerga_global.is_protected",
-                    (q, normalized),
+                    "    usage_count = diccionario_jerga_local.usage_count + 1",
+                    (company_id, q, normalized),
                 )
                 cur.close()
-                print(f"JERGA GLOBAL SAVED: '{q}' → '{normalized}' (validated, source=llm)")
+                print(f"JERGA LOCAL SAVED (brand): '{q}' → '{normalized}' for company={company_id}")
             except Exception as e:
-                print(f"JERGA GLOBAL SAVE ERROR: {repr(e)}")
+                print(f"JERGA LOCAL SAVE ERROR: {repr(e)}")
         else:
-            print(f"JERGA GLOBAL REJECTED: '{q}' → '{normalized}' (not found in any catalog)")
+            # Validar que el término normalizado exista en algún catálogo
+            # antes de guardarlo — evita guardar basura como "framer" → "estructura"
+            if _validate_term_in_catalog(conn, normalized):
+                try:
+                    cur = conn.cursor()
+                    cur.execute(
+                        "INSERT INTO diccionario_jerga_global "
+                        "(termino_original, termino_normalizado, is_protected, source, usage_count, success_count) "
+                        "VALUES (%s, %s, FALSE, 'llm', 1, 0) "
+                        "ON CONFLICT (termino_original) DO UPDATE "
+                        "SET termino_normalizado = EXCLUDED.termino_normalizado, "
+                        "    usage_count = diccionario_jerga_global.usage_count + 1 "
+                        "WHERE NOT diccionario_jerga_global.is_protected",
+                        (q, normalized),
+                    )
+                    cur.close()
+                    print(f"JERGA GLOBAL SAVED: '{q}' → '{normalized}' (validated, source=llm)")
+                except Exception as e:
+                    print(f"JERGA GLOBAL SAVE ERROR: {repr(e)}")
+            else:
+                print(f"JERGA GLOBAL REJECTED: '{q}' → '{normalized}' (not found in any catalog)")
 
         return normalized, "llm"
 
@@ -1828,12 +1858,16 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
 
         try:
             cur_ctx = conn.cursor()
-            cur_ctx.execute("SELECT tenant_context FROM companies WHERE id = %s LIMIT 1", (company_id,))
+            cur_ctx.execute("SELECT tenant_context, marcas_propias, marcas_competencia FROM companies WHERE id = %s LIMIT 1", (company_id,))
             row_ctx = cur_ctx.fetchone()
             cur_ctx.close()
             tenant_context = (row_ctx[0] or "") if row_ctx else ""
+            _marcas_propias = (row_ctx[1] or "") if row_ctx else ""
+            _marcas_competencia = (row_ctx[2] or "") if row_ctx else ""
         except Exception:
             tenant_context = ""
+            _marcas_propias = ""
+            _marcas_competencia = ""
 
         q_pre_llm = q  # guardar query antes de normalizar para cachear después
         # Pass original (non-phonetic) query to LLM so it understands the words correctly
@@ -1841,7 +1875,9 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
         _llm_input = _strip_accents(user_query.lower().strip())
         _llm_input = re.sub(_packaging_words_re, "", _llm_input, flags=re.IGNORECASE).strip()
         _llm_input = re.sub(r"\s+", " ", _llm_input).strip()
-        q_llm, norm_source = llm_normalize_query(conn, company_id, _llm_input or q, tenant_context)
+        q_llm, norm_source = llm_normalize_query(conn, company_id, _llm_input or q, tenant_context,
+                                                    marcas_propias=_marcas_propias,
+                                                    marcas_competencia=_marcas_competencia)
         # Apply phonetic to LLM result for consistency with rest of search
         q_llm = _phonetic(q_llm)
         if q_llm != q:
