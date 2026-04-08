@@ -1175,6 +1175,7 @@ def llm_normalize_query(conn, company_id: str, user_query: str, tenant_context: 
     # normalizer handle the full translation (e.g. "panel yeso lightrey" → "tablaroca ultralight")
     _skip_partial = False
     if marcas_competencia:
+        from rapidfuzz import fuzz as _fuzz_local
         _comp_brands = [b.strip().lower() for b in marcas_competencia.split(",") if b.strip()]
         # Extract individual words from brand names (e.g. "Panel Rey" → ["panel", "rey"])
         _comp_words = set()
@@ -1186,7 +1187,7 @@ def llm_normalize_query(conn, company_id: str, user_query: str, tenant_context: 
         # Use fuzzy matching to catch OCR typos (e.g. "ligthrey" ≈ "lightrey")
         for qw in _q_words:
             for cw in _comp_words:
-                if qw == cw or fuzz.ratio(qw, cw) >= 80:
+                if qw == cw or _fuzz_local.ratio(qw, cw) >= 80:
                     _skip_partial = True
                     break
             if _skip_partial:
