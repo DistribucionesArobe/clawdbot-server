@@ -7125,6 +7125,89 @@ def admin_jerga_delete(request: Request, termino: str):
         if conn: conn.close()
 
 
+# ── Per-tenant jerga local (equivalencias de marca / sinónimos locales) ──────
+
+class JergaLocalBody(BaseModel):
+    termino_original: str
+    termino_normalizado: str
+
+@app.get("/api/company/jerga")
+def company_jerga_list(request: Request):
+    """Lista la jerga local del tenant (equivalencias de marcas, sinónimos propios)."""
+    company_id = require_company_id(request)
+    conn = None; cur = None
+    try:
+        conn = get_conn(); cur = conn.cursor()
+        cur.execute(
+            "SELECT termino_original, termino_normalizado, source, usage_count "
+            "FROM diccionario_jerga_local WHERE company_id = %s "
+            "ORDER BY termino_original",
+            (company_id,),
+        )
+        rows = cur.fetchall()
+        return {"ok": True, "jerga": [
+            {"termino_original": r[0], "termino_normalizado": r[1],
+             "source": r[2] or "manual", "usage_count": r[3] or 0}
+            for r in rows
+        ]}
+    except Exception as e:
+        print(f"JERGA LOCAL LIST: {repr(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
+
+@app.post("/api/company/jerga")
+def company_jerga_create(request: Request, body: JergaLocalBody):
+    """Crear/actualizar equivalencia local."""
+    company_id = require_company_id(request)
+    orig = body.termino_original.strip().lower()
+    norm = body.termino_normalizado.strip()
+    if not orig or not norm:
+        raise HTTPException(status_code=400, detail="Ambos campos son requeridos")
+    conn = None; cur = None
+    try:
+        conn = get_conn(); cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO diccionario_jerga_local "
+            "(company_id, termino_original, termino_normalizado, source, usage_count) "
+            "VALUES (%s, %s, %s, 'manual', 0) "
+            "ON CONFLICT (company_id, termino_original) DO UPDATE "
+            "SET termino_normalizado = EXCLUDED.termino_normalizado, source = 'manual'",
+            (company_id, orig, norm),
+        )
+        return {"ok": True, "termino_original": orig, "termino_normalizado": norm}
+    except Exception as e:
+        print(f"JERGA LOCAL CREATE: {repr(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
+
+@app.delete("/api/company/jerga/{termino}")
+def company_jerga_delete(request: Request, termino: str):
+    """Eliminar equivalencia local."""
+    company_id = require_company_id(request)
+    conn = None; cur = None
+    try:
+        conn = get_conn(); cur = conn.cursor()
+        cur.execute(
+            "DELETE FROM diccionario_jerga_local WHERE company_id = %s AND termino_original = %s",
+            (company_id, termino.strip().lower()),
+        )
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Término no encontrado")
+        return {"ok": True, "deleted": termino}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"JERGA LOCAL DELETE: {repr(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
+
+
 @app.get("/api/admin/query-log")
 def admin_query_log(request: Request, days: int = 1, limit: int = 100,
                     status: Optional[str] = None, company_id: Optional[str] = None):
