@@ -1012,23 +1012,29 @@ def extract_text_from_image(image_bytes: bytes) -> str | None:
             messages=[{
                 "role": "user",
                 "content": [
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}", "detail": "low"}},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}", "detail": "high"}},
                     {"type": "text", "text": (
-                        "Eres asistente de ferretería mexicana. Esta imagen es una lista "
-                        "de materiales manuscrita. Extrae SOLO los productos con sus cantidades. "
+                        "Eres asistente de ferretería mexicana. Esta imagen contiene una lista "
+                        "de materiales. Puede ser una nota manuscrita, una tabla digital, una "
+                        "captura de pantalla, o una foto de un pedido. "
+                        "Extrae TODOS los productos con sus cantidades, sin omitir ninguno. "
                         "Formato estricto: CANTIDAD PRODUCTO, un item por línea. "
+                        "Si la imagen es una tabla con columnas (ej: Conceptos | Cantidad), "
+                        "lee CADA fila y pon la cantidad antes del nombre del producto. "
                         "Productos comunes: poste, tablaroca, cemento, varilla, block, "
-                        "malla, perfacinta, redimix, canal, tornillo, clavo, tubo. "
-                        "Si una palabra parece un producto de ferretería con error ortográfico, corrígela. "
-                        "Ejemplo: 'paste' → 'poste', 'tablroca' → 'tablaroca'. "
-                        "Ignora palabras sueltas que no sean productos (Menu, Total, Fecha, etc). "
-                        "Si un renglón existe pero no puedes leerlo claramente, escribe: 1 ???. "
-                        "Ejemplo de salida:\n10 sacos cemento\n5 varilla 3/8\n1 ???\n2 cubetas pintura\n"
+                        "malla, perfacinta, redimix, canal, tornillo, clavo, tubo, pija, "
+                        "durock, basecoat, ángulo, canaleta, reborde, taquete. "
+                        "Conserva medidas y especificaciones tal cual aparecen (ej: 'Cal 26', '1/2\"', '6 x 1', '10 x 1 1/2'). "
+                        "Si una palabra parece un producto con error ortográfico, corrígela. "
+                        "Ignora encabezados, totales, fechas, logos y textos que no sean productos. "
+                        "Si un renglón existe pero no puedes leerlo, escribe: 1 ???. "
+                        "NO agregues productos que no estén en la imagen. "
+                        "Ejemplo de salida:\n20 tablaroca ultralight USG\n50 ángulo amarre cal 26\n1200 pija 6 x 1\n"
                         "Si no hay lista de productos en absoluto, responde exactamente: NO_LIST"
                     )}
                 ]
             }],
-            max_tokens=300, temperature=0.1,
+            max_tokens=800, temperature=0.1,
         )
         result = (resp.choices[0].message.content or "").strip()
         return None if result == "NO_LIST" else result
@@ -3485,7 +3491,16 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                                  "producto no identificado", "producto desconocido", "desconocido",
                                  "no se entiende", "no legible"}
                 if prod_raw.strip().lower() in _skip_phrases or prod_raw.strip() == "???":
-                    missing.append({"qty": qty, "raw": "producto ilegible", "candidates": []})
+                    # Count illegible items but only add ONE summary entry (avoid 76x "ilegible" spam)
+                    _illegible_count = sum(1 for m in missing if m.get("raw") == "producto ilegible")
+                    if _illegible_count == 0:
+                        missing.append({"qty": qty, "raw": "producto ilegible", "candidates": []})
+                    else:
+                        # Update the existing illegible entry count
+                        for m in missing:
+                            if m.get("raw") == "producto ilegible":
+                                m["qty"] = m.get("qty", 1) + qty
+                                break
                     continue
                 steps = get_spec_steps(prod_raw)
                 if steps and not already_has_specs(prod_raw, steps):

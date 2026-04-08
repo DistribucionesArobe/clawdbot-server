@@ -1613,13 +1613,27 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
             }
 
         def _resolve_default(candidates_items):
-            """If exactly one candidate has is_default=True, return it as 'found'."""
+            """If exactly one candidate has is_default=True, return it as 'found'.
+            But ONLY if no other candidate is a significantly better match for the query.
+            E.g. query='tablaroca WR' should NOT default to 'Tablaroca ultralight' even if ultralight is_default."""
             defaults = [c for c in candidates_items if c.get("is_default")]
-            if len(defaults) == 1:
-                print(f"DEFAULT RESOLVED: '{user_query}' → '{defaults[0]['name']}' (is_default=True)")
-                _log_event("found", "default_resolved", defaults[0])
-                return {"status": "found", "item": defaults[0], "candidates": []}
-            return None  # no single default, stay ambiguous
+            if len(defaults) != 1:
+                return None
+            default_item = defaults[0]
+            # Check if any NON-default candidate scores much higher against the query
+            _q_ph = _phonetic(q)
+            _def_score = fuzz.token_set_ratio(_q_ph, _phonetic((default_item.get("name") or "").lower()))
+            for c in candidates_items:
+                if c.get("is_default"):
+                    continue
+                _c_score = fuzz.token_set_ratio(_q_ph, _phonetic((c.get("name") or "").lower()))
+                if _c_score > _def_score + 5:
+                    # A non-default candidate is a better match — don't use default
+                    print(f"DEFAULT SKIPPED: '{user_query}' → '{c['name']}' (score={_c_score}) beats default '{default_item['name']}' (score={_def_score})")
+                    return None
+            print(f"DEFAULT RESOLVED: '{user_query}' → '{default_item['name']}' (is_default=True)")
+            _log_event("found", "default_resolved", default_item)
+            return {"status": "found", "item": default_item, "candidates": []}
 
         # ── Context: load company context_groups from DB ─────────────────
         _ctx_groups = {}  # {group_name: [keyword1, keyword2, ...]}
@@ -1949,15 +1963,23 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                 syn_rows = name_matches
 
             # 2) Filter by specs if the user specified medida/calibre
+            # BUT: keep products whose name strongly matches query key tokens even
+            # if they don't have the exact medida in name (e.g. "Pija framer" for "pija framer 1/2")
+            _q_key_for_spec = [_phonetic(t) for t in q_tokens if len(t) >= 4 and not t.replace(".", "").isdigit()
+                               and "/" not in t]
             if q_medida or q_cal:
                 spec_filtered = []
                 for r in syn_rows:
                     n = (r[1] or "").lower()
-                    if q_medida and q_medida not in n:
-                        continue
-                    if q_cal and not _re.search(rf"\bcal(?:ibre)?\s*{q_cal}\b", n):
-                        continue
-                    spec_filtered.append(r)
+                    n_ph = _phonetic(n)
+                    has_medida = (not q_medida) or (q_medida in n)
+                    has_cal = (not q_cal) or bool(_re.search(rf"\bcal(?:ibre)?\s*{q_cal}\b", n))
+                    if has_medida and has_cal:
+                        spec_filtered.append(r)
+                    elif _q_key_for_spec and all(t in n_ph for t in _q_key_for_spec):
+                        # Product matches all key tokens (e.g. "framer" in "Pija framer") — keep it
+                        print(f"SPEC FILTER KEPT (key tokens): '{r[1]}' despite missing spec ({q_medida},{q_cal})")
+                        spec_filtered.append(r)
                 if len(spec_filtered) == 1:
                     print(f"SYNONYM SPEC RESOLVED: query='{user_query}' match='{spec_filtered[0][1]}'")
                     item = _make_item(spec_filtered[0])
