@@ -1858,18 +1858,6 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
 
         q_medida, q_cal = _extract_specs(q)
 
-        # Strip standard sheet/product dimensions from q (same cleanup as _llm_input)
-        # Done AFTER _extract_specs so calibre/medida are already captured
-        _q_before_dim_strip = q
-        q = re.sub(r"\b\d+(?:\.\d+)?\s*(?:cm|mm)\s*x\s*\d+(?:\.\d+)?\s*(?:m|cm|mm|mts?)\b", "", q, flags=re.IGNORECASE)
-        q = re.sub(r"\b\d+(?:\.\d+)?\s*(?:m|mts?)\s*x\s*\d+(?:\.\d+)?\s*(?:m|mts?)\b", "", q, flags=re.IGNORECASE)
-        q = re.sub(r"\b\d+(?:\.\d+)?\s*(?:mm)\b", "", q, flags=re.IGNORECASE)
-        q = re.sub(r"\bx\s*\d+(?:\.\d+)?\s*(?:m|mts?)\b", "", q, flags=re.IGNORECASE)
-        q = re.sub(r"\s+", " ", q).strip()
-        if q != _q_before_dim_strip:
-            print(f"DIM STRIP: '{_q_before_dim_strip}' → '{q}'")
-            q_tokens = [t for t in q.split() if t not in _stopwords]
-
         # ── PASO -2: Near-exact product name match (pre-LLM) ────────────────
         # Before LLM normalize can simplify specific queries like "pija 10 x 1 1/2",
         # check if the cleaned query already matches a product name very closely.
