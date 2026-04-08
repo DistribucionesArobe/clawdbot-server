@@ -1011,6 +1011,8 @@ def seed_jerga_global(conn):
         ("cinta de papel", "perfacinta"),
         ("cinta papel usg", "perfacinta"),
         ("cinta de papel usg", "perfacinta"),
+        ("cinta papel panel rey", "perfacinta"),
+        ("cinta panel rey", "perfacinta"),
         # Rejas / rejacero
         ("reja", "rejacero"),
         ("rejas", "rejacero"),
@@ -1053,6 +1055,11 @@ def seed_jerga_global(conn):
         ("tornillo y taquete", "pija y taquete"),
         ("tornillos y taquetes", "pija y taquete"),
         ("tornillos y taquete", "pija y taquete"),
+        # Tornillo P/B = punta broca (OCR can read P/V instead of P/B)
+        ("tornillo p/b", "pija punta broca"),
+        ("tornillo p/v", "pija punta broca"),
+        ("tornillos p/b", "pija punta broca"),
+        ("tornillos p/v", "pija punta broca"),
         # Pija tablaroca = Pija 6 x 1 (the standard tablaroca screw)
         ("pija tablaroca", "pija 6 x 1"),
         ("pijas tablaroca", "pija 6 x 1"),
@@ -1625,7 +1632,8 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
             for m in _re.finditer(r'\b(\d+(?:\.\d+)?)\b', n_no_cal):
                 try:
                     val = float(m.group(1))
-                    if val == target:
+                    # Tolerance: 5.08 ≈ 5 (cm conversion rounding), allow ~3%
+                    if val == target or (target > 0 and abs(val - target) / max(target, val) <= 0.03):
                         # Check if this number is followed by a fraction (making it e.g. "2 1/2")
                         after = n_no_cal[m.end():]
                         if _re.match(r'\s+\d+/\d+', after):

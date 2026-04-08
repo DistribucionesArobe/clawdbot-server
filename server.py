@@ -6076,6 +6076,11 @@ def extract_qty_items_robust(text: str):
                     _yp = re.sub(r"\bde\b", " ", _yp, flags=re.IGNORECASE).strip()
                     _yp = re.sub(r"\s+", " ", _yp).strip()
                     if _yp and qty > 0:
+                        # Filter out bogus items that are just packaging words (e.g. "pzas.", "piezas")
+                        _stripped = re.sub(r"[.\s]", "", _yp).lower()
+                        _junk_words = {"pzas", "pzs", "pza", "pz", "piezas", "pieza", "unidades", "unidad"}
+                        if _stripped in _junk_words:
+                            continue
                         items.append((qty, _yp, _is_bun))
     return items
 
