@@ -1755,6 +1755,32 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
 
         q_medida, q_cal = _extract_specs(q)
 
+        # ── PASO -2: Near-exact product name match (pre-LLM) ────────────────
+        # Before LLM normalize can simplify specific queries like "pija 10 x 1 1/2",
+        # check if the cleaned query already matches a product name very closely.
+        _pre_rows = _name_search(q)
+        if len(_pre_rows) == 1:
+            _pn = _phonetic((_pre_rows[0][1] or "").lower())
+            _pre_score = fuzz.token_set_ratio(q, _pn)
+            if _pre_score >= 85:
+                item = _make_item(_pre_rows[0])
+                print(f"EXACT PRE-LLM MATCH: query='{user_query}' match='{item['name']}' score={_pre_score}")
+                return {"status": "found", "item": item, "candidates": []}
+        elif len(_pre_rows) > 1:
+            # Multiple results — check if one is near-exact with a big gap
+            _pre_scored = []
+            for r in _pre_rows:
+                _pn = _phonetic((r[1] or "").lower())
+                _s = fuzz.token_set_ratio(q, _pn) + _spec_bonus(r[1], q_medida, q_cal)
+                _pre_scored.append((_s, r))
+            _pre_scored.sort(key=lambda x: x[0], reverse=True)
+            _pre_top = _pre_scored[0][0]
+            _pre_second = _pre_scored[1][0]
+            if _pre_top >= 95 and (_pre_top - _pre_second) >= 20:
+                item = _make_item(_pre_scored[0][1])
+                print(f"EXACT PRE-LLM WINNER: query='{user_query}' match='{item['name']}' score={_pre_top} gap={_pre_top - _pre_second}")
+                return {"status": "found", "item": item, "candidates": []}
+
         # ── PASO -1 + 0.5: Normalización LLM de jerga ────────────────────────
         print(f"SMART SEARCH q='{q}' original='{user_query}' context='{cart_context[:50]}'")
 
