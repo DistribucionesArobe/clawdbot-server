@@ -4182,6 +4182,8 @@ class CompanySettingsBody(BaseModel):
     impermeabilizante_enabled: Optional[bool] = None
     welcome_message: Optional[str] = None
     telefono_atencion: Optional[str] = None
+    marcas_propias: Optional[str] = None
+    marcas_competencia: Optional[str] = None
     @validator('discount_threshold', 'discount_percent', pre=True)
     def coerce_empty_to_none(cls, v):
         if v == '' or v is None:
@@ -4242,6 +4244,10 @@ def company_settings_update(request: Request, body: CompanySettingsBody):
         _sets.append("discount_percent=%s")
         _vals.append(float(body.discount_percent) if 0 < body.discount_percent <= 100 else None)
 
+    # Brand context fields
+    _add_str(body.marcas_propias, "marcas_propias")
+    _add_str(body.marcas_competencia, "marcas_competencia")
+
     # Module toggles
     _add_bool(body.construccion_ligera_enabled, "construccion_ligera_enabled")
     _add_bool(body.rejacero_enabled, "rejacero_enabled")
@@ -4282,6 +4288,16 @@ def company_settings_update(request: Request, body: CompanySettingsBody):
                 END IF;
             END $$;
         """)
+        # Brand context columns
+        for _bcol in ("marcas_propias", "marcas_competencia"):
+            cur.execute(f"""
+                DO $$ BEGIN
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                                   WHERE table_name='companies' AND column_name='{_bcol}')
+                    THEN ALTER TABLE companies ADD COLUMN {_bcol} TEXT;
+                    END IF;
+                END $$;
+            """)
         conn.commit()
 
         _sets.append("updated_at=now()")
@@ -4294,6 +4310,30 @@ def company_settings_update(request: Request, body: CompanySettingsBody):
         row = cur.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Company no encontrada")
+
+        # Rebuild tenant_context if brand fields were updated
+        if body.marcas_propias is not None or body.marcas_competencia is not None:
+            cur.execute(
+                "SELECT tenant_context, marcas_propias, marcas_competencia FROM companies WHERE id=%s",
+                (company_id,),
+            )
+            _tc_row = cur.fetchone()
+            if _tc_row:
+                _base_ctx = (_tc_row[0] or "")
+                # Strip old brand context lines if present
+                _ctx_lines = [l for l in _base_ctx.split(". ") if not l.startswith("Marcas que manejo:") and not l.startswith("Marcas de competencia:")]
+                _base_ctx = ". ".join(_ctx_lines).rstrip(". ").strip()
+                _mp = (_tc_row[1] or "").strip()
+                _mc = (_tc_row[2] or "").strip()
+                if _mp:
+                    _base_ctx += f". Marcas que manejo: {_mp}"
+                if _mc:
+                    _base_ctx += f". Marcas de competencia: {_mc}. Cuando el cliente pida productos de estas marcas, busca el equivalente en mis marcas"
+                _base_ctx = _base_ctx.strip(". ").strip()
+                if _base_ctx:
+                    _base_ctx += "."
+                cur.execute("UPDATE companies SET tenant_context=%s WHERE id=%s", (_base_ctx or None, company_id))
+
         conn.commit()
         return {"ok": True}
     finally:
@@ -4317,6 +4357,8 @@ def company_settings_get(request: Request):
             ("impermeabilizante_enabled", "BOOLEAN DEFAULT FALSE"),
             ("welcome_message", "TEXT"),
             ("telefono_atencion", "VARCHAR(30)"),
+            ("marcas_propias", "TEXT"),
+            ("marcas_competencia", "TEXT"),
         ]:
             cur.execute(f"""
                 DO $$ BEGIN
@@ -4334,7 +4376,7 @@ def company_settings_get(request: Request):
                    mercadopago_url, bank_name, bank_account_name, bank_clabe, bank_account_number,
                    owner_phone, email, rfc, brand_color, logo_url,
                    discount_threshold, discount_percent, welcome_products_hint, welcome_message,
-                   telefono_atencion
+                   telefono_atencion, marcas_propias, marcas_competencia
             FROM companies WHERE id=%s LIMIT 1
             """,
             (company_id,),
@@ -4354,6 +4396,8 @@ def company_settings_get(request: Request):
                 "welcome_products_hint": row[15] or None,
                 "welcome_message": row[16] or None,
                 "telefono_atencion": row[17] or None,
+                "marcas_propias": row[18] or None,
+                "marcas_competencia": row[19] or None,
             },
         }
     finally:
