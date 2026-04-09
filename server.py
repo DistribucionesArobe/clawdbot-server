@@ -2164,10 +2164,20 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         t = (tnorm or "").strip()
         if not t:
             return False
+        # Exact match: pure greetings only
         if t in {"hola", "buenas", "hey", "holi", "menu", "menú", "ayuda", "inicio",
                  "buen dia", "buen día", "buenos dias", "buenos días",
                  "buenas tardes", "buenas noches"}:
             return True
+        # If the message contains product/order signals, it's NOT a pure greeting
+        # e.g. "hola buenas tardes me podras cotizar 3 cajas de redimix"
+        _order_signals = re.search(
+            r"\b(cotiz|precio|cuanto|cuánto|mand|necesito|ocupo|quiero|dame|lista|material|"
+            r"\d+\s+[a-záéíóúñ]{3,})\b",
+            t, re.IGNORECASE
+        )
+        if _order_signals:
+            return False
         if t.startswith("hola"):
             return True
         if t.startswith("buenos") or t.startswith("buenas") or t.startswith("buen"):
