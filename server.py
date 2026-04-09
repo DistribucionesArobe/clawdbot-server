@@ -5984,8 +5984,11 @@ def extract_qty_items_robust(text: str):
     # Convert "* " bullet markers to newlines (WhatsApp inline bullets)
     # Match * followed by a digit (e.g. "* 5 hojas") or * at line start
     t = re.sub(r"(?:^|\s)\*\s+(?=\d)", "\n", t)
+    # Strip greeting prefixes BEFORE stripping request verbs
+    # "Buenas tardes quiero 10 tablarocas" → "quiero 10 tablarocas" → "10 tablarocas"
+    t = re.sub(r"^\s*(hola|hey|buenas?\s*(?:tardes?|noches?|dias?|días?)?|buenos?\s*(?:dias?|días?)|buen\s*(?:dia|día))\s*[,.]?\s*", "", t, flags=re.IGNORECASE)
     t = re.sub(r"^\s*(ocupo|necesito|quiero|quisiera|dame|deme|manda|mandame|mandeme|pasame|pásame|paseme|necesitamos|queremos|ocupamos|me puede dar|me pueden dar|me das|me mandas|favor de|necesito cotizar|quiero cotizar)\s+", "", t, flags=re.IGNORECASE)
-    t = re.sub(r"^\s*(me\s+)?(puede[ns]?|podría[ns]?|podrías)\s+(cotizar|dar|mandar|pasar)\s+", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"^\s*(me\s+)?(puede[ns]?|podría[ns]?|podrías|podras|podrás|podra|podrá)\s+(cotizar|dar|mandar|pasar)\s+", "", t, flags=re.IGNORECASE)
     t = re.sub(r"\b(cotiza|cotización|cotizacion|precio|precios|por favor|porfa|pls)\b", " ", t, flags=re.IGNORECASE)
     t = re.sub(r"(\d+)\s*/\s*(\d+)", r"\1_\2", t)
     t = re.sub(r"\s+y\s+(?=\d)", "\n", t, flags=re.IGNORECASE)
