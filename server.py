@@ -2349,6 +2349,17 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
     # Si estamos esperando que el usuario seleccione qué quitar
     if _edit_state.get("awaiting_removal"):
         _edit_state.pop("awaiting_removal", None)
+        # Cancel removal if user says cancel/salir/no
+        if tnorm.strip() in {"cancelar", "cancel", "no", "salir", "nada", "ninguno", "ninguna", "ya no", "dejalo", "déjalo"}:
+            if wa_from:
+                upsert_quote_state(company_id, wa_from, _edit_state)
+            _quote = cart_render_quote(_edit_state, company_id=company_id, client_phone=wa_from)
+            return {
+                "type": "text_then_buttons",
+                "text": _quote + "\n\n👌 Listo, no quité nada.",
+                "body": "¿Qué deseas hacer?",
+                "buttons": ["💳 Pagar", "➕ Agregar más", "🗑️ Quitar producto"],
+            }
         # Handle interactive list selection (remove_0, remove_1, etc.)
         _rm_match = re.match(r"^remove_(\d+)$", tnorm.strip())
         if _rm_match:
