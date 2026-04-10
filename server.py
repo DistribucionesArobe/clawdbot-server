@@ -3488,12 +3488,28 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             _buf_state2.pop("_msg_buffer", None)
             upsert_quote_state(company_id, wa_from, _buf_state2)
 
-    # Always try deterministic parser first, fall back to NER for natural language
-    multi = extract_qty_items_robust(user_text)
-    _parser_used = "robust"
-    if not multi:
+    # Detect free-text: single long line with multiple products but no line breaks/bullets
+    # e.g. "40 tablaroca 20 angulo 30 canal carga 2000 pijas de 1 1 Kg alambre"
+    # These are almost impossible for regex to parse correctly — use GPT first
+    _is_freetext = (
+        "\n" not in user_text.strip()
+        and "•" not in user_text
+        and len(user_text.strip()) > 60
+        and len(re.findall(r"\b\d+\s+[a-záéíóúñ]", user_text, re.IGNORECASE)) >= 3
+    )
+    if _is_freetext:
         multi = ner_extract_items(user_text)
         _parser_used = "ner"
+        if not multi:
+            multi = extract_qty_items_robust(user_text)
+            _parser_used = "robust"
+    else:
+        # Structured input (line breaks, bullets) — regex parser is reliable
+        multi = extract_qty_items_robust(user_text)
+        _parser_used = "robust"
+        if not multi:
+            multi = ner_extract_items(user_text)
+            _parser_used = "ner"
     if multi:
         print(f"MULTI ITEMS ({_parser_used}): {[(q, p) for q, p, *_ in multi]}")
         conn = get_conn()
@@ -5977,7 +5993,7 @@ def ner_extract_items(user_text: str):
                 )},
                 {"role": "user", "content": user_text},
             ],
-            temperature=0.1, max_tokens=300,
+            temperature=0.1, max_tokens=600,
         )
         raw = (resp.choices[0].message.content or "[]").replace("```json", "").replace("```", "").strip()
         parsed = json.loads(raw)

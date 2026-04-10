@@ -1060,6 +1060,11 @@ def seed_jerga_global(conn):
         ("tornillo p/v", "pija punta broca"),
         ("tornillos p/b", "pija punta broca"),
         ("tornillos p/v", "pija punta broca"),
+        # PTR = tubo rectangular de acero (perfil tubular rectangular)
+        ("ptr", "tubo ptr"),
+        # Solero = solera (common misspelling)
+        ("solero", "solera tension"),
+        ("soleros", "solera tension"),
         # Pija tablaroca = Pija 6 x 1 (the standard tablaroca screw)
         ("pija tablaroca", "pija 6 x 1"),
         ("pijas tablaroca", "pija 6 x 1"),
