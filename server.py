@@ -2624,6 +2624,17 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         "atencion a cliente", "atención a cliente", "servicio a cliente",
         "necesito asesor", "quiero asesor",
     }
+    # Frases de frustración — si cliente las envía mientras hay un pending/awaiting state,
+    # escalamos automáticamente en vez de seguir en loop de desambiguación.
+    _frustration_phrases = {
+        "me pueden apoyar", "me puedes apoyar", "pueden apoyar", "apoyenme", "apóyenme",
+        "ayudenme", "ayúdenme", "ayudame", "ayúdame", "necesito ayuda",
+        "no entiendo", "no le entiendo", "no entendi", "no entendí",
+        "no se", "no sé", "no me explico", "esta complicado", "está complicado",
+        "muy complicado", "muy dificil", "muy difícil", "no funciona",
+        "mejor hablen", "mejor llamen", "que me llamen", "que alguien me llame",
+        "me pueden ayudar", "me puedes ayudar",
+    }
     # ── Detección de intención NO-cotización ──────────────────────────────
     # Mensajes que claramente no son pedidos de productos → escalar a humano
     _non_quote_keywords = [
@@ -2688,7 +2699,25 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 "Si quieres cotizar materiales mientras tanto, mándame tu lista con cantidades 📋"
             )
 
-    if any(rt == tnorm or rt in tnorm for rt in escalation_triggers):
+    # ── Detección de frustración proactiva ────────────────────────────────
+    # Si el cliente manda frases de frustración MIENTRAS hay un pending/awaiting state
+    # o items sin resolver en el carrito, escalamos a humano en vez de seguir el loop.
+    _is_frustrated = any(fp in _t_lower for fp in _frustration_phrases)
+    if _is_frustrated and wa_from:
+        _state_frust = get_quote_state(company_id, wa_from) or {}
+        _has_pending = bool(
+            _state_frust.get("pending")
+            or _state_frust.get("awaiting")
+            or _state_frust.get("awaiting_removal")
+            or _state_frust.get("pending_ambiguous")
+            or (_state_frust.get("items") and len(_state_frust.get("items", [])) > 0)
+        )
+        if _has_pending:
+            print(f"FRUSTRATION DETECTED: escalating '{_t_lower}' (pending state exists)")
+            # Force into escalation branch below
+            tnorm = "asesor"
+
+    if any(rt == tnorm or rt in tnorm for rt in escalation_triggers) or (_is_frustrated and tnorm == "asesor"):
         state = get_quote_state(company_id, wa_from) if wa_from else {}
         state = state or {}
         _atencion_phone = None
@@ -6083,7 +6112,9 @@ def extract_qty_items_robust(text: str):
             # but NOT "postes 635 calibre 26" (635 is a product spec, not qty)
             # Only split when digit is followed by a letter-word (product name)
             _spec_words = r"(?:cal(?:ibre)?|x|mm|cm|m|mts?|kg|pulgadas?|pulg|metros?|litros?|lts?|gal)"
-            sub_parts = re.split(rf'(?<=\S)\s+(?=\d+\s+(?!{_spec_words}\b)[a-záéíóúñ])', part.strip())
+            # Negative lookbehind on [xX×]: prevent splitting dimensions like
+            # "3 mts x 1 mto .26" or "2 x 2" x 6 mts" where x separates dimensions
+            sub_parts = re.split(rf'(?<=\S)(?<![xX×])\s+(?=\d+\s+(?!{_spec_words}\b)[a-záéíóúñ])', part.strip())
             for sub in sub_parts:
                 # Restaurar specs protegidas: SPEC_2_metros → "2 metros"
                 sub = re.sub(r"SPEC_(\d+(?:\.\d+)?)_(\w+)", r"\1 \2", sub)
