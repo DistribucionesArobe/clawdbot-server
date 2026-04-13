@@ -2349,8 +2349,8 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
     # Si estamos esperando que el usuario seleccione qué quitar
     if _edit_state.get("awaiting_removal"):
         _edit_state.pop("awaiting_removal", None)
-        # Cancel removal if user says cancel/salir/no
-        if tnorm.strip() in {"cancelar", "cancel", "no", "salir", "nada", "ninguno", "ninguna", "ya no", "dejalo", "déjalo"}:
+        # Cancel removal if user picks the cancel list option or says cancel/salir/no
+        if tnorm.strip() == "remove_cancel" or tnorm.strip() in {"cancelar", "cancel", "no", "salir", "nada", "ninguno", "ninguna", "ya no", "dejalo", "déjalo", "❌ cancelar"}:
             if wa_from:
                 upsert_quote_state(company_id, wa_from, _edit_state)
             _quote = cart_render_quote(_edit_state, company_id=company_id, client_phone=wa_from)
@@ -2567,26 +2567,44 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             "buttons": ["🔨 Cotizar materiales", "🕐 Horarios y ubicación", "👤 Hablar con alguien"],
         }
 
-    if tnorm in {"🗑️ quitar producto", "quitar producto"}:
+    # Detect "Quitar producto" button with or without emoji/variations
+    _tnorm_stripped = re.sub(r"[^\w\s]", "", tnorm).strip()
+    _remove_triggers = {
+        "quitar producto", "quitar productos", "quitar", "eliminar producto",
+        "eliminar", "borrar producto", "borrar", "remover", "remover producto",
+        "quitar un producto", "quitar algo",
+    }
+    if tnorm in {"🗑️ quitar producto", "quitar producto"} or _tnorm_stripped in _remove_triggers:
         _cart_q = (_edit_state.get("cart") or [])
         if not _cart_q:
             return "Tu carrito está vacío."
         _edit_state["awaiting_removal"] = True
         if wa_from:
             upsert_quote_state(company_id, wa_from, _edit_state)
-        # Show as interactive list so user doesn't have to type
+        # Show as interactive list so user doesn't have to type.
+        # WhatsApp list rows limits: title ≤24 chars, description ≤72 chars.
         _removal_rows = []
-        for _ri, _item in enumerate(_cart_q[:10]):
+        for _ri, _item in enumerate(_cart_q[:9]):  # leave room for "cancel" entry
             _rname = (_item.get("name") or "Producto")
             _rqty = int(_item.get("qty") or 0)
             _removal_rows.append({
                 "id": f"remove_{_ri}",
                 "title": _rname[:24],
-                "description": f"{_rqty}x — click para quitar"[:72],
+                "description": f"{_rqty}x — quitar este"[:72],
             })
+        # Add a cancel option at the end
+        _removal_rows.append({
+            "id": "remove_cancel",
+            "title": "❌ Cancelar",
+            "description": "No quitar nada",
+        })
+        # If there are many items, add a hint about typing
+        _body_msg = "¿Cuál producto quieres quitar?"
+        if len(_cart_q) > 9:
+            _body_msg += f"\n\n(Mostrando 9 de {len(_cart_q)}. O escribe el nombre directo.)"
         return {
             "type": "list",
-            "body": "¿Cuál producto quieres quitar?",
+            "body": _body_msg,
             "sections": [{"title": "Tu carrito", "rows": _removal_rows}],
             "button_label": "Ver productos",
         }
