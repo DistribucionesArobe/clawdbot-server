@@ -2612,6 +2612,17 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         "asesor", "asesor humano", "humano", "persona", "agente",
         "hablar con alguien", "hablar con una persona", "quiero hablar",
         "necesito ayuda", "ayuda humana",
+        # Variantes comunes en México — "hablar con X" patterns
+        "hablar con ejecutivo", "hablar con un ejecutivo", "quiero un ejecutivo",
+        "hablar con representante", "hablar con un representante",
+        "hablar con vendedor", "hablar con un vendedor", "quiero un vendedor",
+        "hablar con encargado", "hablar con el encargado",
+        "hablar con operador", "hablar con gerente",
+        "hablar con atencion", "hablar con atención",
+        # Direct words (standalone or at end of sentence)
+        "ejecutivo", "representante",
+        "atencion a cliente", "atención a cliente", "servicio a cliente",
+        "necesito asesor", "quiero asesor",
     }
     # ── Detección de intención NO-cotización ──────────────────────────────
     # Mensajes que claramente no son pedidos de productos → escalar a humano
@@ -6131,8 +6142,13 @@ def extract_qty_items_robust(text: str):
                     else:
                         _is_bun = bool(re.search(r"\b(atados?|paquetes?|bultos?|cajas?|bolsas?)\b", _yp, re.IGNORECASE))
                     # Solo quitar unidades de EMPAQUE (no de medida/spec)
-                    _packaging_re = r"\b(hojas?|piezas?|rollos?|bultos?|sacos?|atados?|paquetes?|costales?|cubetas?|bolsas?|botes?|latas?|tiras?|cajas?|cientos?|millares?)\b"
+                    _packaging_re = r"\b(hojas?|piezas?|rollos?|bultos?|sacos?|atados?|paquetes?|costales?|cubetas?|bolsas?|botes?|latas?|tiras?|cajas?|cientos?|millares?|kilos?|kgs?|gramos?|litros?|lts?|galones?)\b"
                     _yp = re.sub(_packaging_re, "", _yp, flags=re.IGNORECASE).strip()
+                    # Extract parenthetical hints as alternate search terms:
+                    # "plafón registrable(galleta)" → "plafón registrable galleta"
+                    # This helps when customers add brand/slang hints in parens.
+                    _yp = re.sub(r"\s*\(([^)]+)\)\s*", r" \1 ", _yp)
+                    _yp = re.sub(r"\s+", " ", _yp).strip()
                     _yp = re.sub(r"\bde\b", " ", _yp, flags=re.IGNORECASE).strip()
                     _yp = re.sub(r"\s+", " ", _yp).strip()
                     if _yp and qty > 0:

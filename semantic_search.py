@@ -1099,6 +1099,16 @@ def seed_jerga_global(conn):
         ("taquete ancla", "taquete expansion"),
         ("taquetes ancla", "taquete expansion"),
         ("ancla de expansion", "taquete expansion"),
+        # Plafón registrable / galleta — sinónimos mexicanos
+        ("galleta", "plafon registrable"),
+        ("galletas", "plafon registrable"),
+        ("plafon galleta", "plafon registrable"),
+        ("plafones galleta", "plafon registrable"),
+        ("plafon registrable galleta", "plafon registrable"),
+        ("plafones registrables", "plafon registrable"),
+        # Pijas de tablaroca = pija 6 x 1 (variant of "pijas para tablaroca")
+        ("pija de tablaroca", "pija 6 x 1"),
+        ("pijas de tablaroca", "pija 6 x 1"),
         # Canal de amarre = Canal 6.35 (standard framing channel for tablaroca)
         ("canal amarre", "canal 6.35"),
         ("canal de amarre", "canal 6.35"),
