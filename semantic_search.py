@@ -1070,6 +1070,28 @@ def seed_jerga_global(conn):
         ("pijas tablaroca", "pija 6 x 1"),
         ("pija para tablaroca", "pija 6 x 1"),
         ("pijas para tablaroca", "pija 6 x 1"),
+        # Pija frame = Pija framer (common OCR/user misspelling of the frame screw)
+        ("pija frame", "pija framer"),
+        ("pijas frame", "pija framer"),
+        ("pija frame 3/4", "pija framer"),
+        ("pija frame 1", "pija framer"),
+        ("pija frame 1/2", "pija framer"),
+        ("pijas frame 3/4", "pija framer"),
+        ("pijas frame 1", "pija framer"),
+        # SECUROCK = USG Securock Glass-Mat Sheathing (tablaroca exterior/resistente agua)
+        # Map to closest equivalent: tablaroca anti-moho (same water/mold resistant category)
+        ("securock", "tablaroca anti-moho"),
+        ("securok", "tablaroca anti-moho"),
+        ("secur rock", "tablaroca anti-moho"),
+        # BISCOAT = recubrimiento / acabado para exterior (base coat)
+        ("biscoat", "basecoat"),
+        ("bis coat", "basecoat"),
+        ("biscot", "basecoat"),
+        # Cintas union (para juntas de tablaroca) = Perfacinta
+        ("cintas union", "perfacinta"),
+        ("cinta union", "perfacinta"),
+        ("cinta de union", "perfacinta"),
+        ("cintas de union", "perfacinta"),
         # Canal de amarre = Canal 6.35 (standard framing channel for tablaroca)
         ("canal amarre", "canal 6.35"),
         ("canal de amarre", "canal 6.35"),
@@ -1672,10 +1694,19 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                     bonus += 15
                 else:
                     # Try singular forms: "soleras"→"solera", "conectores"→"conector"
+                    _matched_sg = False
                     for sg in _singulars_es(tok):
                         if sg in n:
                             bonus += 15
+                            _matched_sg = True
                             break
+                    # Penalty: distinctive alphabetic query token (5+ chars, non-numeric)
+                    # is completely absent from the product name. This prevents literal
+                    # spec/number matches from beating semantic matches.
+                    # Example: query "pija framer 1" — "framer" missing from "Pija 6 x 1"
+                    # should penalize enough to lose to "Pija framer" where framer IS present.
+                    if not _matched_sg and len(tok) >= 5 and not tok.replace(".", "").isdigit():
+                        bonus -= 25
             # Penalty: product name starts with a DIFFERENT word than the query
             # e.g. searching "rejacero" but product is "Poste 2.00 para rejacero"
             # The query term is a suffix/modifier, not the primary product → penalize
