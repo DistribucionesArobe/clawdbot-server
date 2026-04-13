@@ -6014,8 +6014,10 @@ def extract_qty_items_robust(text: str):
     # Strip greeting prefixes BEFORE stripping request verbs
     # "Buenas tardes quiero 10 tablarocas" → "quiero 10 tablarocas" → "10 tablarocas"
     t = re.sub(r"^\s*(hola|hey|buenas?\s*(?:tardes?|noches?|dias?|días?)?|buenos?\s*(?:dias?|días?)|buen\s*(?:dia|día))\s*[,.]?\s*", "", t, flags=re.IGNORECASE)
-    t = re.sub(r"^\s*(ocupo|necesito|quiero|quisiera|dame|deme|manda|mandame|mandeme|pasame|pásame|paseme|necesitamos|queremos|ocupamos|me puede dar|me pueden dar|me das|me mandas|favor de|necesito cotizar|quiero cotizar)\s+", "", t, flags=re.IGNORECASE)
-    t = re.sub(r"^\s*(me\s+)?(puede[ns]?|podría[ns]?|podrías|podras|podrás|podra|podrá)\s+(cotizar|dar|mandar|pasar)\s+", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"^\s*(ocupo|necesito|quiero|quisiera|dame|deme|manda|mandame|mandeme|pasame|pásame|paseme|necesitamos|queremos|ocupamos|me puede dar|me pueden dar|me das|me mandas|favor de|necesito cotizar|quiero cotizar|solicito|solicita|solicitamos|solicitame)\s+", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"^\s*(me\s+)?(puede[ns]?|podría[ns]?|podrías|podras|podrás|podra|podrá)\s+(cotizar|dar|mandar|pasar|solicitar|conseguir|enviar|preparar|armar|hacer)\s+(el\s+siguiente\s+material|la\s+siguiente\s+lista|lo\s+siguiente|estos?\s+materiales?)?\s*", "", t, flags=re.IGNORECASE)
+    # Strip standalone preamble phrases: "el siguiente material", "la siguiente lista", etc.
+    t = re.sub(r"^\s*(el\s+siguiente\s+material|la\s+siguiente\s+lista|lo\s+siguiente|estos?\s+materiales?|la\s+lista)\s+", "", t, flags=re.IGNORECASE)
     t = re.sub(r"\b(cotiza|cotización|cotizacion|precio|precios|por favor|porfa|pls)\b", " ", t, flags=re.IGNORECASE)
     t = re.sub(r"(\d+)\s*/\s*(\d+)", r"\1_\2", t)
     t = re.sub(r"\s+y\s+(?=\d)", "\n", t, flags=re.IGNORECASE)
@@ -6120,6 +6122,21 @@ def extract_qty_items_robust(text: str):
                         _stripped = re.sub(r"[.\s]", "", _yp).lower()
                         _junk_words = {"pzas", "pzs", "pza", "pz", "piezas", "pieza", "unidades", "unidad"}
                         if _stripped in _junk_words:
+                            continue
+                        # Filter out preamble phrases that leaked through.
+                        # If product is ONLY preamble/request verbs with no concrete product noun,
+                        # drop it. Common leaked preambles: "podrías solicitar el siguiente material",
+                        # "me podrías cotizar", "el siguiente material", etc.
+                        _yp_lc = _yp.lower()
+                        _preamble_markers = {
+                            "podrias", "podría", "podrías", "solicitar", "material",
+                            "materiales", "siguiente", "lista", "cotizar", "conseguir",
+                            "enviar", "preparar", "mandar", "armar", "favor",
+                        }
+                        _yp_tokens = set(re.findall(r"[a-záéíóúñ]{3,}", _yp_lc))
+                        # If >=70% of meaningful tokens are preamble markers, it's a phantom
+                        if _yp_tokens and len(_yp_tokens & _preamble_markers) / len(_yp_tokens) >= 0.7:
+                            print(f"PARSER FILTER: dropping phantom preamble item '{_yp}'")
                             continue
                         items.append((qty, _yp, _is_bun))
     return items

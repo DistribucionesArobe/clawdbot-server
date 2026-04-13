@@ -1092,6 +1092,13 @@ def seed_jerga_global(conn):
         ("cinta union", "perfacinta"),
         ("cinta de union", "perfacinta"),
         ("cintas de union", "perfacinta"),
+        # Taquete Anclo = taquete metálico de expansión (DIFERENTE a taquete de plástico)
+        # Anclo es marca de taquete de expansión, más cercano a "taquete expansion" o "ancla"
+        ("taquete anclo", "taquete expansion"),
+        ("taquetes anclo", "taquete expansion"),
+        ("taquete ancla", "taquete expansion"),
+        ("taquetes ancla", "taquete expansion"),
+        ("ancla de expansion", "taquete expansion"),
         # Canal de amarre = Canal 6.35 (standard framing channel for tablaroca)
         ("canal amarre", "canal 6.35"),
         ("canal de amarre", "canal 6.35"),
