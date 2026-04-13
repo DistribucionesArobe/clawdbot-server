@@ -1109,6 +1109,12 @@ def seed_jerga_global(conn):
         # Pijas de tablaroca = pija 6 x 1 (variant of "pijas para tablaroca")
         ("pija de tablaroca", "pija 6 x 1"),
         ("pijas de tablaroca", "pija 6 x 1"),
+        # Yeso = gypsum powder (NOT redimix which is pre-mixed joint compound)
+        # Protect term so hybrid search doesn't fuzzy-match to redimix.
+        ("yeso", "yeso"),
+        ("yesos", "yeso"),
+        ("kilo de yeso", "yeso"),
+        ("kilos de yeso", "yeso"),
         # Canal de amarre = Canal 6.35 (standard framing channel for tablaroca)
         ("canal amarre", "canal 6.35"),
         ("canal de amarre", "canal 6.35"),
@@ -1197,8 +1203,39 @@ def llm_normalize_query(conn, company_id: str, user_query: str, tenant_context: 
         row = cur.fetchone()
         cur.close()
         if row:
-            print(f"JERGA LOCAL HIT: '{q}' → '{row[0]}'")
-            return _strip_accents(row[0]), "local"
+            # SANITY CHECK at READ time: bust stale bad cache entries where
+            # query and product have no token overlap (e.g. 'yeso' → 'redimix').
+            _mapped = row[0]
+            _q_tokens_rd = [w for w in re.findall(r"[a-záéíóúñ]+", q) if len(w) >= 4]
+            _valid = True
+            if _q_tokens_rd:
+                _mapped_phon = _phonetic((_mapped or "").lower())
+                _has_overlap = False
+                for _tok in _q_tokens_rd:
+                    if _phonetic(_tok) in _mapped_phon:
+                        _has_overlap = True
+                        break
+                    for _sg in _singulars_es(_tok):
+                        if _phonetic(_sg) in _mapped_phon:
+                            _has_overlap = True
+                            break
+                    if _has_overlap:
+                        break
+                if not _has_overlap:
+                    _valid = False
+                    print(f"JERGA LOCAL STALE (no token overlap, deleting): '{q}' → '{_mapped}'")
+                    try:
+                        cur2 = conn.cursor()
+                        cur2.execute(
+                            "DELETE FROM diccionario_jerga_local WHERE company_id = %s AND lower(termino_original) = %s",
+                            (company_id, q),
+                        )
+                        cur2.close()
+                    except Exception as _de:
+                        print(f"JERGA LOCAL DELETE ERROR: {repr(_de)}")
+            if _valid:
+                print(f"JERGA LOCAL HIT: '{q}' → '{_mapped}'")
+                return _strip_accents(_mapped), "local"
     except Exception as e:
         print(f"JERGA LOCAL ERROR: {repr(e)}")
 
@@ -1439,6 +1476,32 @@ def _cache_local_mapping(conn, company_id: str, term_original: str, product_name
     t_norm = (product_name or "").strip().lower()
     if not t_orig or not t_norm or t_orig == t_norm:
         return
+    # SANITY CHECK: at least ONE significant query token (>=4 chars, non-numeric)
+    # must appear in the product name (or a singular form of it). Prevents
+    # wildly wrong mappings like 'yeso' → 'Redimix 28 kg usg' from being
+    # cached and then repeatedly returned as if correct.
+    try:
+        _q_tokens = [w for w in re.findall(r"[a-záéíóúñ]+", t_orig) if len(w) >= 4]
+        if _q_tokens:
+            _prod_phon = _phonetic(t_norm)
+            _found = False
+            for _tok in _q_tokens:
+                _tok_phon = _phonetic(_tok)
+                if _tok_phon in _prod_phon:
+                    _found = True
+                    break
+                # Try singular/plural forms
+                for _sg in _singulars_es(_tok):
+                    if _phonetic(_sg) in _prod_phon:
+                        _found = True
+                        break
+                if _found:
+                    break
+            if not _found:
+                print(f"CACHE LOCAL REJECTED (no token overlap): '{t_orig}' → '{t_norm}'")
+                return
+    except Exception as _se:
+        print(f"CACHE LOCAL SANITY ERROR (non-fatal): {repr(_se)}")
     try:
         cur = conn.cursor()
         cur.execute(
