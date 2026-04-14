@@ -696,25 +696,46 @@ def hybrid_search(conn, company_id: str, user_query: str, q_normalized: str,
 
     print(f"HYBRID MERGED TOP-3: {[(e['item']['name'], round(e['rrf'],4)) for e in merged[:3]]}")
 
+    # ── Hard filter: if query has a distinctive word (≥5 chars, non-numeric)
+    # that does NOT appear in the top product name (even phonetically/singular),
+    # we cannot "auto-resolve" — force LLM rerank or return ambiguous.
+    # This prevents cases like 'yeso' → 'Redimix 28 kg usg' being auto-picked.
+    def _has_token_overlap(query, prod_name):
+        _q_tokens = [w for w in re.findall(r"[a-záéíóúñ]+", (query or "").lower()) if len(w) >= 5]
+        if not _q_tokens:
+            return True  # no distinctive token to check — permissive
+        _prod_phon = _phonetic((prod_name or "").lower())
+        for tok in _q_tokens:
+            if _phonetic(tok) in _prod_phon:
+                return True
+            for sg in _singulars_es(tok):
+                if _phonetic(sg) in _prod_phon:
+                    return True
+        return False
+
+    _top_has_overlap = _has_token_overlap(user_query, top["item"].get("name") or "")
+
     # ── Step 4: Auto-resolve if clear winner ──────────────────────────────
     # High vector similarity + clear gap = obvious match
     vec_sim = top.get("vec_sim", 0)
     rrf_gap = (top["rrf"] - second["rrf"]) if second else 999
 
     # Obvious: vector similarity > 0.85 and big RRF gap
-    if vec_sim >= 0.85 and rrf_gap >= 0.005:
+    if vec_sim >= 0.85 and rrf_gap >= 0.005 and _top_has_overlap:
         print(f"HYBRID RESOLVED (high vec): query='{user_query}' match='{top['item']['name']}' vec={vec_sim:.3f} gap={rrf_gap:.4f}")
         return {"status": "found", "item": top["item"], "candidates": []}
+    if vec_sim >= 0.85 and rrf_gap >= 0.005 and not _top_has_overlap:
+        print(f"HYBRID BLOCKED AUTO-RESOLVE (no token overlap): query='{user_query}' top='{top['item']['name']}'")
 
     # Obvious: both keyword and vector agree on #1, decent scores
     if top.get("kw_rank") and top.get("vec_rank"):
-        if top["kw_rank"] <= 2 and top["vec_rank"] <= 2 and vec_sim >= 0.70 and rrf_gap >= 0.003:
+        if top["kw_rank"] <= 2 and top["vec_rank"] <= 2 and vec_sim >= 0.70 and rrf_gap >= 0.003 and _top_has_overlap:
             print(f"HYBRID RESOLVED (kw+vec agree): query='{user_query}' match='{top['item']['name']}' kw#{top['kw_rank']} vec#{top['vec_rank']} sim={vec_sim:.3f}")
             return {"status": "found", "item": top["item"], "candidates": []}
 
     # Obvious: only one candidate has both keyword AND vector match
     dual_match = [e for e in merged[:5] if e.get("kw_rank") and e.get("vec_rank")]
-    if len(dual_match) == 1 and dual_match[0]["vec_sim"] >= 0.60:
+    if len(dual_match) == 1 and dual_match[0]["vec_sim"] >= 0.60 and _has_token_overlap(user_query, dual_match[0]["item"].get("name") or ""):
         print(f"HYBRID RESOLVED (only dual): query='{user_query}' match='{dual_match[0]['item']['name']}'")
         return {"status": "found", "item": dual_match[0]["item"], "candidates": []}
 
