@@ -1,5 +1,6 @@
 from prompts_cotizabot import COTIZABOT_SYSTEM_PROMPT
 from fastapi.background import BackgroundTasks
+import asyncio
 import json
 import os
 import re
@@ -66,6 +67,74 @@ Traduces y explicas textos ES/EN de forma natural.
 # App
 # -------------------------
 app = FastAPI(title="Clawdbot Server", version="1.0")
+
+# ── Silence detector: escalamiento proactivo por inactividad ──────────────
+# Corre cada 5 min. Si un cliente tiene pending/awaiting state sin actividad
+# por >10 min, notifica al owner y marca el estado como escalado por silencio.
+SILENCE_CHECK_INTERVAL_SEC = 300  # 5 min
+SILENCE_THRESHOLD_MIN = 10
+
+async def _silence_escalation_loop():
+    while True:
+        try:
+            await asyncio.sleep(SILENCE_CHECK_INTERVAL_SEC)
+            _run_silence_escalation_once()
+        except Exception as _e:
+            print("SILENCE LOOP ERROR:", repr(_e))
+
+def _run_silence_escalation_once():
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT wqs.company_id::text, wqs.wa_from, wqs.state, wqs.updated_at,
+                   c.owner_phone, c.wa_api_key, c.wa_phone_number_id, c.telefono_atencion, c.name
+            FROM wa_quote_state wqs
+            JOIN companies c ON c.id = wqs.company_id
+            WHERE wqs.updated_at < now() - interval '%s minutes'
+              AND wqs.updated_at > now() - interval '2 hours'
+            """ % SILENCE_THRESHOLD_MIN
+        )
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        for row in rows:
+            company_id, wa_from, state, updated_at, owner_phone, wa_api_key, phone_number_id, telefono_atencion, company_name = row
+            state = state or {}
+            if state.get("escalated_silence"):
+                continue
+            _has_pending = bool(
+                state.get("pending")
+                or state.get("awaiting")
+                or state.get("awaiting_removal")
+                or state.get("pending_ambiguous")
+                or state.get("pending_specs")
+            )
+            if not _has_pending:
+                continue
+            _notify_phone = (telefono_atencion or owner_phone or "").strip()
+            if not (_notify_phone and wa_api_key and phone_number_id):
+                continue
+            try:
+                notify_owner_escalation(
+                    wa_api_key=wa_api_key, phone_number_id=phone_number_id,
+                    owner_phone=_notify_phone, client_phone=wa_from,
+                    reason=f"Cliente sin responder >{SILENCE_THRESHOLD_MIN} min con pregunta pendiente",
+                    state=state,
+                )
+                state["escalated_silence"] = True
+                upsert_quote_state(company_id, wa_from, state)
+                print(f"SILENCE ESCALATION: company={company_id} client={wa_from} silent>{SILENCE_THRESHOLD_MIN}min")
+            except Exception as _ne:
+                print("SILENCE NOTIFY ERROR:", repr(_ne))
+    except Exception as _e:
+        print("SILENCE ESCALATION RUN ERROR:", repr(_e))
+
+@app.on_event("startup")
+async def _start_silence_loop():
+    asyncio.create_task(_silence_escalation_loop())
+    print(f"Silence escalation loop started (check every {SILENCE_CHECK_INTERVAL_SEC}s, threshold {SILENCE_THRESHOLD_MIN} min)")
 
 # -------------------------
 
@@ -3626,8 +3695,78 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                     missing.append({"qty": qty, "raw": prod_raw, "is_bundle": _mi_bundle, "candidates": result["candidates"]})
             if missing:
                 state["pending"] = missing
+                # ── Retry counter: incrementa por producto raw que no se resolvió
+                _retry_map = state.get("retry_count") or {}
+                for _m in missing:
+                    _rkey = (_m.get("raw") or "").strip().lower()
+                    if _rkey and _rkey != "producto ilegible":
+                        _retry_map[_rkey] = int(_retry_map.get(_rkey, 0)) + 1
+                state["retry_count"] = _retry_map
+                # ── Low-confidence list detector: si ≥50% de los items (y al menos 3)
+                # no se resolvieron, escalamos proactivamente a humano
+                _total_items = len(multi)
+                _miss_count = len([m for m in missing if m.get("raw") != "producto ilegible"])
+                _should_escalate_low = (
+                    _total_items >= 3
+                    and _miss_count >= 3
+                    and (_miss_count / max(_total_items, 1)) >= 0.5
+                )
+                # ── Retry escalation: si algún producto ya lleva ≥2 intentos fallidos
+                _retry_escalated = [k for k, v in _retry_map.items() if v >= 2]
+                _should_escalate_retry = bool(_retry_escalated)
+                if (_should_escalate_low or _should_escalate_retry) and wa_from:
+                    try:
+                        _conn_esc = get_conn()
+                        _cur_esc = _conn_esc.cursor()
+                        _cur_esc.execute(
+                            "SELECT owner_phone, wa_api_key, wa_phone_number_id, telefono_atencion, name FROM companies WHERE id=%s",
+                            (company_id,),
+                        )
+                        _row_esc = _cur_esc.fetchone()
+                        _cur_esc.close()
+                        _conn_esc.close()
+                        _atencion = (_row_esc[3] or _row_esc[0] or "").strip() if _row_esc else ""
+                        _cname = (_row_esc[4] if _row_esc else "la empresa") or "la empresa"
+                        # Notify owner
+                        _notify_phone = (_row_esc[3] or _row_esc[0] or "").strip() if _row_esc else ""
+                        if _notify_phone and _row_esc and _row_esc[1] and _row_esc[2]:
+                            _reason = (
+                                f"Múltiples productos sin match ({_miss_count}/{_total_items})"
+                                if _should_escalate_low
+                                else f"Producto intentado {max(_retry_map.values())}x sin éxito"
+                            )
+                            try:
+                                notify_owner_escalation(
+                                    wa_api_key=_row_esc[1], phone_number_id=_row_esc[2],
+                                    owner_phone=_notify_phone, client_phone=wa_from,
+                                    reason=_reason, state=state,
+                                )
+                            except Exception as _ne:
+                                print("PROACTIVE ESCALATION NOTIFY ERROR:", repr(_ne))
+                        # Mark escalated so we don't spam
+                        state["escalated_proactive"] = True
+                        if wa_from:
+                            upsert_quote_state(company_id, wa_from, state)
+                        print(f"PROACTIVE ESCALATION: low={_should_escalate_low} retry={_should_escalate_retry} miss={_miss_count}/{_total_items}")
+                        _phone_clean = _normalize_mx_phone(_atencion) if _atencion else ""
+                        _prefix = cart_render_quote(state, company_id=company_id, client_phone=wa_from) + "\n\n" if state.get("cart") else ""
+                        if _phone_clean:
+                            return _prefix + (
+                                f"Veo que varios productos no los tengo identificados exacto. "
+                                f"Para que no batalles, mejor te atiende un asesor de *{_cname}* directo 🙏\n\n"
+                                f"👉 https://wa.me/{_phone_clean}\n\n"
+                                f"Ya le avisé para que te contacte."
+                            )
+                        return _prefix + (
+                            "Veo que varios productos no los tengo identificados exacto. "
+                            "Un asesor te va a contactar para ayudarte directo 🙏"
+                        )
+                    except Exception as _e:
+                        print("PROACTIVE ESCALATION ERROR:", repr(_e))
             else:
                 state.pop("pending", None)
+                state.pop("retry_count", None)
+                state.pop("escalated_proactive", None)
             if wa_from:
                 upsert_quote_state(company_id, wa_from, state)
             if state.get("pending_specs"):
