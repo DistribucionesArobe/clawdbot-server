@@ -6226,6 +6226,10 @@ def extract_qty_items_robust(text: str):
     # Convert "* " bullet markers to newlines (WhatsApp inline bullets)
     # Match * followed by a digit (e.g. "* 5 hojas") or * at line start
     t = re.sub(r"(?:^|\s)\*\s+(?=\d)", "\n", t)
+    # Strip leading bullet markers: -, –, —, >, · at start of each line
+    # Example: "-5 canal de amarre" → "5 canal de amarre"
+    # "-Tornillo para tablaroca 300" → "Tornillo para tablaroca 300"
+    t = re.sub(r"(?m)^\s*[-–—>·]+\s*", "", t)
     # Strip greeting prefixes BEFORE stripping request verbs
     # "Buenas tardes quiero 10 tablarocas" → "quiero 10 tablarocas" → "10 tablarocas"
     t = re.sub(r"^\s*(hola|hey|buenas?\s*(?:tardes?|noches?|dias?|días?)?|buenos?\s*(?:dias?|días?)|buen\s*(?:dia|día))\s*[,.]?\s*", "", t, flags=re.IGNORECASE)
@@ -6281,9 +6285,20 @@ def extract_qty_items_robust(text: str):
                     last_qty = qty
                     prod = m.group(2).replace("_", "/").strip()
                 else:
-                    # No leading quantity — inherit from last seen qty (or default 1)
-                    qty = last_qty
-                    prod = sub.strip().replace("_", "/")
+                    # Trailing qty: "Tornillo para tablaroca 300" → qty=300, prod="Tornillo para tablaroca"
+                    # Only match integers ≥2 at end of string, after at least one letter-word
+                    _m_trail = re.match(
+                        r"^\s*([a-záéíóúñ].*?[a-záéíóúñ])\s+(\d{1,6})\s*$",
+                        sub.strip(), flags=re.IGNORECASE,
+                    )
+                    if _m_trail and int(_m_trail.group(2)) >= 2:
+                        qty = int(_m_trail.group(2))
+                        last_qty = qty
+                        prod = _m_trail.group(1).replace("_", "/").strip()
+                    else:
+                        # No leading quantity — inherit from last seen qty (or default 1)
+                        qty = last_qty
+                        prod = sub.strip().replace("_", "/")
                 if not prod:
                     continue
                 # Split "tornillos y taquetes de ¼ de plástico" into separate products
