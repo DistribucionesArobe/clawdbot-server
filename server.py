@@ -2375,6 +2375,49 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
     _edit_state = _edit_state or {}
     _cart = _edit_state.get("cart") or []
 
+    # ── HIGH-PRIORITY: "Quitar producto" button handler ─────────────
+    # This fires FIRST, before any state-dependent logic, to guarantee
+    # the button always shows the removal list regardless of pending flags.
+    _early_stripped = re.sub(r"[^\w\s]", "", tnorm).strip()
+    _early_stripped = re.sub(r"\s+", " ", _early_stripped)
+    _early_remove_triggers = {
+        "quitar producto", "quitar productos", "quitar", "eliminar producto",
+        "eliminar", "borrar producto", "remover", "remover producto",
+        "quitar un producto", "quitar algo",
+    }
+    if _early_stripped in _early_remove_triggers:
+        print(f"EARLY REMOVE TRIGGER: raw={user_text!r} tnorm={tnorm!r} stripped={_early_stripped!r}")
+        if not _cart:
+            return "Tu carrito está vacío."
+        # Clear any stale removal-related flags so we re-render the list fresh
+        _edit_state.pop("awaiting_removal_qty", None)
+        _edit_state["awaiting_removal"] = True
+        if wa_from:
+            upsert_quote_state(company_id, wa_from, _edit_state)
+        _removal_rows = []
+        for _ri, _item in enumerate(_cart[:9]):
+            _rname = (_item.get("name") or "Producto")
+            _rqty = int(_item.get("qty") or 0)
+            _removal_rows.append({
+                "id": f"remove_{_ri}",
+                "title": _rname[:24],
+                "description": f"{_rqty}x — quitar este"[:72],
+            })
+        _removal_rows.append({
+            "id": "remove_cancel",
+            "title": "❌ Cancelar",
+            "description": "No quitar nada",
+        })
+        _body_msg = "¿Cuál producto quieres quitar?"
+        if len(_cart) > 9:
+            _body_msg += f"\n\n(Mostrando 9 de {len(_cart)}. O escribe el nombre directo.)"
+        return {
+            "type": "list",
+            "body": _body_msg,
+            "sections": [{"title": "Tu carrito", "rows": _removal_rows}],
+            "button_label": "Ver productos",
+        }
+
     ver_triggers = {"ver carrito", "mi carrito", "que llevo", "qué llevo", "ver pedido", "mi pedido"}
     if tnorm in ver_triggers:
         if not _cart:
