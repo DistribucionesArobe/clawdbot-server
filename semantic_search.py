@@ -1130,12 +1130,12 @@ def seed_jerga_global(conn):
         # Pijas de tablaroca = pija 6 x 1 (variant of "pijas para tablaroca")
         ("pija de tablaroca", "pija 6 x 1"),
         ("pijas de tablaroca", "pija 6 x 1"),
-        # "Tornillo para tablaroca" es jerga común para pija framer/pija 6x1
-        # (no son tornillos convencionales — usan la punta autoperforante)
-        ("tornillo para tablaroca", "pija framer"),
-        ("tornillos para tablaroca", "pija framer"),
-        ("tornillo tablaroca", "pija framer"),
-        ("tornillos tablaroca", "pija framer"),
+        # "Tornillo para tablaroca" = pija 6x1 (la pija negra estándar para tablaroca)
+        # NO es pija framer — framer es para estructura metálica (postes/canales)
+        ("tornillo para tablaroca", "pija 6 x 1"),
+        ("tornillos para tablaroca", "pija 6 x 1"),
+        ("tornillo tablaroca", "pija 6 x 1"),
+        ("tornillos tablaroca", "pija 6 x 1"),
         # "Tiras de madera" = barrote (sin medida específica)
         ("tiras de madera", "barrote madera"),
         ("tira de madera", "barrote madera"),
