@@ -2415,6 +2415,23 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         if wa_from:
             upsert_quote_state(company_id, wa_from, _edit_state)
 
+    # Pre-check: si el usuario vuelve a hacer click en "Quitar producto" (con o sin emoji),
+    # tratamos como un nuevo inicio del flujo aunque awaiting_removal ya esté activo.
+    # Así evitamos caer en la rama de "buscar '🗑️ quitar producto' en el carrito" que no matchea.
+    _tnorm_stripped_pre = re.sub(r"[^\w\s]", "", tnorm).strip()
+    _tnorm_stripped_pre = re.sub(r"\s+", " ", _tnorm_stripped_pre)
+    _remove_triggers_pre = {
+        "quitar producto", "quitar productos", "quitar", "eliminar producto",
+        "eliminar", "remover", "remover producto",
+        "quitar un producto", "quitar algo",
+    }
+    if _tnorm_stripped_pre in _remove_triggers_pre:
+        # Limpia estado viejo y deja que el flujo normal más abajo muestre la lista
+        _edit_state.pop("awaiting_removal", None)
+        _edit_state.pop("awaiting_removal_qty", None)
+        if wa_from:
+            upsert_quote_state(company_id, wa_from, _edit_state)
+
     # Si estamos esperando que el usuario seleccione qué quitar
     if _edit_state.get("awaiting_removal"):
         _edit_state.pop("awaiting_removal", None)
@@ -2638,12 +2655,13 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
 
     # Detect "Quitar producto" button with or without emoji/variations
     _tnorm_stripped = re.sub(r"[^\w\s]", "", tnorm).strip()
+    _tnorm_stripped = re.sub(r"\s+", " ", _tnorm_stripped)
     _remove_triggers = {
         "quitar producto", "quitar productos", "quitar", "eliminar producto",
         "eliminar", "borrar producto", "borrar", "remover", "remover producto",
         "quitar un producto", "quitar algo",
     }
-    if tnorm in {"🗑️ quitar producto", "quitar producto"} or _tnorm_stripped in _remove_triggers:
+    if _tnorm_stripped in _remove_triggers:
         _cart_q = (_edit_state.get("cart") or [])
         if not _cart_q:
             return "Tu carrito está vacío."
