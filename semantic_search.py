@@ -1130,6 +1130,17 @@ def seed_jerga_global(conn):
         # Pijas de tablaroca = pija 6 x 1 (variant of "pijas para tablaroca")
         ("pija de tablaroca", "pija 6 x 1"),
         ("pijas de tablaroca", "pija 6 x 1"),
+        # "Tornillo para tablaroca" es jerga común para pija framer/pija 6x1
+        # (no son tornillos convencionales — usan la punta autoperforante)
+        ("tornillo para tablaroca", "pija framer"),
+        ("tornillos para tablaroca", "pija framer"),
+        ("tornillo tablaroca", "pija framer"),
+        ("tornillos tablaroca", "pija framer"),
+        # "Tiras de madera" = barrote (sin medida específica)
+        ("tiras de madera", "barrote madera"),
+        ("tira de madera", "barrote madera"),
+        ("tira madera", "barrote madera"),
+        ("tiras madera", "barrote madera"),
         # Yeso = gypsum powder (NOT redimix which is pre-mixed joint compound)
         # Protect term so hybrid search doesn't fuzzy-match to redimix.
         ("yeso", "yeso"),
