@@ -73,14 +73,40 @@ app = FastAPI(title="Clawdbot Server", version="1.0")
 # por >10 min, notifica al owner y marca el estado como escalado por silencio.
 SILENCE_CHECK_INTERVAL_SEC = 300  # 5 min
 SILENCE_THRESHOLD_MIN = 10
+CONVERSATION_DEATH_MIN = 60  # 1 hora sin respuesta → limpiar estado
 
 async def _silence_escalation_loop():
     while True:
         try:
             await asyncio.sleep(SILENCE_CHECK_INTERVAL_SEC)
             _run_silence_escalation_once()
+            _run_conversation_death_once()
         except Exception as _e:
             print("SILENCE LOOP ERROR:", repr(_e))
+
+def _run_conversation_death_once():
+    """Mata (limpia) el estado de conversaciones sin actividad por >1 hora.
+    Esto evita que el buffer de mensajes, carritos viejos, o flags como
+    awaiting_removal queden colgados indefinidamente y afecten interacciones futuras.
+    """
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            DELETE FROM wa_quote_state
+            WHERE updated_at < now() - interval '%s minutes'
+            RETURNING company_id::text, wa_from
+            """ % CONVERSATION_DEATH_MIN
+        )
+        killed = cur.fetchall() or []
+        conn.commit()
+        cur.close()
+        conn.close()
+        for company_id, wa_from in killed:
+            print(f"CONVERSATION DEATH: company={company_id} client={wa_from} idle>{CONVERSATION_DEATH_MIN}min — state cleared")
+    except Exception as _e:
+        print("CONVERSATION DEATH ERROR:", repr(_e))
 
 def _run_silence_escalation_once():
     try:
