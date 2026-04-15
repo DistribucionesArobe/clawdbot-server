@@ -2075,8 +2075,25 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         if _bot_state.get("bot_active") is False:
             return ""
 
+    # ── Check for button clicks BEFORE buffer flush ─────────────────
+    # The message buffer could prepend stale text like "salor" to the
+    # current "🗑️ Quitar producto" click, making the early trigger miss.
+    # If the CURRENT message alone is a button click, skip buffer prepend.
+    _raw_current = (user_text or "").strip().lower()
+    _raw_current_stripped = re.sub(r"[^\w\s]", "", _raw_current).strip()
+    _raw_current_stripped = re.sub(r"\s+", " ", _raw_current_stripped)
+    _button_click_triggers = {
+        "quitar producto", "quitar productos", "quitar",
+        "eliminar producto", "eliminar", "borrar producto", "remover", "remover producto",
+        "pagar", "agregar mas", "agregar mas productos",
+        "cotizar materiales", "salir", "nueva cotizacion",
+        "hablar con alguien", "horarios y ubicacion",
+    }
+    _is_button_click = is_interactive and _raw_current_stripped in _button_click_triggers
+
     # Flush stale message buffer (>15s old) — prepend to current message
-    if wa_from:
+    # SKIP if current message is a button click (prevents buffer from mangling it)
+    if wa_from and not _is_button_click:
         import time as _tflush
         _flush_state = get_quote_state(company_id, wa_from) or {}
         _flush_buf = _flush_state.get("_msg_buffer")
@@ -2088,6 +2105,13 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                     user_text = " ".join(_old) + " " + user_text
                 _flush_state.pop("_msg_buffer", None)
                 upsert_quote_state(company_id, wa_from, _flush_state)
+    elif wa_from and _is_button_click:
+        # Clear the buffer silently — the button click should take priority
+        _flush_state = get_quote_state(company_id, wa_from) or {}
+        if _flush_state.get("_msg_buffer"):
+            _flush_state.pop("_msg_buffer", None)
+            upsert_quote_state(company_id, wa_from, _flush_state)
+            print(f"BUTTON CLICK: cleared stale buffer for {wa_from}")
 
     if is_interactive:
         user_text = (user_text or "").strip()
