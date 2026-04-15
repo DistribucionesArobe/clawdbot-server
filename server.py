@@ -6379,9 +6379,10 @@ def extract_qty_items_robust(text: str):
                     prod = m.group(2).replace("_", "/").strip()
                 else:
                     # Trailing qty: "Tornillo para tablaroca 300" → qty=300, prod="Tornillo para tablaroca"
-                    # Only match integers ≥2 at end of string, after at least one letter-word
+                    # Also handles "Tiras de madera 7 mts" → qty=7, prod="Tiras de madera"
+                    # (optional trailing unit like mts, metros, pzas, kg, etc.)
                     _m_trail = re.match(
-                        r"^\s*([a-záéíóúñ].*?[a-záéíóúñ])\s+(\d{1,6})\s*$",
+                        r"^\s*([a-záéíóúñ].*?[a-záéíóúñ])\s+(\d{1,6})\s*(mts?|metros?|pzas?|piezas?|kg|kgs?|lts?|litros?|m|cm|mm|pulg|pulgadas?)?\s*$",
                         sub.strip(), flags=re.IGNORECASE,
                     )
                     if _m_trail and int(_m_trail.group(2)) >= 2:
@@ -6394,14 +6395,40 @@ def extract_qty_items_robust(text: str):
                         prod = sub.strip().replace("_", "/")
                 if not prod:
                     continue
+                # "X y Y ... N paquete de cada uno/1" → N of each product
+                # Ej: "Taquete y tornillo 1/4  1 paquete de cada 1" → 1 taquete 1/4 + 1 tornillo 1/4
+                _de_cada_match = re.search(
+                    r"\s+(\d+)\s*(?:paquetes?|piezas?|pzas?|unidades?|bolsas?|cajas?)?\s*de\s+cada\s*(?:uno|una|1)?\s*\d*\s*$",
+                    prod, re.IGNORECASE
+                )
+                if _de_cada_match:
+                    _de_cada_qty = int(_de_cada_match.group(1))
+                    qty = _de_cada_qty
+                    last_qty = qty
+                    prod = prod[:_de_cada_match.start()].strip()
+
                 # Split "tornillos y taquetes de ¼ de plástico" into separate products
                 # Only split on " y " between alphabetic words (not specs like "6x1 y 8x2")
                 _y_split = re.split(r"\s+y\s+(?=[a-záéíóúñ])", prod, flags=re.IGNORECASE)
                 # If split produced multiple parts, check they each have an alpha word
                 if len(_y_split) > 1 and all(re.search(r"[a-záéíóúñ]{3,}", p, re.IGNORECASE) for p in _y_split):
                     # Shared trailing spec: "tornillos y taquetes de ¼ de plástico"
-                    # The last part keeps its spec, earlier parts get just the word
-                    prod_list = _y_split
+                    # If the LAST part has a spec pattern and earlier parts don't, share it.
+                    _last = _y_split[-1].strip()
+                    _spec_pat = r"(?:\d+[/\-x×]\d+|\d+/\d+|\bcal\s*\d+|\b\d+\s*(?:mm|cm|pulg)\b)"
+                    _last_spec_m = re.search(_spec_pat, _last, re.IGNORECASE)
+                    if _last_spec_m:
+                        _last_spec = _last_spec_m.group(0)
+                        _shared = []
+                        for _i, _p in enumerate(_y_split):
+                            _p = _p.strip()
+                            # Append spec to earlier parts that lack any spec
+                            if _i < len(_y_split) - 1 and not re.search(_spec_pat, _p, re.IGNORECASE):
+                                _p = f"{_p} {_last_spec}"
+                            _shared.append(_p)
+                        prod_list = _shared
+                    else:
+                        prod_list = _y_split
                 else:
                     prod_list = [prod]
                 for _yp in prod_list:
