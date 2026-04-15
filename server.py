@@ -2837,7 +2837,9 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
     _t_lower = user_text.lower().strip()
     # No interceptar si el mensaje tiene números con productos (ej: "10 cemento y factura")
     _has_qty = bool(re.search(r"\b\d+\s+[a-záéíóúñü]", _t_lower))
-    if not _has_qty and any(kw in _t_lower for kw in _non_quote_keywords):
+    # No interceptar preguntas legítimas de horario/ubicación — tienen su handler propio
+    _is_hours_question = looks_like_hours_question(user_text)
+    if not _has_qty and not _is_hours_question and any(kw in _t_lower for kw in _non_quote_keywords):
         # Verificar que no sea un saludo simple o que ya esté en escalation_triggers
         _is_escalation_kw = any(rt == tnorm or rt in tnorm for rt in escalation_triggers)
         if not _is_escalation_kw:
