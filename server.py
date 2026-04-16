@@ -3886,14 +3886,37 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                             "qty": _qty,
                         })
                     else:
-                        print(f"LLM KEY NOT IN CATALOG: key={_key!r}")
-                        missing.append({"qty": _qty, "raw": _matched or _name, "candidates": []})
+                        # Key del LLM no matcheó en catálogo → intenta smart_search
+                        print(f"LLM KEY NOT IN CATALOG: key={_key!r}, trying smart_search")
+                        _search_name2 = _name or _matched or _key
+                        try:
+                            _fb2 = smart_search(conn, company_id, _search_name2, _qty,
+                                                 cart_context=user_text[:200])
+                            if _fb2 and _fb2.get("status") == "found":
+                                state = cart_add_item(state, {
+                                    "sku": _fb2["item"].get("sku"),
+                                    "name": _fb2["item"].get("name"),
+                                    "unit": _fb2["item"].get("unit") or "unidad",
+                                    "price": float(_fb2["item"].get("price") or 0.0),
+                                    "vat_rate": _fb2["item"].get("vat_rate"),
+                                    "qty": _qty,
+                                })
+                                print(f"LLM KEY MISS → SMART_SEARCH: {_search_name2!r} → {_fb2['item'].get('name')!r}")
+                            elif _fb2 and _fb2.get("candidates"):
+                                missing.append({"qty": _qty, "raw": _search_name2,
+                                                "candidates": _fb2["candidates"]})
+                            else:
+                                missing.append({"qty": _qty, "raw": _matched or _name, "candidates": []})
+                        except Exception as _fb2e:
+                            print(f"LLM KEY MISS FALLBACK ERROR: {repr(_fb2e)}")
+                            missing.append({"qty": _qty, "raw": _matched or _name, "candidates": []})
                 else:
                     # Low confidence or no key → intenta smart_search como último recurso
                     _fallback_found = False
-                    if _name and len(_name.strip()) >= 3:
+                    _search_name = _name or _matched
+                    if _search_name and len(_search_name.strip()) >= 3:
                         try:
-                            _fb_result = smart_search(conn, company_id, _name, _qty,
+                            _fb_result = smart_search(conn, company_id, _search_name, _qty,
                                                        cart_context=user_text[:200])
                             if _fb_result and _fb_result.get("status") == "found":
                                 state = cart_add_item(state, {
@@ -3905,7 +3928,13 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                                     "qty": _qty,
                                 })
                                 _fallback_found = True
-                                print(f"LLM FALLBACK SMART_SEARCH: {_name!r} → {_fb_result['item'].get('name')!r}")
+                                print(f"LLM FALLBACK SMART_SEARCH: {_search_name!r} → {_fb_result['item'].get('name')!r}")
+                            elif _fb_result and _fb_result.get("candidates"):
+                                # Ambiguo: pasar candidatos para que el bot pregunte al cliente
+                                missing.append({"qty": _qty, "raw": _search_name,
+                                                "candidates": _fb_result["candidates"]})
+                                _fallback_found = True
+                                print(f"LLM FALLBACK AMBIGUOUS: {_search_name!r} → {len(_fb_result['candidates'])} candidates")
                         except Exception as _fbe:
                             print(f"LLM FALLBACK ERROR: {repr(_fbe)}")
                     if not _fallback_found:
