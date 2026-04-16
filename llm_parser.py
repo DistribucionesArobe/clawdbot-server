@@ -337,13 +337,15 @@ JERGA_HINTS = """Jerga típica de ferretería mexicana:
 - "tabla WR" / "hoja WR" = tablaroca anti-moho.
 - "tramos de madera" / "tiras de madera" / "barrotes" / "listones de madera" → barrote de madera.
 
-REGLAS DE DEFAULTS (cuando el cliente NO especifica variante, calibre, medida, etc.):
-- Usa tu conocimiento de construcción/ferretería para elegir la variante más común y estándar del producto.
-- Tablaroca: estructura (postes, canales, ángulos, furring) → calibre 26 por defecto.
-- Durock: estructura (postes, canales) → calibre 20 por defecto.
-- Si el contexto del pedido indica el sistema constructivo (ej. mayormente tablaroca, o mayormente durock), usa eso para inferir el calibre de la estructura.
-- Si se pide explícitamente un calibre, medida o variante → respeta lo que pidió el cliente.
-- En general: cuando hay ambigüedad entre varias opciones del catálogo, elige la más vendida/estándar del rubro. Si no puedes determinarlo, devuelve key=null para que el bot pregunte al cliente.
+RESOLUCIÓN DE AMBIGÜEDADES — USA TU CONOCIMIENTO DE LA INDUSTRIA:
+Cuando el cliente NO especifica variante, calibre, medida, etc., NO adivines al azar ni elijas el primero del catálogo. En su lugar, usa tu conocimiento técnico de construcción y ferretería mexicana para inferir la opción correcta, tal como lo haría un vendedor experimentado:
+- Analiza el CONTEXTO del pedido completo. Si el cliente pide tablaroca + postes + canales, es un sistema de tablaroca → la estructura es calibre 26. Si pide durock + postes, es sistema durock → calibre 20.
+- "Tornillo para tablaroca" = pija 6x1 (punta fina). "Tornillo framer" / "punta broca" = pija framer. "Tornillo para durock" = pija para durock. Esto lo sabe cualquier tablaroquero.
+- "Canal de amarre" sin calibre, en contexto de tablaroca = cal 26. En contexto de durock = cal 20.
+- "Tiras de madera" = barrotes. "Taquetes un cuarto" = taquete de plástico 1/4".
+- Cuando hay varias presentaciones de un producto (ej. Redimix 6kg, 21.8kg, 28kg), elige la que mejor corresponda a la cantidad o descripción del cliente ("cajas de 21kg" → Redimix 21.8 kg).
+- Si genuinamente no puedes determinar cuál variante es, devuelve key=null y confidence baja para que el bot pregunte al cliente.
+- Si el cliente SÍ especifica (ej. "postes cal 20", "canal cal 22"), SIEMPRE respeta lo que pidió.
 """
 
 
@@ -351,7 +353,7 @@ REGLAS DE DEFAULTS (cuando el cliente NO especifica variante, calibre, medida, e
 # Prompt
 # ---------------------------------------------------------------------------
 
-SYSTEM_PROMPT = """Eres un parser de órdenes para una ferretería mexicana especializada en materiales de tablaroca, durock, rejacero, láminas y estructura metálica. Recibes mensajes de clientes por WhatsApp y los conviertes en una lista estructurada.
+SYSTEM_PROMPT = """Eres un parser de órdenes para un distribuidor mexicano de materiales de construcción. Su fuerte es construcción ligera (drywall) con marcas como USG, Saint-Gobain y Panel Rey, pero también vende: rejacero y cercas (malla ciclónica, alambre de púas, poste ganadero), láminas (galvanizada, acero inoxidable, aluminio, policarbonato), pintura (esmalte, vinílica), puertas multipanel, plafones, impermeabilizante, herramienta menor, y accesorios varios. Los clientes típicos son contratistas, instaladores y ferreterías. Recibes mensajes de clientes por WhatsApp y los conviertes en una lista estructurada.
 
 {jerga}
 
