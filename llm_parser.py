@@ -322,10 +322,10 @@ JERGA_HINTS = """Jerga típica de ferretería mexicana:
 - "durock" / "duroc" / "durrock" → durock.
 - "basecoat" / "base coat" / "basekoat" / "biscoat" / "pasta tablaroca" / "pasta para juntas" / "pasta durock" / "compuesto para juntas" → basecoat.
 - "redimix" / "redemix" / "ready mix" / "compuesto std plus" / "compuesto estandar plus" → redimix.
-- "perfacinta" / "perfacita" / "prefacinta" / "cinta papel" / "cinta de papel usg" / "cinta union" / "cinta de union" → perfacinta.
+- "perfacinta" / "perfacita" / "prefacinta" / "perfacintas" / "cinta papel" / "cinta de papel usg" / "cinta union" / "cinta de union" → perfacinta usg 75m x 5cm (es el ÚNICO producto de perfacinta — siempre matchea a esa key).
 - "cinta fibra" / "cinta de malla" / "cinta maya" / "malla para tablaroca" / "malla tablaroca" / "malla durock" → cinta fibra de vidrio.
 - "pilas" / "pila" / "pijas" = pijas (tornillos). "pija fremer" / "pija flamer" / "pija frame" / "framer" → pija framer. "pija para durock" / "pilas para durock". "pija para tablaroca" / "tornillo para tablaroca" / "pija 6x1" → pija 6 x 1. "pija 10x1 1/2" / "pija 10x1.5" / "fijasora" / "punta de broca" → pija 10 x 1 1/2.
-- "taquete ancla" / "taquete anclo" / "ancla de expansion" → taquete expansion.
+- "taquete ancla" / "taquete anclo" / "ancla de expansion" → taquete expansion. "taquete un cuarto" / "taquetes 1/4" / "taquetes de un cuarto" → taquete de plástico 1/4".
 - "cancel" / "cnal" / "canel" / "canaleta" → canal. "canal de amarre" / "canal amarre" usualmente es canal 6.35. "canaleta de carga" / "cargadora" / "canaleta CA" → canaleta de carga.
 - "reborde jota" / "revorde j" / "revoque j" / "reborder j" → reborde j galvanizado.
 - "postes" / "pste" / "psts". "poste para la reja" / "poste de reja" → poste para rejacero.
@@ -354,7 +354,7 @@ REGLAS:
 1. Identifica cada producto que el cliente quiere cotizar. El mensaje puede tener 1 o muchos productos separados por comas, guiones, asteriscos, viñetas, saltos de línea, "y", o listas enumeradas.
 2. Para cada producto, elige el <key> del catálogo que mejor corresponde. NUNCA inventes una key que no esté listada arriba.
 3. Si el cliente escribe jerga, typos o nombres cortos, usa tu conocimiento de ferretería mexicana y la sección de jerga arriba para identificar el producto correcto.
-4. Si NO hay match claro en el catálogo, devuelve key=null y confidence baja (<0.6), con el texto original en matched_text y name.
+4. Si NO hay match claro en el catálogo, devuelve key=null y confidence baja (<0.6), con el texto original en matched_text y name. PERO si hay una sola opción posible del tipo de producto (ej. solo existe una perfacinta, un solo basecoat), SÍ devuelve esa key con confidence alta.
 5. Cantidad por defecto: 1. Interpreta "2 de cada", "5 paquetes", "10 mts", cantidades al final del producto ("Tornillo 300"), números con decimal como cantidades (175 o 175.00 panel = 175 unidades, NO precio).
 6. Si una línea dice "1 ???" o similar (basura), IGNÓRALA por completo.
 7. Si el mensaje es un botón de UI, un saludo puro ("hola", "buenos días"), una pregunta de horarios, un número de teléfono, o un "salir" / "cancelar", devuelve items=[] y non_order=true.

@@ -1584,13 +1584,14 @@ def log_message(company_id: str, client_phone: str, role: str, message: str, ext
 # Parser shadow mode: corre LLM en paralelo y loguea para comparar
 # ============================================================
 _PARSER_SHADOW_ENABLED = os.environ.get("PARSER_SHADOW", "0") in ("1", "true", "True")
+_PARSER_LLM_FIRST = os.environ.get("PARSER_LLM_FIRST", "0") in ("1", "true", "True")
 
 def _load_catalog_for_shadow(company_id: str) -> list[dict]:
     try:
         conn = get_conn()
         cur = conn.cursor()
         cur.execute(
-            "SELECT sku, name, unit, price FROM pricebook_items "
+            "SELECT sku, name, unit, price, vat_rate FROM pricebook_items "
             "WHERE company_id = %s ORDER BY name",
             (company_id,),
         )
@@ -1598,12 +1599,42 @@ def _load_catalog_for_shadow(company_id: str) -> list[dict]:
         cur.close()
         conn.close()
         return [
-            {"sku": r[0], "name": r[1], "unit": r[2], "price": float(r[3]) if r[3] is not None else None}
+            {"sku": r[0], "name": r[1], "unit": r[2],
+             "price": float(r[3]) if r[3] is not None else None,
+             "vat_rate": float(r[4]) if r[4] is not None else None}
             for r in rows
         ]
     except Exception as e:
         print("SHADOW: catalog load error:", repr(e))
         return []
+
+def _try_llm_parse(company_id: str, user_text: str) -> dict | None:
+    """Intenta parsear con LLM. Devuelve resultado o None si falla."""
+    try:
+        from llm_parser import llm_parse_order, norm_key
+        catalog = _load_catalog_for_shadow(company_id)
+        if not catalog:
+            return None
+        import time as _t
+        t0 = _t.time()
+        result = llm_parse_order(user_text, catalog)
+        ms = int((_t.time() - t0) * 1000)
+        print(f"LLM PARSE: {ms}ms, items={len(result.get('items', []))}, "
+              f"non_order={result.get('non_order')}, error={result.get('error')}")
+        if result.get("error"):
+            print(f"LLM PARSE FAILED: {result['error']} — falling back to regex")
+            return None
+        # Attach catalog lookup dict for downstream use
+        cat_by_key = {}
+        for ci in catalog:
+            k = norm_key(ci.get("name") or "")
+            cat_by_key[k] = ci
+        result["_catalog"] = catalog
+        result["_cat_by_key"] = cat_by_key
+        return result
+    except Exception as e:
+        print(f"LLM PARSE EXCEPTION: {repr(e)} — falling back to regex")
+        return None
 
 def log_parser_shadow(company_id, client_phone, user_text, regex_items):
     if not _PARSER_SHADOW_ENABLED:
@@ -3802,6 +3833,130 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             _buf_state2.pop("_msg_buffer", None)
             upsert_quote_state(company_id, wa_from, _buf_state2)
 
+    # ── LLM-first parser: intenta LLM primero, regex como fallback ──
+    _llm_result = None
+    if _PARSER_LLM_FIRST:
+        _llm_result = _try_llm_parse(company_id, user_text)
+
+    if _llm_result and _llm_result.get("items") and not _llm_result.get("non_order"):
+        # ── LLM PATH: procesa items directamente sin regex ni smart_search ──
+        from llm_parser import norm_key as _llm_norm_key
+        _cat_by_key = _llm_result.get("_cat_by_key") or {}
+        _parser_used = "llm"
+        print(f"LLM ITEMS: {[(it.get('qty'), it.get('key') or it.get('name')) for it in _llm_result['items']]}")
+        conn = get_conn()
+        try:
+            state = get_quote_state(company_id, wa_from) if wa_from else None
+            if not state:
+                state = {}
+            state.pop("pending_specs", None)
+            state.pop("pending", None)
+            missing = []
+            for item in _llm_result["items"]:
+                _key = item.get("key")
+                _qty = item.get("qty", 1)
+                _conf = item.get("confidence", 0)
+                _matched = item.get("matched_text", "")
+                _name = item.get("name", _matched)
+                if _key and _conf >= 0.7:
+                    cat_item = _cat_by_key.get(_key)
+                    if not cat_item:
+                        # Intenta buscar con norm_key por si hay diferencias menores
+                        _nk = _llm_norm_key(_key)
+                        cat_item = _cat_by_key.get(_nk)
+                    if cat_item:
+                        state = cart_add_item(state, {
+                            "sku": cat_item.get("sku"),
+                            "name": cat_item.get("name"),
+                            "unit": cat_item.get("unit") or "unidad",
+                            "price": float(cat_item.get("price") or 0.0),
+                            "vat_rate": cat_item.get("vat_rate"),
+                            "qty": _qty,
+                        })
+                    else:
+                        print(f"LLM KEY NOT IN CATALOG: key={_key!r}")
+                        missing.append({"qty": _qty, "raw": _matched or _name, "candidates": []})
+                else:
+                    # Low confidence or no key → missing (escalation candidate)
+                    missing.append({"qty": _qty, "raw": _matched or _name, "candidates": []})
+
+            if missing:
+                state["pending"] = missing
+                _retry_map = state.get("retry_count") or {}
+                for _m in missing:
+                    _rkey = (_m.get("raw") or "").strip().lower()
+                    if _rkey and _rkey != "producto ilegible":
+                        _retry_map[_rkey] = int(_retry_map.get(_rkey, 0)) + 1
+                state["retry_count"] = _retry_map
+                _total_items = len(_llm_result["items"])
+                _miss_count = len([m for m in missing if m.get("raw") != "producto ilegible"])
+                _should_escalate_low = (
+                    _total_items >= 3
+                    and _miss_count >= 3
+                    and (_miss_count / max(_total_items, 1)) >= 0.5
+                )
+                _retry_escalated = [k for k, v in _retry_map.items() if v >= 2]
+                _should_escalate_retry = bool(_retry_escalated)
+                if (_should_escalate_low or _should_escalate_retry) and wa_from:
+                    try:
+                        _conn_esc = get_conn()
+                        _cur_esc = _conn_esc.cursor()
+                        _cur_esc.execute(
+                            "SELECT owner_phone, wa_api_key, wa_phone_number_id, telefono_atencion, name FROM companies WHERE id=%s",
+                            (company_id,),
+                        )
+                        _row_esc = _cur_esc.fetchone()
+                        _cur_esc.close()
+                        _conn_esc.close()
+                        _atencion = (_row_esc[3] or _row_esc[0] or "").strip() if _row_esc else ""
+                        _cname = (_row_esc[4] if _row_esc else "la empresa") or "la empresa"
+                        _notify_phone = (_row_esc[3] or _row_esc[0] or "").strip() if _row_esc else ""
+                        if _notify_phone and _row_esc and _row_esc[1] and _row_esc[2]:
+                            _reason = (
+                                f"Múltiples productos sin match ({_miss_count}/{_total_items})"
+                                if _should_escalate_low
+                                else f"Producto intentado {max(_retry_map.values())}x sin éxito"
+                            )
+                            try:
+                                notify_owner_escalation(
+                                    wa_api_key=_row_esc[1], phone_number_id=_row_esc[2],
+                                    owner_phone=_notify_phone, client_phone=wa_from,
+                                    reason=_reason, state=state,
+                                )
+                            except Exception as _ne:
+                                print("LLM ESCALATION NOTIFY ERROR:", repr(_ne))
+                        state["escalated_proactive"] = True
+                        if wa_from:
+                            upsert_quote_state(company_id, wa_from, state)
+                        print(f"LLM ESCALATION: low={_should_escalate_low} retry={_should_escalate_retry} miss={_miss_count}/{_total_items}")
+                        _phone_clean = _normalize_mx_phone(_atencion) if _atencion else ""
+                        _prefix = cart_render_quote(state, company_id=company_id, client_phone=wa_from) + "\n\n" if state.get("cart") else ""
+                        if _phone_clean:
+                            return _prefix + (
+                                f"Veo que varios productos no los tengo identificados exacto. "
+                                f"Para que no batalles, mejor te atiende un asesor de *{_cname}* directo 🙏\n\n"
+                                f"👉 https://wa.me/{_phone_clean}\n\n"
+                                f"Ya le avisé para que te contacte."
+                            )
+                        return _prefix + (
+                            "Veo que varios productos no los tengo identificados exacto. "
+                            "Un asesor te va a contactar para ayudarte directo 🙏"
+                        )
+                    except Exception as _e:
+                        print("LLM ESCALATION ERROR:", repr(_e))
+            else:
+                state.pop("pending", None)
+                state.pop("retry_count", None)
+                state.pop("escalated_proactive", None)
+            if wa_from:
+                upsert_quote_state(company_id, wa_from, state)
+            if not state.get("cart") and not missing:
+                return "No encontré esos productos en el catálogo."
+            return _build_reply_with_pending(state, company_id=company_id, wa_from=wa_from)
+        finally:
+            conn.close()
+
+    # ── Fallback: regex parser (si LLM no está activo o falló) ──
     # Detect free-text: single long line with multiple products but no line breaks/bullets
     # e.g. "40 tablaroca 20 angulo 30 canal carga 2000 pijas de 1 1 Kg alambre"
     # These are almost impossible for regex to parse correctly — use GPT first
