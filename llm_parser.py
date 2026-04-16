@@ -298,7 +298,7 @@ def llm_parse_order(
     *,
     model: str = "gpt-4o-mini",
     temperature: float = 0.0,
-    timeout: float = 15.0,
+    timeout: float = 30.0,
     min_confidence: float = 0.7,
     include_jerga_hints: bool = True,
 ) -> dict:
@@ -350,7 +350,7 @@ def llm_parse_order(
 
     start = time.time()
     try:
-        resp = _get_client().chat.completions.create(
+        resp = _get_client().with_options(max_retries=0).chat.completions.create(
             model=model,
             temperature=temperature,
             timeout=timeout,
