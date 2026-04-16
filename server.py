@@ -1580,6 +1580,80 @@ def log_message(company_id: str, client_phone: str, role: str, message: str, ext
         print("LOG_MESSAGE ERROR:", repr(e))
 
 
+# ============================================================
+# Parser shadow mode: corre LLM en paralelo y loguea para comparar
+# ============================================================
+_PARSER_SHADOW_ENABLED = os.environ.get("PARSER_SHADOW", "0") in ("1", "true", "True")
+
+def _load_catalog_for_shadow(company_id: str) -> list[dict]:
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT sku, name, unit, price FROM pricebook_items "
+            "WHERE company_id = %s ORDER BY name",
+            (company_id,),
+        )
+        rows = cur.fetchall() or []
+        cur.close()
+        conn.close()
+        return [
+            {"sku": r[0], "name": r[1], "unit": r[2], "price": float(r[3]) if r[3] is not None else None}
+            for r in rows
+        ]
+    except Exception as e:
+        print("SHADOW: catalog load error:", repr(e))
+        return []
+
+def log_parser_shadow(company_id, client_phone, user_text, regex_items):
+    if not _PARSER_SHADOW_ENABLED:
+        return
+    if not user_text or len(user_text.strip()) < 2:
+        return
+    def _runner():
+        try:
+            from llm_parser import llm_parse_order
+            catalog = _load_catalog_for_shadow(company_id)
+            if not catalog:
+                return
+            import time as _t
+            t0 = _t.time()
+            result = llm_parse_order(user_text, catalog)
+            latency_ms = int((_t.time() - t0) * 1000)
+            regex_json = [{"qty": mi[0], "prod": mi[1]} for mi in (regex_items or []) if mi]
+            llm_json = result.get("items") or []
+            conn = get_conn()
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO parser_shadow_log
+                    (company_id, client_phone, user_text, regex_items, llm_items,
+                     llm_non_order, llm_error, llm_latency_ms, llm_model, created_at)
+                VALUES (%s, %s, %s, %s::jsonb, %s::jsonb, %s, %s, %s, %s, now())
+                """,
+                (
+                    company_id,
+                    client_phone,
+                    (user_text or "")[:4000],
+                    json.dumps(regex_json),
+                    json.dumps(llm_json),
+                    bool(result.get("non_order")),
+                    result.get("error"),
+                    latency_ms,
+                    result.get("model"),
+                ),
+            )
+            cur.close()
+            conn.close()
+        except Exception as e:
+            print("SHADOW: log error:", repr(e))
+    try:
+        import threading
+        threading.Thread(target=_runner, daemon=True).start()
+    except Exception as e:
+        print("SHADOW: thread spawn error:", repr(e))
+
+
 @app.get("/api/conversations")
 def list_conversations(
     request: Request,
@@ -3750,6 +3824,10 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         if not multi:
             multi = ner_extract_items(user_text)
             _parser_used = "ner"
+    try:
+        log_parser_shadow(company_id, wa_from or "", user_text or "", multi or [])
+    except Exception as _e:
+        print("SHADOW: skipped:", repr(_e))
     if multi:
         print(f"MULTI ITEMS ({_parser_used}): {[(q, p) for q, p, *_ in multi]}")
         conn = get_conn()

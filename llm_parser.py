@@ -1,0 +1,480 @@
+"""
+llm_parser.py — LLM-first order parser for CotizaExpress.
+
+Reemplaza extract_qty_items_robust + ner_extract_items.
+
+Diseño:
+- Un solo call a GPT-4o-mini con el mensaje completo + catálogo como contexto.
+- Cero jerga manual por cliente. Jerga global opcional (típica de ferretería MX).
+- Output JSON estructurado: key, name, qty, unit, confidence, matched_text, notes.
+- key = identificador estable. Como pricebook_items.sku está vacío en Aceromax,
+  usamos el nombre normalizado como key (lowercase, collapse spaces).
+- Si confidence < min_confidence o key=null → needs_escalation=True → escalar a dueño.
+- Costo estimado ~$0.0005/mensaje con catálogos de 200 SKUs en contexto.
+
+Integración:
+- build_reply_for_company() llama llm_parse_order() como path principal.
+- Si LLM falla (timeout, error JSON) → fallback silencioso a extract_qty_items_robust.
+- Shadow mode primero: loggear ambos resultados 24h antes de activar en producción.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import time
+import unicodedata
+from typing import Any
+
+try:
+    from openai import OpenAI
+except ImportError:
+    OpenAI = None  # para tests offline
+
+_client: Any = None
+
+
+def _get_client():
+    global _client
+    if _client is None:
+        if OpenAI is None:
+            raise RuntimeError("openai package not installed")
+        _client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    return _client
+
+
+# ---------------------------------------------------------------------------
+# Normalización
+# ---------------------------------------------------------------------------
+
+def norm_key(name: str) -> str:
+    """
+    Convierte el nombre de producto a una key estable:
+    lowercase, sin acentos, colapsando espacios, sin puntuación suelta.
+
+    Sirve como identificador cuando el SKU real está vacío.
+    """
+    if not name:
+        return ""
+    s = name.strip().lower()
+    # Quitar acentos
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    # Normalizar comillas tipográficas
+    s = s.replace("\u201c", '"').replace("\u201d", '"').replace("\u2019", "'")
+    # Colapsar whitespace
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+# ---------------------------------------------------------------------------
+# Pre-limpieza del mensaje
+# ---------------------------------------------------------------------------
+
+# Botones de la UI que el cliente puede tocar y llegan como texto
+_UI_BUTTONS = {
+    "🗑️ quitar producto", "quitar producto",
+    "➕ agregar más", "agregar mas", "agregar más",
+    "💳 pagar", "pagar",
+    "👤 hablar con alguien", "hablar con alguien", "hablar con ejecutivo",
+    "🔄 nueva cotización", "nueva cotizacion", "nueva cotización",
+    "🔨 cotizar materiales", "cotizar materiales",
+    "🕐 horarios y ubicación", "horarios y ubicacion", "horarios y ubicación",
+    "📐 cotizar cálculo", "cotizar calculo", "cotizar cálculo",
+    "salir", "saliir", "salor", "cancelar", "ver carrito", "hola",
+    "buenos dias", "buenos días", "buenas tardes", "buenas tarde",
+    "buen dia", "buen día",
+}
+
+# pick_A0, pick_A1... button IDs que se filtran como texto
+_PICK_ID_RE = re.compile(r"^pick_[a-z]\d+$", re.IGNORECASE)
+
+# Prefijos de timestamp de WhatsApp al pegar: "[14/04/26, 5:20:26 p.m.] ARB: ..."
+_WA_TIMESTAMP_RE = re.compile(
+    r"^\[\d{1,2}/\d{1,2}/\d{2,4},\s+\d{1,2}:\d{2}(:\d{2})?\s*[ap]\.?\s*m\.?\]\s*[^:]+:\s*",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+# Prefijos tipo viñeta markdown "•⁠  ⁠" (WhatsApp copia)
+_BULLET_PREFIX_RE = re.compile(r"^\s*[•·⁠\-*]+\s*", re.MULTILINE)
+
+# Líneas que son nombres de proyecto al inicio ("Mat. Privanzas", "Del closet")
+_PROJECT_HEADER_RE = re.compile(
+    r"^\s*(mat\.?|material|materiales|proyecto|del?|para|obra)\b[^\n]{0,40}$",
+    re.IGNORECASE,
+)
+
+
+def is_ui_interaction(text: str) -> bool:
+    """True si el mensaje es un botón/UI interaction y no una orden real."""
+    t = (text or "").strip().lower()
+    if not t:
+        return True
+    if _PICK_ID_RE.match(t):
+        return True
+    # Quitar puntuación trivial
+    t_clean = re.sub(r"[^\w\s]", "", t).strip()
+    t_clean = re.sub(r"\s+", " ", t_clean)
+    if t_clean in _UI_BUTTONS:
+        return True
+    # Saludo puro sin más contenido
+    if t_clean in {"hola", "buenos dias", "buenas tardes", "buenas noches", "buen dia"}:
+        return True
+    return False
+
+
+def preclean_message(text: str) -> str:
+    """
+    Limpia el mensaje antes de pasarlo al LLM:
+    - Quita timestamps de WhatsApp pegados
+    - Quita viñetas/prefijos markdown
+    - Quita headers de proyecto al inicio
+    - Colapsa líneas vacías múltiples
+    """
+    if not text:
+        return ""
+    t = text
+
+    # Quitar timestamps de WhatsApp
+    t = _WA_TIMESTAMP_RE.sub("", t)
+
+    # Quitar viñetas al inicio de cada línea
+    t = _BULLET_PREFIX_RE.sub("", t)
+
+    # Partir en líneas, quitar headers de proyecto de las primeras 2 líneas
+    lines = [ln.rstrip() for ln in t.splitlines()]
+    while lines and (not lines[0].strip() or _PROJECT_HEADER_RE.match(lines[0])):
+        lines.pop(0)
+
+    # Colapsar múltiples líneas vacías consecutivas
+    cleaned: list[str] = []
+    prev_empty = False
+    for ln in lines:
+        is_empty = not ln.strip()
+        if is_empty and prev_empty:
+            continue
+        cleaned.append(ln)
+        prev_empty = is_empty
+
+    return "\n".join(cleaned).strip()
+
+
+# ---------------------------------------------------------------------------
+# Catálogo → contexto
+# ---------------------------------------------------------------------------
+
+def format_catalog_for_prompt(catalog: list[dict]) -> str:
+    """
+    Convierte pricebook_items a texto compacto para el prompt.
+
+    Formato (una línea por producto):
+        key: <norm_key>
+        <name> | <unit> | <price>
+
+    Usamos dos líneas por producto para que el LLM distinga claramente la key
+    que debe devolver vs el nombre display. key siempre en lowercase sin acentos.
+    """
+    lines = []
+    for item in catalog:
+        name = (item.get("name") or "").strip()
+        if not name:
+            continue
+        key = norm_key(name)
+        unit = (item.get("unit") or "pza").strip()
+        price = item.get("price")
+        price_str = f"{float(price):.2f}" if price is not None else "-"
+        lines.append(f"- {key} || {name} | {unit} | {price_str}")
+    return "\n".join(lines)
+
+
+def prefilter_catalog(catalog: list[dict], text: str, max_items: int = 250) -> list[dict]:
+    """
+    Para catálogos grandes, rankea por overlap de tokens con el mensaje.
+    Aceromax tiene ~230 — cabe entero. Este hook es para clientes futuros
+    con catálogos de miles de SKUs.
+    """
+    if len(catalog) <= max_items:
+        return catalog
+
+    msg_norm = norm_key(text)
+    msg_tokens = {t for t in re.findall(r"[a-z0-9]{3,}", msg_norm) if t}
+    if not msg_tokens:
+        return catalog[:max_items]
+
+    scored = []
+    for item in catalog:
+        name_norm = norm_key(item.get("name") or "")
+        name_tokens = set(re.findall(r"[a-z0-9]{3,}", name_norm))
+        score = len(msg_tokens & name_tokens)
+        scored.append((score, item))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [item for _score, item in scored[:max_items]]
+
+
+# ---------------------------------------------------------------------------
+# Jerga global opcional (ferretería MX)
+# ---------------------------------------------------------------------------
+
+JERGA_HINTS = """Jerga típica de ferretería mexicana:
+- "tablaroca" = panel de yeso. "panel rey" / "panel de yeso" / "hojas de yeso" / "lamina de yeso" / "tablarock" / "tabla roca" / "tblrc" → tablaroca.
+- "lightrey" / "light rey" → tablaroca ultralight.
+- "tablaroca WR" / "tablaroca RH" / "tablaroca anti moho" / "azul celeste" / "panel rey MR" → tablaroca anti-moho.
+- "securock" / "securok" → securock (material distinto a tablaroca).
+- "durock" / "duroc" / "durrock" → durock.
+- "basecoat" / "base coat" / "basekoat" / "biscoat" / "pasta tablaroca" / "pasta para juntas" / "pasta durock" / "compuesto para juntas" → basecoat.
+- "redimix" / "redemix" / "ready mix" / "compuesto std plus" / "compuesto estandar plus" → redimix.
+- "perfacinta" / "perfacita" / "prefacinta" / "cinta papel" / "cinta de papel usg" / "cinta union" / "cinta de union" → perfacinta.
+- "cinta fibra" / "cinta de malla" / "cinta maya" / "malla para tablaroca" / "malla tablaroca" / "malla durock" → cinta fibra de vidrio.
+- "pilas" / "pila" / "pijas" = pijas (tornillos). "pija fremer" / "pija flamer" / "pija frame" / "framer" → pija framer. "pija para durock" / "pilas para durock". "pija para tablaroca" / "tornillo para tablaroca" / "pija 6x1" → pija 6 x 1. "pija 10x1 1/2" / "pija 10x1.5" / "fijasora" / "punta de broca" → pija 10 x 1 1/2.
+- "taquete ancla" / "taquete anclo" / "ancla de expansion" → taquete expansion.
+- "cancel" / "cnal" / "canel" / "canaleta" → canal. "canal de amarre" / "canal amarre" usualmente es canal 6.35. "canaleta de carga" / "cargadora" / "canaleta CA" → canaleta de carga.
+- "reborde jota" / "revorde j" / "revoque j" / "reborder j" → reborde j galvanizado.
+- "postes" / "pste" / "psts". "poste para la reja" / "poste de reja" → poste para rejacero.
+- "reja" / "rejas" → rejacero.
+- "abrazadera" (sin especificar) → abrazadera para rejacero.
+- "galleta" / "plafon galleta" / "plafones registrables" → plafon registrable.
+- "PTR" = perfil tubular rectangular (raramente en catálogo; escalar).
+- "hoja" / "hojas" sueltas (sin material) = tablaroca.
+- "tabla WR" / "hoja WR" = tablaroca anti-moho.
+- "tramos de madera" / "tiras de madera" / "barrotes" / "listones de madera" → barrote de madera.
+"""
+
+
+# ---------------------------------------------------------------------------
+# Prompt
+# ---------------------------------------------------------------------------
+
+SYSTEM_PROMPT = """Eres un parser de órdenes para una ferretería mexicana especializada en materiales de tablaroca, durock, rejacero, láminas y estructura metálica. Recibes mensajes de clientes por WhatsApp y los conviertes en una lista estructurada.
+
+{jerga}
+
+CATÁLOGO DISPONIBLE (formato: "- <key> || <nombre> | <unidad> | <precio>"):
+{catalog}
+
+REGLAS:
+1. Identifica cada producto que el cliente quiere cotizar. El mensaje puede tener 1 o muchos productos separados por comas, guiones, asteriscos, viñetas, saltos de línea, "y", o listas enumeradas.
+2. Para cada producto, elige el <key> del catálogo que mejor corresponde. NUNCA inventes una key que no esté listada arriba.
+3. Si el cliente escribe jerga, typos o nombres cortos, usa tu conocimiento de ferretería mexicana y la sección de jerga arriba para identificar el producto correcto.
+4. Si NO hay match claro en el catálogo, devuelve key=null y confidence baja (<0.6), con el texto original en matched_text y name.
+5. Cantidad por defecto: 1. Interpreta "2 de cada", "5 paquetes", "10 mts", cantidades al final del producto ("Tornillo 300"), números con decimal como cantidades (175 o 175.00 panel = 175 unidades, NO precio).
+6. Si una línea dice "1 ???" o similar (basura), IGNÓRALA por completo.
+7. Si el mensaje es un botón de UI, un saludo puro ("hola", "buenos días"), una pregunta de horarios, un número de teléfono, o un "salir" / "cancelar", devuelve items=[] y non_order=true.
+8. Si un spec aparece al final y aplica a varios productos arriba (ej: "Canal 4 y 6.35 cal 26" → cal 26 aplica a ambos), propágalo.
+9. Si aparece un forward con saludo de otro proveedor antes de la lista (ej: "Buenos días, seguimos a tus órdenes en Gram-Bel"), ignora el saludo y parsea SOLO la lista de productos.
+10. Nombres de proyecto al inicio ("Mat. Privanzas", "Del closet") no son productos, son contexto.
+
+OUTPUT: JSON válido, sin markdown, exactamente esta estructura:
+{{
+  "items": [
+    {{
+      "matched_text": "fragmento original del mensaje",
+      "key": "<key del catálogo o null>",
+      "name": "nombre del catálogo si hay key, o nombre libre si key=null",
+      "qty": entero o decimal,
+      "unit": "pza|mt|kg|lt|pqt|caja|rollo|bulto|bolsa|null",
+      "confidence": 0.0 a 1.0,
+      "notes": "explicación breve si confidence<0.8 o key=null"
+    }}
+  ],
+  "non_order": false
+}}
+
+Si el mensaje NO es una orden, devuelve:
+{{"items": [], "non_order": true}}"""
+
+
+USER_TEMPLATE = "Mensaje del cliente:\n```\n{text}\n```"
+
+
+# ---------------------------------------------------------------------------
+# Parser principal
+# ---------------------------------------------------------------------------
+
+def llm_parse_order(
+    text: str,
+    catalog: list[dict],
+    *,
+    model: str = "gpt-4o-mini",
+    temperature: float = 0.0,
+    timeout: float = 15.0,
+    min_confidence: float = 0.7,
+    include_jerga_hints: bool = True,
+) -> dict:
+    """
+    Parsea un mensaje del cliente usando LLM con catálogo como contexto.
+
+    Returns:
+        {
+          "items": [{key, name, qty, unit, confidence, matched_text,
+                     notes, needs_escalation}],
+          "non_order": bool,
+          "raw_response": str,
+          "latency_ms": int,
+          "model": str,
+          "error": str | None,
+          "precleaned_text": str,
+        }
+    """
+    # Fast path: botones y saludos puros ni siquiera llegan al LLM
+    if is_ui_interaction(text):
+        return {
+            "items": [],
+            "non_order": True,
+            "raw_response": "",
+            "latency_ms": 0,
+            "model": "fast-path",
+            "error": None,
+            "precleaned_text": text.strip(),
+        }
+
+    cleaned = preclean_message(text)
+    if not cleaned:
+        return {
+            "items": [],
+            "non_order": True,
+            "raw_response": "",
+            "latency_ms": 0,
+            "model": "fast-path",
+            "error": None,
+            "precleaned_text": "",
+        }
+
+    filtered = prefilter_catalog(catalog, cleaned, max_items=250)
+    catalog_block = format_catalog_for_prompt(filtered)
+    jerga_block = JERGA_HINTS if include_jerga_hints else ""
+
+    system = SYSTEM_PROMPT.format(jerga=jerga_block, catalog=catalog_block)
+    user = USER_TEMPLATE.format(text=cleaned)
+
+    start = time.time()
+    try:
+        resp = _get_client().chat.completions.create(
+            model=model,
+            temperature=temperature,
+            timeout=timeout,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        )
+        raw = resp.choices[0].message.content or "{}"
+    except Exception as e:
+        return {
+            "items": [],
+            "non_order": False,
+            "raw_response": "",
+            "latency_ms": int((time.time() - start) * 1000),
+            "model": model,
+            "error": f"{type(e).__name__}: {e}",
+            "precleaned_text": cleaned,
+        }
+
+    latency_ms = int((time.time() - start) * 1000)
+
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as e:
+        return {
+            "items": [],
+            "non_order": False,
+            "raw_response": raw,
+            "latency_ms": latency_ms,
+            "model": model,
+            "error": f"JSONDecodeError: {e}",
+            "precleaned_text": cleaned,
+        }
+
+    valid_keys = {norm_key(it.get("name") or "") for it in catalog}
+    valid_keys.discard("")
+
+    items_out: list[dict] = []
+    for it in parsed.get("items", []) or []:
+        key = it.get("key")
+        if key in ("", "null", "None", None):
+            key = None
+        else:
+            key = norm_key(key) if isinstance(key, str) else None
+            # Si el LLM se inventó una key no listada → forzar null
+            if key and key not in valid_keys:
+                key = None
+
+        qty_raw = it.get("qty", 1)
+        try:
+            qty = float(qty_raw)
+            if qty == int(qty):
+                qty = int(qty)
+        except (TypeError, ValueError):
+            qty = 1
+
+        conf = float(it.get("confidence") or 0.0)
+        needs_escalation = (key is None) or (conf < min_confidence)
+
+        # Filtra basura "1 ???" que algunos mensajes traen
+        mt = (it.get("matched_text") or "").strip()
+        if mt in ("???", "1 ???") or re.fullmatch(r"[\W_?]+", mt):
+            continue
+
+        items_out.append({
+            "key": key,
+            "name": (it.get("name") or "").strip(),
+            "qty": qty,
+            "unit": (it.get("unit") or "").strip() or None,
+            "matched_text": mt,
+            "confidence": conf,
+            "notes": (it.get("notes") or "").strip(),
+            "needs_escalation": needs_escalation,
+        })
+
+    return {
+        "items": items_out,
+        "non_order": bool(parsed.get("non_order", False)),
+        "raw_response": raw,
+        "latency_ms": latency_ms,
+        "model": model,
+        "error": None,
+        "precleaned_text": cleaned,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Helpers de integración
+# ---------------------------------------------------------------------------
+
+def split_found_vs_missing(parsed: dict) -> tuple[list[dict], list[dict]]:
+    """Separa items con key confiable vs items que necesitan escalación."""
+    found = [it for it in parsed["items"] if not it["needs_escalation"]]
+    missing = [it for it in parsed["items"] if it["needs_escalation"]]
+    return found, missing
+
+
+def format_escalation_message(
+    missing: list[dict], client_phone: str, client_text: str, company_name: str = ""
+) -> str:
+    """Mensaje que se manda al dueño cuando hay productos fuera del catálogo."""
+    header = f"⚠️ Productos fuera de catálogo{' — ' + company_name if company_name else ''}"
+    lines = [
+        header,
+        f"Cliente: {client_phone}",
+        "",
+        "Mensaje original:",
+        f"```{client_text}```",
+        "",
+        "No encontrados en catálogo:",
+    ]
+    for it in missing:
+        qty = it["qty"]
+        name = it["matched_text"] or it["name"] or "(sin nombre)"
+        lines.append(f"• {qty} × {name}")
+    return "\n".join(lines)
+
+
+def catalog_lookup_by_key(catalog: list[dict], key: str) -> dict | None:
+    """Encuentra el item del catálogo por key normalizada."""
+    k = norm_key(key)
+    for item in catalog:
+        if norm_key(item.get("name") or "") == k:
+            return item
+    return None
