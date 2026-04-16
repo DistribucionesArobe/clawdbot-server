@@ -336,6 +336,14 @@ JERGA_HINTS = """Jerga típica de ferretería mexicana:
 - "hoja" / "hojas" sueltas (sin material) = tablaroca.
 - "tabla WR" / "hoja WR" = tablaroca anti-moho.
 - "tramos de madera" / "tiras de madera" / "barrotes" / "listones de madera" → barrote de madera.
+
+REGLAS DE DEFAULTS (cuando el cliente NO especifica variante, calibre, medida, etc.):
+- Usa tu conocimiento de construcción/ferretería para elegir la variante más común y estándar del producto.
+- Tablaroca: estructura (postes, canales, ángulos, furring) → calibre 26 por defecto.
+- Durock: estructura (postes, canales) → calibre 20 por defecto.
+- Si el contexto del pedido indica el sistema constructivo (ej. mayormente tablaroca, o mayormente durock), usa eso para inferir el calibre de la estructura.
+- Si se pide explícitamente un calibre, medida o variante → respeta lo que pidió el cliente.
+- En general: cuando hay ambigüedad entre varias opciones del catálogo, elige la más vendida/estándar del rubro. Si no puedes determinarlo, devuelve key=null para que el bot pregunte al cliente.
 """
 
 
