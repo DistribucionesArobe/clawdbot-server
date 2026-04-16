@@ -3864,6 +3864,18 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                         # Intenta buscar con norm_key por si hay diferencias menores
                         _nk = _llm_norm_key(_key)
                         cat_item = _cat_by_key.get(_nk)
+                    if not cat_item:
+                        # Intenta también con el nombre (LLM a veces devuelve name como key)
+                        _nn = _llm_norm_key(_name)
+                        cat_item = _cat_by_key.get(_nn)
+                    if not cat_item:
+                        # Fuzzy: busca si algún key del catálogo contiene el norm_key o viceversa
+                        _nk2 = _llm_norm_key(_key)
+                        for _ck, _cv in _cat_by_key.items():
+                            if _nk2 and (_nk2 in _ck or _ck in _nk2):
+                                cat_item = _cv
+                                print(f"LLM FUZZY MATCH: {_key!r} → {_cv.get('name')!r}")
+                                break
                     if cat_item:
                         state = cart_add_item(state, {
                             "sku": cat_item.get("sku"),
@@ -3877,8 +3889,27 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                         print(f"LLM KEY NOT IN CATALOG: key={_key!r}")
                         missing.append({"qty": _qty, "raw": _matched or _name, "candidates": []})
                 else:
-                    # Low confidence or no key → missing (escalation candidate)
-                    missing.append({"qty": _qty, "raw": _matched or _name, "candidates": []})
+                    # Low confidence or no key → intenta smart_search como último recurso
+                    _fallback_found = False
+                    if _name and len(_name.strip()) >= 3:
+                        try:
+                            _fb_result = smart_search(conn, company_id, _name, _qty,
+                                                       cart_context=user_text[:200])
+                            if _fb_result and _fb_result.get("status") == "found":
+                                state = cart_add_item(state, {
+                                    "sku": _fb_result["item"].get("sku"),
+                                    "name": _fb_result["item"].get("name"),
+                                    "unit": _fb_result["item"].get("unit") or "unidad",
+                                    "price": float(_fb_result["item"].get("price") or 0.0),
+                                    "vat_rate": _fb_result["item"].get("vat_rate"),
+                                    "qty": _qty,
+                                })
+                                _fallback_found = True
+                                print(f"LLM FALLBACK SMART_SEARCH: {_name!r} → {_fb_result['item'].get('name')!r}")
+                        except Exception as _fbe:
+                            print(f"LLM FALLBACK ERROR: {repr(_fbe)}")
+                    if not _fallback_found:
+                        missing.append({"qty": _qty, "raw": _matched or _name, "candidates": []})
 
             if missing:
                 state["pending"] = missing
