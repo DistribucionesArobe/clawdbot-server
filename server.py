@@ -1505,15 +1505,18 @@ async def whatsapp_webhook(request: Request):
             text = lr_id if lr_id.upper().startswith("PICK_") else lr_title
         elif itype == "button_reply":
             text = (interactive.get("button_reply") or {}).get("title") or ""
+        print(f"INTERACTIVE MSG: type={itype} text={text!r} from={from_phone}")
 
     if text:
         log_message(company["company_id"], from_phone, "user", text)
 
+    print(f"WEBHOOK DISPATCH: msg_type={msg_type} text={text!r} is_interactive={msg_type == 'interactive'}")
     reply = build_reply_for_company(
         company["company_id"], text,
         wa_from=from_phone,
         is_interactive=(msg_type == "interactive"),
     )
+    print(f"WEBHOOK REPLY: type={type(reply).__name__} empty={not reply} preview={str(reply)[:120] if reply else 'NONE'}")
 
     if not reply:
         return {"ok": True}
@@ -2276,6 +2279,10 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
     _raw_current = (user_text or "").strip().lower()
     _raw_current_stripped = re.sub(r"[^\w\s]", "", _raw_current).strip()
     _raw_current_stripped = re.sub(r"\s+", " ", _raw_current_stripped)
+    # Strip accents for comparison (ubicación→ubicacion, más→mas, etc.)
+    import unicodedata as _ud
+    _raw_current_stripped = _ud.normalize("NFD", _raw_current_stripped)
+    _raw_current_stripped = "".join(c for c in _raw_current_stripped if _ud.category(c) != "Mn")
     _button_click_triggers = {
         "quitar producto", "quitar productos", "quitar",
         "eliminar producto", "eliminar", "borrar producto", "remover", "remover producto",
@@ -2284,6 +2291,8 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         "hablar con alguien", "horarios y ubicacion",
     }
     _is_button_click = is_interactive and _raw_current_stripped in _button_click_triggers
+    if is_interactive:
+        print(f"BTN_DEBUG: raw_stripped={_raw_current_stripped!r} is_button_click={_is_button_click} in_triggers={_raw_current_stripped in _button_click_triggers}")
 
     # Flush stale message buffer (>15s old) — prepend to current message
     # SKIP if current message is a button click (prevents buffer from mangling it)
@@ -3612,36 +3621,96 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 # Cotizar only cubetas (rounded up) — no galones/litros separate
                 _tipo_search = "vinilica" if tipo == "Vinílica" else "esmalte"
                 _uso_search = "interior" if uso == "Interior" else "exterior"
-                _mat_lines = []
-                _mat_lines.append(f"{_cubetas_total} pintura {_tipo_search} {_uso_search} cubeta")
-                _mat_lines.append(f"{_rodillos} rodillo")
-                _mat_lines.append(f"{_brochas_4} brocha 4")
-                _mat_lines.append(f"{_brochas_2} brocha 2")
+
+                # Build material items with targeted SQL search (same approach as rejacero)
+                _paint_mat_items = [
+                    (_cubetas_total, "pintura", _tipo_search, _uso_search, "cubeta"),
+                    (_rodillos, "rodillo", None, None, None),
+                    (_brochas_4, "brocha", "4", None, None),
+                    (_brochas_2, "brocha", "2", None, None),
+                ]
 
                 # Auto-cotizar: search and add to cart directly
                 state = _pt_state
                 conn = get_conn()
                 try:
-                    for line in _mat_lines:
-                        _lm = re.match(r"^(\d+)\s+(.+)$", line.strip())
-                        if _lm:
-                            _lqty = int(_lm.group(1))
-                            _lname = _lm.group(2)
-                            result = smart_search(conn, company_id, _lname, _lqty,
+                    cur_pt2 = conn.cursor()
+                    for _item_tuple in _paint_mat_items:
+                        _lqty = _item_tuple[0]
+                        row_pt2 = None
+
+                        if _item_tuple[1] == "pintura":
+                            # Targeted paint search: must contain tipo AND uso AND cubeta
+                            # Try exact match with all keywords using ILIKE
+                            _tipo_kw = _item_tuple[2]  # vinilica / esmalte
+                            _uso_kw = _item_tuple[3]   # interior / exterior
+                            cur_pt2.execute(
+                                "SELECT sku, name, unit, price, vat_rate FROM pricebook_items "
+                                "WHERE company_id=%s "
+                                "AND lower(name) LIKE '%%' || %s || '%%' "
+                                "AND lower(name) LIKE '%%' || %s || '%%' "
+                                "AND lower(name) LIKE '%%cubeta%%' "
+                                "ORDER BY price DESC LIMIT 1",
+                                (company_id, _tipo_kw, _uso_kw),
+                            )
+                            row_pt2 = cur_pt2.fetchone()
+                            if not row_pt2:
+                                # Fallback: just tipo + cubeta (maybe catalog doesn't specify interior/exterior)
+                                cur_pt2.execute(
+                                    "SELECT sku, name, unit, price, vat_rate FROM pricebook_items "
+                                    "WHERE company_id=%s "
+                                    "AND lower(name) LIKE '%%' || %s || '%%' "
+                                    "AND lower(name) LIKE '%%cubeta%%' "
+                                    "ORDER BY price DESC LIMIT 1",
+                                    (company_id, _tipo_kw),
+                                )
+                                row_pt2 = cur_pt2.fetchone()
+                        elif _item_tuple[1] == "rodillo":
+                            cur_pt2.execute(
+                                "SELECT sku, name, unit, price, vat_rate FROM pricebook_items "
+                                "WHERE company_id=%s AND lower(name) LIKE '%%rodillo%%' "
+                                "ORDER BY price DESC LIMIT 1",
+                                (company_id,),
+                            )
+                            row_pt2 = cur_pt2.fetchone()
+                        elif _item_tuple[1] == "brocha":
+                            _brocha_size = _item_tuple[2]  # "4" or "2"
+                            cur_pt2.execute(
+                                "SELECT sku, name, unit, price, vat_rate FROM pricebook_items "
+                                "WHERE company_id=%s AND lower(name) LIKE '%%brocha%%' "
+                                "AND name LIKE '%%' || %s || '%%' "
+                                "ORDER BY price DESC LIMIT 1",
+                                (company_id, _brocha_size),
+                            )
+                            row_pt2 = cur_pt2.fetchone()
+
+                        if row_pt2:
+                            state = cart_add_item(state, {
+                                "sku": row_pt2[0], "name": row_pt2[1],
+                                "unit": row_pt2[2] or "pza",
+                                "price": float(row_pt2[3] or 0),
+                                "vat_rate": row_pt2[4],
+                                "qty": _lqty,
+                            })
+                        else:
+                            # Final fallback: smart_search
+                            _fallback_name = f"{_item_tuple[1]} {_item_tuple[2] or ''} {_item_tuple[3] or ''}".strip()
+                            result = smart_search(conn, company_id, _fallback_name, _lqty,
                                                   cart_context=_build_cart_context(state))
                             if result["status"] == "found":
                                 state = cart_add_item(state, {
                                     "sku": result["item"].get("sku"),
                                     "name": result["item"].get("name"),
-                                    "unit": result["item"].get("unit") or "unidad",
+                                    "unit": result["item"].get("unit") or "pza",
                                     "price": float(result["item"].get("price") or 0.0),
                                     "vat_rate": result["item"].get("vat_rate"),
                                     "qty": _lqty,
                                 })
                             elif result.get("candidates"):
                                 pend = state.get("pending") or []
-                                pend.append({"qty": _lqty, "raw": _lname, "candidates": result["candidates"]})
+                                pend.append({"qty": _lqty, "raw": _fallback_name, "candidates": result["candidates"]})
                                 state["pending"] = pend
+                    cur_pt2.close()
                 finally:
                     conn.close()
                 state.pop("pintura_state", None)
@@ -3709,38 +3778,74 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                         f"━━━━━━━━━━━━━━━━━━━"
                     )
 
-                    # Cotizar only cubetas (rounded up) — no galones/litros separate
-                    _mat_lines = []
-                    _mat_lines.append(f"{_cubetas_im} impermeabilizante cubeta")
-                    _mat_lines.append(f"{rollos_malla} malla para impermeabilizar")
-                    _mat_lines.append(f"{_rodillos_im} rodillo")
-                    _mat_lines.append(f"{_brochas_4_im} brocha 4")
-                    _mat_lines.append(f"{_brochas_2_im} brocha 2")
+                    # Build material items with targeted SQL search
+                    _imper_mat_items = [
+                        (_cubetas_im, "impermeabilizante", "cubeta"),
+                        (rollos_malla, "malla", "impermeabiliz"),
+                        (_rodillos_im, "rodillo", None),
+                        (_brochas_4_im, "brocha", "4"),
+                        (_brochas_2_im, "brocha", "2"),
+                    ]
 
                     # Auto-cotizar: search and add to cart directly
                     state = _im_state
                     conn = get_conn()
                     try:
-                        for line in _mat_lines:
-                            _lm = re.match(r"^(\d+)\s+(.+)$", line.strip())
-                            if _lm:
-                                _lqty = int(_lm.group(1))
-                                _lname = _lm.group(2)
-                                result = smart_search(conn, company_id, _lname, _lqty,
+                        cur_im2 = conn.cursor()
+                        for _item_tuple in _imper_mat_items:
+                            _lqty = _item_tuple[0]
+                            _kw1 = _item_tuple[1]
+                            _kw2 = _item_tuple[2]
+                            row_im2 = None
+
+                            if _kw2:
+                                cur_im2.execute(
+                                    "SELECT sku, name, unit, price, vat_rate FROM pricebook_items "
+                                    "WHERE company_id=%s "
+                                    "AND lower(name) LIKE '%%' || %s || '%%' "
+                                    "AND lower(name) LIKE '%%' || %s || '%%' "
+                                    "ORDER BY price DESC LIMIT 1",
+                                    (company_id, _kw1, _kw2),
+                                )
+                                row_im2 = cur_im2.fetchone()
+
+                            if not row_im2:
+                                cur_im2.execute(
+                                    "SELECT sku, name, unit, price, vat_rate FROM pricebook_items "
+                                    "WHERE company_id=%s "
+                                    "AND lower(name) LIKE '%%' || %s || '%%' "
+                                    "ORDER BY price DESC LIMIT 1",
+                                    (company_id, _kw1),
+                                )
+                                row_im2 = cur_im2.fetchone()
+
+                            if row_im2:
+                                state = cart_add_item(state, {
+                                    "sku": row_im2[0], "name": row_im2[1],
+                                    "unit": row_im2[2] or "pza",
+                                    "price": float(row_im2[3] or 0),
+                                    "vat_rate": row_im2[4],
+                                    "qty": _lqty,
+                                })
+                            else:
+                                # Final fallback: smart_search
+                                _fallback_name = f"{_kw1} {_kw2 or ''}".strip()
+                                result = smart_search(conn, company_id, _fallback_name, _lqty,
                                                       cart_context=_build_cart_context(state))
                                 if result["status"] == "found":
                                     state = cart_add_item(state, {
                                         "sku": result["item"].get("sku"),
                                         "name": result["item"].get("name"),
-                                        "unit": result["item"].get("unit") or "unidad",
+                                        "unit": result["item"].get("unit") or "pza",
                                         "price": float(result["item"].get("price") or 0.0),
                                         "vat_rate": result["item"].get("vat_rate"),
                                         "qty": _lqty,
                                     })
                                 elif result.get("candidates"):
                                     pend = state.get("pending") or []
-                                    pend.append({"qty": _lqty, "raw": _lname, "candidates": result["candidates"]})
+                                    pend.append({"qty": _lqty, "raw": _fallback_name, "candidates": result["candidates"]})
                                     state["pending"] = pend
+                        cur_im2.close()
                     finally:
                         conn.close()
                     state.pop("imper_state", None)
