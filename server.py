@@ -3839,7 +3839,8 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
     _has_digits = bool(re.search(r"\d", user_text))
     _is_short_fragment = len(_msg_words) <= 4 and not _has_digits and len(user_text.strip()) < 30
 
-    if _is_short_fragment and wa_from:
+    # Button clicks (interactive) should NEVER be buffered
+    if _is_short_fragment and wa_from and not _is_button_click:
         _buf_state = get_quote_state(company_id, wa_from) or {}
         _buf = _buf_state.get("_msg_buffer") or {}
         _buf_ts = _buf.get("ts") or 0
@@ -3900,6 +3901,11 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
     _llm_result = None
     if _PARSER_LLM_FIRST:
         _llm_result = _try_llm_parse(company_id, user_text)
+
+    # ── LLM detectó que NO es una orden → escalar a humano directo ──
+    if _llm_result and _llm_result.get("non_order"):
+        print(f"LLM NON_ORDER: escalating to human. text='{user_text[:60]}'")
+        return _escalate_non_quote(company_id, wa_from, user_text)
 
     if _llm_result and _llm_result.get("items") and not _llm_result.get("non_order"):
         # ── LLM PATH: procesa items directamente sin regex ni smart_search ──
@@ -6075,6 +6081,7 @@ def auth_me(request: Request):
         finally:
             if cur: cur.close()
             if conn: conn.close()
+    # Marcar si es admin de CotizaExpress
     if (u.get("email") or "").lower() in ADMIN_EMAILS:
         u["rol"] = "admin"
     return {"ok": True, "user": u}
