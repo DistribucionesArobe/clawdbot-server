@@ -787,10 +787,56 @@ def _run_pricebook_migrations(conn):
         cur.close()
 
 
+def _run_promo_codes_migration(conn):
+    """Create promo_codes tables + trial_end column (idempotent)."""
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS promo_codes (
+                id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                code        TEXT NOT NULL UNIQUE,
+                discount_type TEXT NOT NULL DEFAULT 'trial_days',
+                discount_value NUMERIC NOT NULL DEFAULT 10,
+                max_uses    INT DEFAULT NULL,
+                times_used  INT NOT NULL DEFAULT 0,
+                one_per_customer BOOLEAN NOT NULL DEFAULT TRUE,
+                active      BOOLEAN NOT NULL DEFAULT TRUE,
+                created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+                expires_at  TIMESTAMPTZ DEFAULT NULL
+            );
+            CREATE TABLE IF NOT EXISTS promo_code_uses (
+                id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                promo_code_id UUID NOT NULL REFERENCES promo_codes(id),
+                company_id  UUID NOT NULL,
+                applied_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
+            CREATE INDEX IF NOT EXISTS idx_promo_code_uses_company
+                ON promo_code_uses(company_id);
+            CREATE INDEX IF NOT EXISTS idx_promo_code_uses_code
+                ON promo_code_uses(promo_code_id);
+        """)
+        cur.execute("""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'companies' AND column_name = 'trial_end'
+                ) THEN
+                    ALTER TABLE companies ADD COLUMN trial_end TIMESTAMPTZ DEFAULT NULL;
+                END IF;
+            END $$;
+        """)
+        print("PROMO_CODES MIGRATION: OK")
+    except Exception as e:
+        print(f"PROMO_CODES MIGRATION ERROR: {repr(e)}")
+    finally:
+        cur.close()
+
 # Run pricebook migrations at startup (idempotent)
 try:
     _mig_conn = get_conn()
     _run_pricebook_migrations(_mig_conn)
+    _run_promo_codes_migration(_mig_conn)
     _mig_conn.close()
 except Exception as e:
     print(f"PRICEBOOK MIGRATION STARTUP ERROR: {repr(e)}")
@@ -854,9 +900,25 @@ def get_company_plan_code(company_id: str) -> str:
     conn = get_conn()
     cur = conn.cursor()
     try:
-        cur.execute("SELECT plan_code FROM companies WHERE id=%s LIMIT 1", (company_id,))
+        cur.execute("SELECT plan_code, trial_end FROM companies WHERE id=%s LIMIT 1", (company_id,))
         row = cur.fetchone()
-        return (row[0] or "free").strip() if row else "free"
+        if not row:
+            return "free"
+        plan_code = (row[0] or "free").strip()
+        trial_end = row[1]
+        # Auto-expire trial: if trial_end is set and has passed, revert to free
+        if trial_end and plan_code in ("pro", "complete"):
+            if datetime.now(timezone.utc) > trial_end:
+                try:
+                    cur.execute(
+                        "UPDATE companies SET plan_code='free', trial_end=NULL, updated_at=now() WHERE id=%s",
+                        (company_id,),
+                    )
+                    print(f"TRIAL EXPIRADO: company={company_id} plan={plan_code} -> free")
+                except Exception as e:
+                    print(f"TRIAL EXPIRE ERROR: {repr(e)}")
+                return "free"
+        return plan_code
     finally:
         cur.close()
         conn.close()
@@ -1270,6 +1332,7 @@ def get_company_from_bearer(authorization: str):
 class RegisterBody(BaseModel):
     email: str
     password: str
+    promo_code: Optional[str] = None
 
 class LoginBody(BaseModel):
     email: str
@@ -5237,6 +5300,265 @@ async def stripe_webhook(request: Request):
 
     return {"ok": True}
 
+# ── Promo Codes ──────────────────────────────────────────────────────────────
+
+class PromoCodeCreate(BaseModel):
+    code: str
+    discount_type: str = "trial_days"
+    discount_value: float = 10
+    max_uses: Optional[int] = None
+    one_per_customer: bool = True
+
+class PromoCodeApply(BaseModel):
+    code: str
+
+class PromoCodeToggle(BaseModel):
+    active: bool
+
+
+@app.post("/api/pagos/promo/crear")
+def promo_crear(request: Request, body: PromoCodeCreate):
+    """Admin: crear un código promo."""
+    _require_admin(request)
+    code = (body.code or "").strip().upper()
+    if not code or len(code) < 3:
+        raise HTTPException(status_code=400, detail="Código debe tener al menos 3 caracteres")
+    conn = None; cur = None
+    try:
+        conn = get_conn(); cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO promo_codes (code, discount_type, discount_value, max_uses, one_per_customer)
+            VALUES (%s, %s, %s, %s, %s)
+            RETURNING id, code, discount_type, discount_value, max_uses, times_used, one_per_customer, active, created_at
+            """,
+            (code, body.discount_type, body.discount_value, body.max_uses, body.one_per_customer),
+        )
+        row = cur.fetchone()
+        return {
+            "ok": True,
+            "promo": {
+                "id": str(row[0]), "code": row[1], "discount_type": row[2],
+                "discount_value": float(row[3]), "max_uses": row[4],
+                "times_used": row[5], "one_per_customer": row[6],
+                "active": row[7], "created_at": row[8].isoformat() if row[8] else None,
+            },
+        }
+    except IntegrityError:
+        raise HTTPException(status_code=409, detail=f"El código '{code}' ya existe")
+    except Exception as e:
+        print("PROMO CREAR ERROR:", repr(e))
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
+
+
+@app.get("/api/pagos/promo/listar")
+def promo_listar(request: Request):
+    """Admin: listar todos los códigos promo."""
+    _require_admin(request)
+    conn = None; cur = None
+    try:
+        conn = get_conn(); cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT id, code, discount_type, discount_value, max_uses, times_used,
+                   one_per_customer, active, created_at, expires_at
+            FROM promo_codes
+            ORDER BY created_at DESC
+            """
+        )
+        rows = cur.fetchall()
+        promos = []
+        for r in rows:
+            promos.append({
+                "id": str(r[0]), "code": r[1], "discount_type": r[2],
+                "discount_value": float(r[3]), "max_uses": r[4],
+                "times_used": r[5], "one_per_customer": r[6],
+                "active": r[7],
+                "created_at": r[8].isoformat() if r[8] else None,
+                "expires_at": r[9].isoformat() if r[9] else None,
+            })
+        return {"ok": True, "promos": promos}
+    except Exception as e:
+        print("PROMO LISTAR ERROR:", repr(e))
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
+
+
+@app.patch("/api/pagos/promo/{promo_id}/toggle")
+def promo_toggle(promo_id: str, request: Request, body: PromoCodeToggle):
+    """Admin: activar/desactivar un código promo."""
+    _require_admin(request)
+    conn = None; cur = None
+    try:
+        conn = get_conn(); cur = conn.cursor()
+        cur.execute(
+            "UPDATE promo_codes SET active=%s WHERE id=%s RETURNING id, active",
+            (body.active, promo_id),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Código no encontrado")
+        return {"ok": True, "id": str(row[0]), "active": row[1]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print("PROMO TOGGLE ERROR:", repr(e))
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
+
+
+@app.delete("/api/pagos/promo/{promo_id}")
+def promo_delete(promo_id: str, request: Request):
+    """Admin: eliminar un código promo."""
+    _require_admin(request)
+    conn = None; cur = None
+    try:
+        conn = get_conn(); cur = conn.cursor()
+        # Borrar usos primero (FK)
+        cur.execute("DELETE FROM promo_code_uses WHERE promo_code_id=%s", (promo_id,))
+        cur.execute("DELETE FROM promo_codes WHERE id=%s RETURNING id", (promo_id,))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Código no encontrado")
+        return {"ok": True, "deleted": str(row[0])}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print("PROMO DELETE ERROR:", repr(e))
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
+
+
+@app.post("/api/pagos/promo/validar")
+def promo_validar(body: PromoCodeApply):
+    """Público: validar si un código es válido (para mostrar en registro)."""
+    code = (body.code or "").strip().upper()
+    if not code:
+        raise HTTPException(status_code=400, detail="Código requerido")
+    conn = None; cur = None
+    try:
+        conn = get_conn(); cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT id, code, discount_type, discount_value, max_uses, times_used, active, expires_at
+            FROM promo_codes WHERE code=%s LIMIT 1
+            """,
+            (code,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return {"ok": False, "valid": False, "reason": "Código no encontrado"}
+        promo_id, p_code, dtype, dval, max_uses, times_used, active, expires_at = row
+        if not active:
+            return {"ok": False, "valid": False, "reason": "Código inactivo"}
+        if expires_at and datetime.now(timezone.utc) > expires_at:
+            return {"ok": False, "valid": False, "reason": "Código expirado"}
+        if max_uses is not None and times_used >= max_uses:
+            return {"ok": False, "valid": False, "reason": "Código agotado"}
+        return {
+            "ok": True, "valid": True,
+            "discount_type": dtype,
+            "discount_value": float(dval),
+            "description": f"Trial gratis {int(dval)} días" if dtype == "trial_days" else f"{int(dval)}% descuento",
+        }
+    except Exception as e:
+        print("PROMO VALIDAR ERROR:", repr(e))
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
+
+
+@app.post("/api/pagos/promo/aplicar")
+def promo_aplicar(request: Request, body: PromoCodeApply):
+    """Autenticado: aplicar un código promo a la empresa del usuario."""
+    company_id = require_company_id(request)
+    code = (body.code or "").strip().upper()
+    if not code:
+        raise HTTPException(status_code=400, detail="Código requerido")
+    conn = None; cur = None
+    try:
+        conn = get_conn(); cur = conn.cursor()
+
+        # 1. Buscar el código
+        cur.execute(
+            """
+            SELECT id, discount_type, discount_value, max_uses, times_used,
+                   one_per_customer, active, expires_at
+            FROM promo_codes WHERE code=%s LIMIT 1
+            """,
+            (code,),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Código no encontrado")
+        promo_id, dtype, dval, max_uses, times_used, one_per, active, expires_at = row
+
+        if not active:
+            raise HTTPException(status_code=400, detail="Código inactivo")
+        if expires_at and datetime.now(timezone.utc) > expires_at:
+            raise HTTPException(status_code=400, detail="Código expirado")
+        if max_uses is not None and times_used >= max_uses:
+            raise HTTPException(status_code=400, detail="Código agotado")
+
+        # 2. Verificar si ya lo usó esta empresa
+        if one_per:
+            cur.execute(
+                "SELECT 1 FROM promo_code_uses WHERE promo_code_id=%s AND company_id=%s LIMIT 1",
+                (promo_id, company_id),
+            )
+            if cur.fetchone():
+                raise HTTPException(status_code=400, detail="Ya usaste este código")
+
+        # 3. Aplicar según tipo
+        now_utc = datetime.now(timezone.utc)
+        if dtype == "trial_days":
+            trial_days = int(dval)
+            trial_end = now_utc + timedelta(days=trial_days)
+            cur.execute(
+                """
+                UPDATE companies
+                SET plan_code='pro', trial_end=%s, updated_at=now()
+                WHERE id=%s
+                """,
+                (trial_end, company_id),
+            )
+            result_msg = f"Trial Pro activado por {trial_days} días (hasta {trial_end.strftime('%Y-%m-%d')})"
+        else:
+            # percentage — solo marcar, el descuento se aplica en checkout
+            result_msg = f"Descuento de {int(dval)}% aplicado"
+
+        # 4. Registrar uso
+        cur.execute(
+            "INSERT INTO promo_code_uses (promo_code_id, company_id) VALUES (%s, %s)",
+            (promo_id, company_id),
+        )
+        cur.execute(
+            "UPDATE promo_codes SET times_used = times_used + 1 WHERE id=%s",
+            (promo_id,),
+        )
+
+        print(f"PROMO APLICADO: company={company_id} code={code} type={dtype} value={dval}")
+        return {"ok": True, "message": result_msg, "discount_type": dtype, "discount_value": float(dval)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print("PROMO APLICAR ERROR:", repr(e))
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
+
+
 # ── Quotes ────────────────────────────────────────────────────────────────────
 
 @app.get("/api/quotes")
@@ -5365,16 +5687,18 @@ def company_me(request: Request):
                 END $$;
             """)
         conn.commit()
-        cur.execute("SELECT id::text, name, slug, twilio_phone, plan_code, construccion_ligera_enabled, rejacero_enabled, pintura_enabled, impermeabilizante_enabled FROM companies WHERE id=%s LIMIT 1", (company_id,))
+        cur.execute("SELECT id::text, name, slug, twilio_phone, plan_code, construccion_ligera_enabled, rejacero_enabled, pintura_enabled, impermeabilizante_enabled, trial_end FROM companies WHERE id=%s LIMIT 1", (company_id,))
         row = cur.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Company no encontrada")
+        trial_end_val = row[9]
         return {"ok": True, "company": {
             "id": row[0], "name": row[1], "slug": row[2], "twilio_phone": row[3], "plan_code": row[4],
             "construccion_ligera_enabled": bool(row[5]) if row[5] is not None else False,
             "rejacero_enabled": bool(row[6]) if row[6] is not None else False,
             "pintura_enabled": bool(row[7]) if row[7] is not None else False,
             "impermeabilizante_enabled": bool(row[8]) if row[8] is not None else False,
+            "trial_end": trial_end_val.isoformat() if trial_end_val else None,
         }}
     finally:
         if cur: cur.close()
@@ -5578,7 +5902,44 @@ def register(body: RegisterBody):
         if not row:
             raise HTTPException(status_code=500, detail="No se pudo obtener user_id")
         user_id = row[0]
-        return {"ok": True, "user_id": user_id, "company_id": str(company_id), "api_key": token}
+
+        # Aplicar código promo si se proporcionó
+        promo_applied = None
+        _promo = (body.promo_code or "").strip().upper()
+        if _promo:
+            try:
+                cur.execute(
+                    """
+                    SELECT id, discount_type, discount_value, max_uses, times_used, active, expires_at
+                    FROM promo_codes WHERE code=%s LIMIT 1
+                    """,
+                    (_promo,),
+                )
+                _prow = cur.fetchone()
+                if _prow:
+                    _pid, _dtype, _dval, _max, _used, _active, _exp = _prow
+                    _now = datetime.now(timezone.utc)
+                    _valid = _active and (_exp is None or _now <= _exp) and (_max is None or _used < _max)
+                    if _valid and _dtype == "trial_days":
+                        _trial_end = _now + timedelta(days=int(_dval))
+                        cur.execute(
+                            "UPDATE companies SET plan_code='pro', trial_end=%s, updated_at=now() WHERE id=%s",
+                            (_trial_end, company_id),
+                        )
+                        cur.execute(
+                            "INSERT INTO promo_code_uses (promo_code_id, company_id) VALUES (%s, %s)",
+                            (_pid, company_id),
+                        )
+                        cur.execute(
+                            "UPDATE promo_codes SET times_used = times_used + 1 WHERE id=%s",
+                            (_pid,),
+                        )
+                        promo_applied = f"Trial Pro {int(_dval)} días"
+                        print(f"REGISTRO+PROMO: company={company_id} code={_promo} trial_end={_trial_end}")
+            except Exception as pe:
+                print(f"REGISTRO PROMO ERROR (non-fatal): {repr(pe)}")
+
+        return {"ok": True, "user_id": user_id, "company_id": str(company_id), "api_key": token, "promo_applied": promo_applied}
     except IntegrityError:
         raise HTTPException(status_code=409, detail="Email ya registrado")
     except HTTPException:
