@@ -4032,14 +4032,19 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             upsert_quote_state(company_id, wa_from, _buf_state2)
 
     # ── LLM-first parser: intenta LLM primero, regex como fallback ──
+    # SKIP LLM for known button clicks — they have their own handlers downstream
     _llm_result = None
-    if _PARSER_LLM_FIRST:
+    if _PARSER_LLM_FIRST and not _is_button_click:
         _llm_result = _try_llm_parse(company_id, user_text)
 
     # ── LLM detectó que NO es una orden → escalar a humano directo ──
+    # Also skip for hours/location questions — they have a dedicated handler
     if _llm_result and _llm_result.get("non_order"):
-        print(f"LLM NON_ORDER: escalating to human. text='{user_text[:60]}'")
-        return _escalate_non_quote(company_id, wa_from, user_text)
+        if looks_like_hours_question(user_text):
+            print(f"LLM NON_ORDER but is hours question — skipping escalation. text='{user_text[:60]}'")
+        else:
+            print(f"LLM NON_ORDER: escalating to human. text='{user_text[:60]}'")
+            return _escalate_non_quote(company_id, wa_from, user_text)
 
     if _llm_result and _llm_result.get("items") and not _llm_result.get("non_order"):
         # ── LLM PATH: procesa items directamente sin regex ni smart_search ──
