@@ -6075,7 +6075,8 @@ def auth_me(request: Request):
         finally:
             if cur: cur.close()
             if conn: conn.close()
-    # Marcar si es admin de CotizaExpress
+    if (u.get("email") or "").lower() in ADMIN_EMAILS:
+        u["rol"] = "admin"
     if (u.get("email") or "").lower() in ADMIN_EMAILS:
         u["rol"] = "admin"
     return {"ok": True, "user": u}
