@@ -3414,27 +3414,55 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                     _altura_poste_map = {1.0: 1.50, 1.50: 2.00, 2.0: 2.50, 2.50: 3.00}
                     _altura_poste = _altura_poste_map.get(altura, altura + 0.50)
 
-                    # Build material list and auto-cotizar directly
-                    _mat_lines = []
-                    _mat_lines.append(f"{rejas} reja ciclonica {altura:.2f}")
-                    _mat_lines.append(f"{postes} poste rejacero {_altura_poste:.2f}")
-                    _mat_lines.append(f"{abrazaderas} abrazadera")
+                    # Build material list — map altura to exact catalog names
+                    _altura_str = f"{altura:.2f}".rstrip("0").rstrip(".")  # 1.00→1, 1.50→1.5, 2.00→2
+                    _reja_name_map = {
+                        "1": "Rejacero 1 metro x 2.50 m",
+                        "1.5": "Rejacero 1.50 metro x 2.50 m",
+                        "2": "Rejacero 2 metro x 2.50 m",
+                        "2.5": "Rejacero 2.50 metro x 2.50 m",
+                    }
+                    _poste_name_map = {
+                        "1": "Poste 1.50 m para rejacero",
+                        "1.5": "Poste 2.00 m para rejacero",
+                        "2": "Poste 2.50 m para rejacero",
+                        "2.5": "Poste 3.10 m para rejacero",
+                    }
+                    _mat_items = [
+                        (rejas, _reja_name_map.get(_altura_str, f"Rejacero {_altura_str} metro x 2.50 m")),
+                        (postes, _poste_name_map.get(_altura_str, f"Poste {_altura_poste:.2f} m para rejacero")),
+                        (abrazaderas, "Abrazadera para rejacero"),
+                    ]
 
                     state = _rj_state
                     conn = get_conn()
                     try:
-                        for line in _mat_lines:
-                            _lm = re.match(r"^(\d+)\s+(.+)$", line.strip())
-                            if _lm:
-                                _lqty = int(_lm.group(1))
-                                _lname = _lm.group(2)
+                        cur_rj2 = conn.cursor()
+                        for _lqty, _lname in _mat_items:
+                            # Try exact name match first (fast, no ambiguity)
+                            cur_rj2.execute(
+                                "SELECT sku, name, unit, price, vat_rate FROM pricebook_items "
+                                "WHERE company_id=%s AND lower(name)=lower(%s) LIMIT 1",
+                                (company_id, _lname),
+                            )
+                            row_rj = cur_rj2.fetchone()
+                            if row_rj:
+                                state = cart_add_item(state, {
+                                    "sku": row_rj[0], "name": row_rj[1],
+                                    "unit": row_rj[2] or "pza",
+                                    "price": float(row_rj[3] or 0),
+                                    "vat_rate": row_rj[4],
+                                    "qty": _lqty,
+                                })
+                            else:
+                                # Fallback to smart_search if exact name not found
                                 result = smart_search(conn, company_id, _lname, _lqty,
                                                       cart_context=_build_cart_context(state))
                                 if result["status"] == "found":
                                     state = cart_add_item(state, {
                                         "sku": result["item"].get("sku"),
                                         "name": result["item"].get("name"),
-                                        "unit": result["item"].get("unit") or "unidad",
+                                        "unit": result["item"].get("unit") or "pza",
                                         "price": float(result["item"].get("price") or 0.0),
                                         "vat_rate": result["item"].get("vat_rate"),
                                         "qty": _lqty,
@@ -3443,6 +3471,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                                     pend = state.get("pending") or []
                                     pend.append({"qty": _lqty, "raw": _lname, "candidates": result["candidates"]})
                                     state["pending"] = pend
+                        cur_rj2.close()
                     finally:
                         conn.close()
                     state.pop("rejacero_state", None)
