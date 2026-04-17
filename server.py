@@ -6077,8 +6077,6 @@ def auth_me(request: Request):
             if conn: conn.close()
     if (u.get("email") or "").lower() in ADMIN_EMAILS:
         u["rol"] = "admin"
-    if (u.get("email") or "").lower() in ADMIN_EMAILS:
-        u["rol"] = "admin"
     return {"ok": True, "user": u}
 
 @app.post("/api/auth/logout")
