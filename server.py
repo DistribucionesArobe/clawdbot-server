@@ -4129,27 +4129,36 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                         _user_raw = _matched or _name or ""
                         _has_user_size = bool(re.search(r"\b\d+\.\d+\b", _user_raw))  # e.g. "4.10", "6.35"
                         if not _has_user_size and not cat_item.get("is_default"):
-                            # User didn't specify size → look for is_default product with same base name
-                            _base_name_parts = re.split(r"\s+\d", (cat_item.get("name") or ""), maxsplit=1)
-                            _base_name = _base_name_parts[0].strip() if _base_name_parts else ""
-                            if _base_name and len(_base_name) >= 3:
+                            # User didn't specify size → look for is_default product with same base type
+                            # Extract first word as product type (Poste, Canal, Tablaroca, etc.)
+                            _cat_name = (cat_item.get("name") or "").strip()
+                            _first_word = _cat_name.split()[0] if _cat_name else ""
+                            # Also try user's original first word (handles "canal de amarre" → "canal")
+                            _user_first_word = (_user_raw.split()[0] if _user_raw else "").strip()
+                            _search_words = []
+                            if _first_word and len(_first_word) >= 3:
+                                _search_words.append(_first_word)
+                            if _user_first_word and len(_user_first_word) >= 3 and _user_first_word.lower() != _first_word.lower():
+                                _search_words.append(_user_first_word)
+                            for _sw in _search_words:
                                 try:
                                     _cur_def = conn.cursor()
                                     _cur_def.execute(
                                         "SELECT sku, name, unit, price, vat_rate FROM pricebook_items "
                                         "WHERE company_id=%s AND is_default=true "
                                         "AND lower(name) LIKE lower(%s) || '%%' LIMIT 1",
-                                        (company_id, _base_name),
+                                        (company_id, _sw),
                                     )
                                     _def_row = _cur_def.fetchone()
                                     _cur_def.close()
                                     if _def_row:
-                                        print(f"IS_DEFAULT OVERRIDE: '{cat_item.get('name')}' → '{_def_row[1]}' (user had no size)")
+                                        print(f"IS_DEFAULT OVERRIDE: '{cat_item.get('name')}' → '{_def_row[1]}' (user had no size, matched on '{_sw}')")
                                         cat_item = {
                                             "sku": _def_row[0], "name": _def_row[1],
                                             "unit": _def_row[2], "price": _def_row[3],
                                             "vat_rate": _def_row[4],
                                         }
+                                        break
                                 except Exception as _def_e:
                                     print(f"IS_DEFAULT CHECK ERROR: {repr(_def_e)}")
 
