@@ -4096,6 +4096,34 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                                 print(f"LLM FUZZY MATCH: {_key!r} → {_cv.get('name')!r}")
                                 break
                     if cat_item:
+                        # Check if user specified a size — if NOT, prefer is_default product
+                        _user_raw = _matched or _name or ""
+                        _has_user_size = bool(re.search(r"\b\d+\.\d+\b", _user_raw))  # e.g. "4.10", "6.35"
+                        if not _has_user_size and not cat_item.get("is_default"):
+                            # User didn't specify size → look for is_default product with same base name
+                            _base_name_parts = re.split(r"\s+\d", (cat_item.get("name") or ""), maxsplit=1)
+                            _base_name = _base_name_parts[0].strip() if _base_name_parts else ""
+                            if _base_name and len(_base_name) >= 3:
+                                try:
+                                    _cur_def = conn.cursor()
+                                    _cur_def.execute(
+                                        "SELECT sku, name, unit, price, vat_rate FROM pricebook_items "
+                                        "WHERE company_id=%s AND is_default=true "
+                                        "AND lower(name) LIKE lower(%s) || '%%' LIMIT 1",
+                                        (company_id, _base_name),
+                                    )
+                                    _def_row = _cur_def.fetchone()
+                                    _cur_def.close()
+                                    if _def_row:
+                                        print(f"IS_DEFAULT OVERRIDE: '{cat_item.get('name')}' → '{_def_row[1]}' (user had no size)")
+                                        cat_item = {
+                                            "sku": _def_row[0], "name": _def_row[1],
+                                            "unit": _def_row[2], "price": _def_row[3],
+                                            "vat_rate": _def_row[4],
+                                        }
+                                except Exception as _def_e:
+                                    print(f"IS_DEFAULT CHECK ERROR: {repr(_def_e)}")
+
                         state = cart_add_item(state, {
                             "sku": cat_item.get("sku"),
                             "name": cat_item.get("name"),
