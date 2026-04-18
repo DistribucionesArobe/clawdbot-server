@@ -1524,7 +1524,7 @@ async def whatsapp_webhook(request: Request):
     def _reply_text_for_log(r) -> str:
         if isinstance(r, dict):
             rtype = r.get("type", "")
-            if rtype == "text_then_list_sections":
+            if rtype in ("text_then_list_sections", "text_then_buttons"):
                 body = (r.get("text") or "") + "\n" + (r.get("body") or "")
             else:
                 body = r.get("body") or ""
@@ -3974,9 +3974,11 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
     _is_short_fragment = len(_msg_words) <= 4 and not _has_digits and len(user_text.strip()) < 30
 
     # Don't buffer messages that contain clear intent keywords (cotizar, precio, horario, etc.)
+    # Include common misspellings: cotisame/cotiseme (s→z), presio (s→c)
     _intent_keywords_nobuffer = re.search(
-        r"\b(cotiz|precio|cuanto|cuánto|necesito|ocupo|quiero|horario|ubicacion|ubicación|"
-        r"factura|pagar|asesor|ayuda|hablar|gracias)\b",
+        r"\b(cotiz|cotis|coti[sz]a|coti[sz]e|precio|presio|cuanto|cuánto|necesito|ocupo|quiero|"
+        r"horario|ubicacion|ubicación|factura|pagar|asesor|ayuda|hablar|gracias|hola|buenas|"
+        r"buenos|menu|menú|salir|cancelar)\b",
         user_text.lower()
     )
     if _intent_keywords_nobuffer:
