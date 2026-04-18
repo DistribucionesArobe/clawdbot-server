@@ -3973,6 +3973,15 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
     _has_digits = bool(re.search(r"\d", user_text))
     _is_short_fragment = len(_msg_words) <= 4 and not _has_digits and len(user_text.strip()) < 30
 
+    # Don't buffer messages that contain clear intent keywords (cotizar, precio, horario, etc.)
+    _intent_keywords_nobuffer = re.search(
+        r"\b(cotiz|precio|cuanto|cuánto|necesito|ocupo|quiero|horario|ubicacion|ubicación|"
+        r"factura|pagar|asesor|ayuda|hablar|gracias)\b",
+        user_text.lower()
+    )
+    if _intent_keywords_nobuffer:
+        _is_short_fragment = False
+
     # Button clicks (interactive) should NEVER be buffered
     if _is_short_fragment and wa_from and not _is_button_click:
         _buf_state = get_quote_state(company_id, wa_from) or {}
