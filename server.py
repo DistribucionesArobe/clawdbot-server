@@ -4042,6 +4042,35 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             _buf_state2.pop("_msg_buffer", None)
             upsert_quote_state(company_id, wa_from, _buf_state2)
 
+    # ── Handle hours/location question BEFORE LLM parser ──────────────
+    # Otherwise LLM parses "Horarios y ubicación" as product names
+    if looks_like_hours_question(user_text):
+        try:
+            conn_hrs = get_conn()
+            cur_hrs = conn_hrs.cursor()
+            cur_hrs.execute("SELECT hours_text, address_text, google_maps_url FROM companies WHERE id=%s", (company_id,))
+            row_hrs = cur_hrs.fetchone()
+            cur_hrs.close()
+            conn_hrs.close()
+        except Exception:
+            row_hrs = None
+        if row_hrs:
+            hours = (row_hrs[0] or "").strip()
+            address = (row_hrs[1] or "").strip()
+            maps_url = (row_hrs[2] or "").strip()
+            parts = []
+            if hours: parts.append(f"🕐 *Horarios:* {hours}")
+            if address: parts.append(f"📍 *Dirección:* {address}")
+            if maps_url: parts.append(f"🗺️ *Google Maps:* {maps_url}")
+            if parts:
+                print(f"HOURS HANDLER (early): text='{user_text[:60]}'")
+                return "\n".join(parts) + "\n\n¿Cotizamos algo? Mándame ej: 10 cemento, 5 varilla 3/8"
+        print(f"HOURS HANDLER (early, no data): text='{user_text[:60]}'")
+        return (
+            "📍 Escríbenos directamente para darte la ubicación y horarios.\n\n"
+            "Si quieres cotizar: mándame ej: 10 cemento, 5 varilla 3/8"
+        )
+
     # ── LLM-first parser: intenta LLM primero, regex como fallback ──
     # SKIP LLM for known button clicks — they have their own handlers downstream
     _llm_result = None
