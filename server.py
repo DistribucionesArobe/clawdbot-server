@@ -209,17 +209,17 @@ openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 DATABASE_URL = (os.getenv("DATABASE_URL") or "").strip()
 
-API_KEY_PREFIX_LEN = 10
-SESSION_COOKIE_NAME = "session"
-SESSION_TTL_DAYS = int((os.getenv("SESSION_TTL_DAYS") or "14").strip())
+# API_KEY_PREFIX_LEN, SESSION_COOKIE_NAME, SESSION_TTL_DAYS imported from auth.py
 DEFAULT_COMPANY_ID = (os.getenv("DEFAULT_COMPANY_ID") or "").strip()
-WA_LIMIT_COMPLETE = int((os.getenv("WA_LIMIT_COMPLETE") or "1000").strip())
-WA_LIMIT_PRO = int((os.getenv("WA_LIMIT_PRO") or "2000").strip())
-WA_CONVERSATION_WINDOW_HOURS = int((os.getenv("WA_CONVERSATION_WINDOW_HOURS") or "24").strip())
+# WA_LIMIT_COMPLETE, WA_LIMIT_PRO, WA_CONVERSATION_WINDOW_HOURS imported from queries.py
 
 
 # -------------------------
-from auth import hash_password, verify_password, hash_api_key, api_key_prefix
+from auth import (
+    hash_password, verify_password, hash_api_key, api_key_prefix,
+    create_session, get_user_from_session, require_company_id,
+    get_company_from_bearer, SESSION_COOKIE_NAME, SESSION_TTL_DAYS,
+)
 
 def looks_like_product_phrase(text: str) -> bool:
     t = norm_name(text)
@@ -820,277 +820,13 @@ try:
 except Exception as e:
     log.error(f"SEED STARTUP ERROR: {repr(e)}")
 
-def get_company_by_twilio_number(to_phone: str):
-    to_phone = normalize_wa(to_phone)
-    conn = get_conn()
-    cur = conn.cursor()
-    try:
-        cur.execute("""
-            select c.id::text, c.name
-            from channels ch
-            join companies c on c.id = ch.company_id
-            where ch.provider='twilio'
-              and ch.channel_type='whatsapp'
-              and ch.address=%s
-              and ch.is_active=true
-            limit 1
-        """, (to_phone,))
-        row = cur.fetchone()
-        if not row:
-            return None
-        return {"company_id": row[0], "name": row[1]}
-    finally:
-        cur.close()
-        conn.close()
-
-import psycopg2
-
-def get_quote_state(company_id: str, wa_from: str):
-    if not wa_from:
-        return None
-    conn = get_conn()
-    cur = conn.cursor()
-    try:
-        cur.execute(
-            "SELECT state FROM wa_quote_state WHERE company_id=%s AND wa_from=%s LIMIT 1",
-            (company_id, wa_from),
-        )
-        row = cur.fetchone()
-        return row[0] if row else None
-    except psycopg2.errors.UndefinedTable:
-        return None
-    finally:
-        cur.close()
-        conn.close()
-
-def _year_month_utc() -> str:
-    now = datetime.now(timezone.utc)
-    return f"{now.year:04d}-{now.month:02d}"
-
-def get_company_plan_code(company_id: str) -> str:
-    conn = get_conn()
-    cur = conn.cursor()
-    try:
-        cur.execute("SELECT plan_code, trial_end FROM companies WHERE id=%s LIMIT 1", (company_id,))
-        row = cur.fetchone()
-        if not row:
-            return "free"
-        plan_code = (row[0] or "free").strip()
-        trial_end = row[1]
-        # Auto-expire trial: if trial_end is set and has passed, revert to free
-        if trial_end and plan_code in ("pro", "complete"):
-            if datetime.now(timezone.utc) > trial_end:
-                try:
-                    cur.execute(
-                        "UPDATE companies SET plan_code='free', trial_end=NULL, updated_at=now() WHERE id=%s",
-                        (company_id,),
-                    )
-                    log.warning(f"TRIAL EXPIRADO: company={company_id} plan={plan_code} -> free")
-                except Exception as e:
-                    log.error(f"TRIAL EXPIRE ERROR: {repr(e)}")
-                return "free"
-        return plan_code
-    finally:
-        cur.close()
-        conn.close()
-
-def get_plan_limit(plan_code: str) -> int:
-    p = (plan_code or "free").strip().lower()
-    if p == "complete":
-        return WA_LIMIT_COMPLETE
-    if p == "pro":
-        return WA_LIMIT_PRO
-    return 0
-
-def get_monthly_usage(company_id: str, year_month: str) -> int:
-    conn = get_conn()
-    cur = conn.cursor()
-    try:
-        cur.execute(
-            "SELECT conversations_count FROM wa_usage_monthly WHERE company_id=%s AND year_month=%s LIMIT 1",
-            (company_id, year_month),
-        )
-        row = cur.fetchone()
-        return int(row[0]) if row else 0
-    except psycopg2.errors.UndefinedTable:
-        return 0
-    finally:
-        cur.close()
-        conn.close()
-
-def increment_monthly_usage(company_id: str, year_month: str, delta: int = 1) -> int:
-    conn = get_conn()
-    cur = conn.cursor()
-    try:
-        cur.execute(
-            """
-            INSERT INTO wa_usage_monthly(company_id, year_month, conversations_count, updated_at)
-            VALUES (%s, %s, %s, now())
-            ON CONFLICT (company_id, year_month)
-            DO UPDATE SET conversations_count = wa_usage_monthly.conversations_count + EXCLUDED.conversations_count,
-                          updated_at = now()
-            RETURNING conversations_count
-            """,
-            (company_id, year_month, int(delta)),
-        )
-        row = cur.fetchone()
-        return int(row[0]) if row else 0
-    except psycopg2.errors.UndefinedTable:
-        return 0
-    finally:
-        cur.close()
-        conn.close()
-
-def track_conversation_if_new(company_id: str, wa_from: str) -> dict:
-    wa_from = (wa_from or "").strip()
-    if not wa_from:
-        return {"counted": False, "usage": 0, "limit": 0, "plan_code": "free", "year_month": _year_month_utc()}
-    plan_code = get_company_plan_code(company_id)
-    limit = get_plan_limit(plan_code)
-    ym = _year_month_utc()
-    if limit <= 0:
-        return {"counted": False, "usage": get_monthly_usage(company_id, ym), "limit": limit, "plan_code": plan_code, "year_month": ym}
-    conn = get_conn()
-    cur = conn.cursor()
-    try:
-        cur.execute(
-            "SELECT last_started_at FROM wa_conversation_windows WHERE company_id=%s AND wa_from=%s LIMIT 1",
-            (company_id, wa_from),
-        )
-        row = cur.fetchone()
-        now_utc = datetime.now(timezone.utc)
-        window_hours = WA_CONVERSATION_WINDOW_HOURS
-        should_count = False
-        if not row:
-            should_count = True
-        else:
-            last_started_at = row[0]
-            if last_started_at is None:
-                should_count = True
-            else:
-                age = now_utc - last_started_at
-                if age.total_seconds() >= window_hours * 3600:
-                    should_count = True
-        if should_count:
-            cur.execute(
-                """
-                INSERT INTO wa_conversation_windows(company_id, wa_from, last_started_at, updated_at)
-                VALUES (%s, %s, %s, now())
-                ON CONFLICT (company_id, wa_from)
-                DO UPDATE SET last_started_at=EXCLUDED.last_started_at, updated_at=now()
-                """,
-                (company_id, wa_from, now_utc),
-            )
-        usage = get_monthly_usage(company_id, ym)
-        if should_count:
-            usage = increment_monthly_usage(company_id, ym, 1)
-        return {"counted": bool(should_count), "usage": int(usage), "limit": int(limit), "plan_code": plan_code, "year_month": ym}
-    except psycopg2.errors.UndefinedTable:
-        return {"counted": False, "usage": 0, "limit": limit, "plan_code": plan_code, "year_month": ym}
-    finally:
-        cur.close()
-        conn.close()
-        
-def save_quote(company_id: str, client_phone: str, cart: list, existing_folio: str = None) -> str:
-    client_phone = (client_phone or "").replace("whatsapp:", "").strip()
-    total = sum(float(it.get("price", 0)) * int(it.get("qty", 0)) for it in cart)
-
-    items_json = [
-        {
-            "name":       it.get("name", ""),
-            "qty":        int(it.get("qty", 0)),
-            "unit":       it.get("unit", "pza"),
-            "unit_price": float(it.get("price", 0)),
-            "subtotal":   float(it.get("price", 0)) * int(it.get("qty", 0)),
-            "sku":        it.get("sku", ""),
-        }
-        for it in cart
-    ]
-
-    folio = existing_folio or generate_folio()
-
-    conn = get_conn()
-    cur = conn.cursor()
-    try:
-        cur.execute(
-            """
-            INSERT INTO quotes (folio, company_id, client_phone, items, total)
-            VALUES (%s, %s::uuid, %s, %s::jsonb, %s)
-            ON CONFLICT (folio) DO UPDATE
-              SET items = EXCLUDED.items,
-                  total = EXCLUDED.total,
-                  client_phone = EXCLUDED.client_phone
-            """,
-            (folio, company_id, client_phone, json.dumps(items_json), total),
-        )
-    except Exception as e:
-        log.error("SAVE QUOTE ERROR:", repr(e))
-    finally:
-        cur.close()
-        conn.close()
-
-    return folio
-
-def upsert_quote_state(company_id: str, wa_from: str, state: dict):
-    if not wa_from:
-        return
-    conn = get_conn()
-    cur = conn.cursor()
-    try:
-        cur.execute(
-            """
-            insert into wa_quote_state(company_id, wa_from, state, updated_at)
-            values (%s, %s, %s::jsonb, now())
-            on conflict (company_id, wa_from)
-            do update set state=excluded.state, updated_at=now()
-            """,
-            (company_id, wa_from, json.dumps(state)),
-        )
-    except psycopg2.errors.UndefinedTable:
-        return
-    finally:
-        cur.close()
-        conn.close()
-
-def clear_quote_state(company_id: str, wa_from: str):
-    if not wa_from:
-        return
-    conn = get_conn()
-    cur = conn.cursor()
-    try:
-        cur.execute(
-            "delete from wa_quote_state where company_id=%s and wa_from=%s",
-            (company_id, wa_from),
-        )
-    except psycopg2.errors.UndefinedTable:
-        return
-    finally:
-        cur.close()
-        conn.close()
-
-
-def get_company_by_phone_number_id(phone_number_id: str):
-    conn = get_conn()
-    cur = conn.cursor()
-    try:
-        cur.execute(
-            """
-            SELECT c.id, c.wa_api_key, c.wa_phone_number_id
-            FROM channels ch
-            JOIN companies c ON c.id = ch.company_id
-            WHERE ch.meta_phone_number_id = %s
-              AND ch.is_active = true
-            LIMIT 1
-            """,
-            (phone_number_id,),
-        )
-        row = cur.fetchone()
-        if not row:
-            return None
-        return {"company_id": str(row[0]), "wa_api_key": row[1], "wa_phone_number_id": row[2]}
-    finally:
-        cur.close()
-        conn.close()
+from queries import (
+    get_company_by_twilio_number, get_company_by_phone_number_id,
+    get_quote_state, upsert_quote_state, clear_quote_state,
+    save_quote, get_company_plan_code, get_plan_limit,
+    get_monthly_usage, increment_monthly_usage, track_conversation_if_new,
+    WA_LIMIT_COMPLETE, WA_LIMIT_PRO, WA_CONVERSATION_WINDOW_HOURS,
+)
 
 from whatsapp_api import (
     send_whatsapp_text, send_whatsapp_list, send_whatsapp_list_sections,
@@ -1103,85 +839,8 @@ _normalize_mx_phone = normalize_mx_phone
 # -------------------------
 # Sessions
 # -------------------------
-def create_session(conn, user_id: int) -> str:
-    sid = secrets.token_urlsafe(32)
-    exp = datetime.now(timezone.utc) + timedelta(days=SESSION_TTL_DAYS)
-    cur = conn.cursor()
-    try:
-        cur.execute("INSERT INTO sessions (id, user_id, expires_at) VALUES (%s, %s, %s)", (sid, user_id, exp))
-        return sid
-    finally:
-        cur.close()
-
-def get_user_from_session(request: Request):
-    sid = request.cookies.get(SESSION_COOKIE_NAME)
-    if not sid:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    conn = None
-    cur = None
-    try:
-        conn = get_conn()
-        cur = conn.cursor()
-        cur.execute(
-            """
-            SELECT u.id, u.email, u.company_id::text
-            FROM sessions s
-            JOIN users u ON u.id = s.user_id
-            WHERE s.id=%s AND s.expires_at > now()
-            LIMIT 1
-            """,
-            (sid,),
-        )
-        row = cur.fetchone()
-        if not row:
-            raise HTTPException(status_code=401, detail="Not authenticated")
-        user_id, email, company_id = row
-        if not company_id:
-            raise HTTPException(status_code=400, detail="User sin company_id asignado")
-        return {"id": int(user_id), "email": email, "company_id": company_id}
-    finally:
-        if cur: cur.close()
-        if conn: conn.close()
-
-def require_company_id(request: Request) -> str:
-    u = get_user_from_session(request)
-    cid = (u.get("company_id") or "").strip()
-    if not cid:
-        raise HTTPException(status_code=400, detail="No pude resolver company_id")
-    return cid
-
-def get_company_from_bearer(authorization: str):
-    auth = (authorization or "").strip()
-    if not auth.lower().startswith("bearer "):
-        raise HTTPException(status_code=401, detail="Missing Bearer token")
-    token = auth.split(" ", 1)[1].strip()
-    if len(token) < 20:
-        raise HTTPException(status_code=401, detail="Invalid token")
-    prefix = api_key_prefix(token)
-    key_hash = api_key_hash(token)
-    log.debug(f"BEARER DEBUG: prefix={repr(prefix)} hash={repr(key_hash)}")
-    conn = None
-    cur = None
-    try:
-        conn = get_conn()
-        cur = conn.cursor()
-        cur.execute(
-            """
-            SELECT id, company_id FROM api_keys
-            WHERE prefix = %s AND key_hash = %s AND revoked_at IS NULL
-            LIMIT 1
-            """,
-            (prefix, key_hash),
-        )
-        row = cur.fetchone()
-        if not row:
-            raise HTTPException(status_code=401, detail="Invalid or revoked token")
-        api_key_id, company_id = row
-        cur.execute("UPDATE api_keys SET last_used_at = now() WHERE id = %s", (api_key_id,))
-        return {"company_id": str(company_id), "api_key_id": str(api_key_id)}
-    finally:
-        if cur: cur.close()
-        if conn: conn.close()
+# Session management imported from auth.py:
+# create_session, get_user_from_session, require_company_id, get_company_from_bearer
 
 # -------------------------
 # Models
