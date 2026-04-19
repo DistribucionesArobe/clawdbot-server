@@ -92,7 +92,7 @@ async def _silence_escalation_loop():
             _run_silence_escalation_once()
             _run_conversation_death_once()
         except Exception as _e:
-            print("SILENCE LOOP ERROR:", repr(_e))
+            log.error("SILENCE LOOP ERROR:", repr(_e))
 
 def _run_conversation_death_once():
     """Mata (limpia) el estado de conversaciones sin actividad por >1 hora.
@@ -105,18 +105,18 @@ def _run_conversation_death_once():
         cur.execute(
             """
             DELETE FROM wa_quote_state
-            WHERE updated_at < now() - interval '%s minutes'
+            WHERE updated_at < now() - (%s || ' minutes')::interval
             RETURNING company_id::text, wa_from
-            """ % CONVERSATION_DEATH_MIN
+            """, (str(CONVERSATION_DEATH_MIN),)
         )
         killed = cur.fetchall() or []
         conn.commit()
         cur.close()
         conn.close()
         for company_id, wa_from in killed:
-            print(f"CONVERSATION DEATH: company={company_id} client={wa_from} idle>{CONVERSATION_DEATH_MIN}min — state cleared")
+            log.info(f"CONVERSATION DEATH: company={company_id} client={wa_from} idle>{CONVERSATION_DEATH_MIN}min — state cleared")
     except Exception as _e:
-        print("CONVERSATION DEATH ERROR:", repr(_e))
+        log.error("CONVERSATION DEATH ERROR:", repr(_e))
 
 def _run_silence_escalation_once():
     try:
@@ -128,9 +128,9 @@ def _run_silence_escalation_once():
                    c.owner_phone, c.wa_api_key, c.wa_phone_number_id, c.telefono_atencion, c.name
             FROM wa_quote_state wqs
             JOIN companies c ON c.id = wqs.company_id
-            WHERE wqs.updated_at < now() - interval '%s minutes'
+            WHERE wqs.updated_at < now() - (%s || ' minutes')::interval
               AND wqs.updated_at > now() - interval '2 hours'
-            """ % SILENCE_THRESHOLD_MIN
+            """, (str(SILENCE_THRESHOLD_MIN),)
         )
         rows = cur.fetchall()
         cur.close()
@@ -161,16 +161,16 @@ def _run_silence_escalation_once():
                 )
                 state["escalated_silence"] = True
                 upsert_quote_state(company_id, wa_from, state)
-                print(f"SILENCE ESCALATION: company={company_id} client={wa_from} silent>{SILENCE_THRESHOLD_MIN}min")
+                log.info(f"SILENCE ESCALATION: company={company_id} client={wa_from} silent>{SILENCE_THRESHOLD_MIN}min")
             except Exception as _ne:
-                print("SILENCE NOTIFY ERROR:", repr(_ne))
+                log.error("SILENCE NOTIFY ERROR:", repr(_ne))
     except Exception as _e:
-        print("SILENCE ESCALATION RUN ERROR:", repr(_e))
+        log.error("SILENCE ESCALATION RUN ERROR:", repr(_e))
 
 @app.on_event("startup")
 async def _start_silence_loop():
     asyncio.create_task(_silence_escalation_loop())
-    print(f"Silence escalation loop started (check every {SILENCE_CHECK_INTERVAL_SEC}s, threshold {SILENCE_THRESHOLD_MIN} min)")
+    log.info(f"Silence escalation loop started (check every {SILENCE_CHECK_INTERVAL_SEC}s, threshold {SILENCE_THRESHOLD_MIN} min)")
 
 # -------------------------
 
@@ -191,6 +191,64 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ── Rate limiting middleware (in-memory, per-IP) ──────────────────────────
+# Protects against abuse. Limits per window (sliding).
+# WhatsApp webhook gets a higher limit (Meta sends bursts).
+import time as _time_mod
+from collections import defaultdict as _defaultdict
+
+_RATE_LIMITS = {
+    "/webhook/whatsapp": {"max_requests": 120, "window_seconds": 60},
+    "/api/auth/login": {"max_requests": 10, "window_seconds": 60},
+    "/api/auth/register": {"max_requests": 5, "window_seconds": 60},
+    "_default": {"max_requests": 60, "window_seconds": 60},
+}
+_rate_store: dict[str, list[float]] = _defaultdict(list)
+
+@app.middleware("http")
+async def rate_limit_middleware(request: Request, call_next):
+    client_ip = request.headers.get("x-forwarded-for", request.client.host if request.client else "unknown")
+    client_ip = client_ip.split(",")[0].strip()
+    path = request.url.path
+
+    # Find matching limit
+    limit_cfg = _RATE_LIMITS.get(path, _RATE_LIMITS["_default"])
+    max_req = limit_cfg["max_requests"]
+    window = limit_cfg["window_seconds"]
+
+    # Rate key = IP + path bucket
+    bucket = path if path in _RATE_LIMITS else "_default"
+    rate_key = f"{client_ip}:{bucket}"
+
+    now = _time_mod.time()
+    # Prune old entries
+    _rate_store[rate_key] = [t for t in _rate_store[rate_key] if now - t < window]
+
+    if len(_rate_store[rate_key]) >= max_req:
+        log.warning(f"RATE LIMIT: {client_ip} hit {max_req}/{window}s on {path}")
+        return Response(
+            content='{"detail":"Too many requests"}',
+            status_code=429,
+            media_type="application/json",
+        )
+
+    _rate_store[rate_key].append(now)
+    response = await call_next(request)
+    return response
+
+# Cleanup stale rate entries every 10 minutes
+async def _cleanup_rate_store():
+    while True:
+        await asyncio.sleep(600)
+        now = _time_mod.time()
+        stale = [k for k, v in _rate_store.items() if not v or now - v[-1] > 120]
+        for k in stale:
+            del _rate_store[k]
+
+@app.on_event("startup")
+async def _start_rate_cleanup():
+    asyncio.create_task(_cleanup_rate_store())
 
 # -------------------------
 
@@ -697,7 +755,7 @@ def cart_render_quote(state: dict, company_id: str = "", client_phone: str = "")
                 state["folio"] = folio
             folio_txt = f"\n📋 Folio: *{folio}*"
         except Exception as e:
-            print("CART RENDER SAVE QUOTE ERROR:", repr(e))
+            log.error("CART RENDER SAVE QUOTE ERROR:", repr(e))
 
     return (
         "Cotización:\n"
@@ -736,7 +794,7 @@ def save_search_miss(company_id: str, term: str):
         cur.close()
         conn.close()
     except Exception as e:
-        print("SAVE_MISS ERROR:", repr(e))
+        log.error("SAVE_MISS ERROR:", repr(e))
 
 from psycopg2 import pool as _pg_pool
 
@@ -806,10 +864,10 @@ def print_db_fingerprint():
         conn = get_conn()
         cur = conn.cursor()
         cur.execute("select inet_server_addr(), inet_server_port(), current_database()")
-        print("DB FINGERPRINT (Render):", cur.fetchone())
+        log.debug("DB FINGERPRINT (Render):", cur.fetchone())
         conn.close()
     except Exception as e:
-        print("DB FINGERPRINT ERROR:", repr(e))
+        log.error("DB FINGERPRINT ERROR:", repr(e))
 
 print_db_fingerprint()
 
@@ -842,9 +900,9 @@ def _run_pricebook_migrations(conn):
             END $$;
         """)
         conn.commit()
-        print("PRICEBOOK MIGRATIONS: OK (bundle_size, context_groups, is_default)")
+        log.debug("PRICEBOOK MIGRATIONS: OK (bundle_size, context_groups, is_default)")
     except Exception as e:
-        print("PRICEBOOK MIGRATION ERROR:", repr(e))
+        log.error("PRICEBOOK MIGRATION ERROR:", repr(e))
         conn.rollback()
     finally:
         cur.close()
@@ -889,9 +947,9 @@ def _run_promo_codes_migration(conn):
                 END IF;
             END $$;
         """)
-        print("PROMO_CODES MIGRATION: OK")
+        log.info("PROMO_CODES MIGRATION: OK")
     except Exception as e:
-        print(f"PROMO_CODES MIGRATION ERROR: {repr(e)}")
+        log.error(f"PROMO_CODES MIGRATION ERROR: {repr(e)}")
     finally:
         cur.close()
 
@@ -902,7 +960,7 @@ try:
     _run_promo_codes_migration(_mig_conn)
     _mig_conn.close()
 except Exception as e:
-    print(f"PRICEBOOK MIGRATION STARTUP ERROR: {repr(e)}")
+    log.error(f"PRICEBOOK MIGRATION STARTUP ERROR: {repr(e)}")
 
 # Seed jerga_global con términos críticos al iniciar
 try:
@@ -910,7 +968,7 @@ try:
     seed_jerga_global(_seed_conn)
     _seed_conn.close()
 except Exception as e:
-    print(f"SEED STARTUP ERROR: {repr(e)}")
+    log.error(f"SEED STARTUP ERROR: {repr(e)}")
 
 def get_company_by_twilio_number(to_phone: str):
     to_phone = normalize_wa(to_phone)
@@ -977,9 +1035,9 @@ def get_company_plan_code(company_id: str) -> str:
                         "UPDATE companies SET plan_code='free', trial_end=NULL, updated_at=now() WHERE id=%s",
                         (company_id,),
                     )
-                    print(f"TRIAL EXPIRADO: company={company_id} plan={plan_code} -> free")
+                    log.warning(f"TRIAL EXPIRADO: company={company_id} plan={plan_code} -> free")
                 except Exception as e:
-                    print(f"TRIAL EXPIRE ERROR: {repr(e)}")
+                    log.error(f"TRIAL EXPIRE ERROR: {repr(e)}")
                 return "free"
         return plan_code
     finally:
@@ -1116,7 +1174,7 @@ def save_quote(company_id: str, client_phone: str, cart: list, existing_folio: s
             (folio, company_id, client_phone, json.dumps(items_json), total),
         )
     except Exception as e:
-        print("SAVE QUOTE ERROR:", repr(e))
+        log.error("SAVE QUOTE ERROR:", repr(e))
     finally:
         cur.close()
         conn.close()
@@ -1261,7 +1319,7 @@ def extract_text_from_image(image_bytes: bytes) -> str | None:
         result = (resp.choices[0].message.content or "").strip()
         return None if result == "NO_LIST" else result
     except Exception as e:
-        print("VISION ERROR:", repr(e))
+        log.error("VISION ERROR:", repr(e))
         return None
 
 def _normalize_mx_phone(phone: str) -> str:
@@ -1365,7 +1423,7 @@ def get_company_from_bearer(authorization: str):
         raise HTTPException(status_code=401, detail="Invalid token")
     prefix = api_key_prefix(token)
     key_hash = api_key_hash(token)
-    print(f"BEARER DEBUG: prefix={repr(prefix)} hash={repr(key_hash)}")
+    log.debug(f"BEARER DEBUG: prefix={repr(prefix)} hash={repr(key_hash)}")
     conn = None
     cur = None
     try:
@@ -1478,7 +1536,7 @@ async def whatsapp_webhook(request: Request):
     wa_msg_id = msg.get("id", "")
     if wa_msg_id:
         if wa_msg_id in _processed_msg_ids:
-            print(f"DEDUP: skipping already-processed message {wa_msg_id}")
+            log.debug(f"DEDUP: skipping already-processed message {wa_msg_id}")
             return {"ok": True}
         _processed_msg_ids[wa_msg_id] = time.time()
         if len(_processed_msg_ids) > 500:
@@ -1516,7 +1574,7 @@ async def whatsapp_webhook(request: Request):
                         state=_st_check,
                     )
             except Exception as e:
-                print("COMPROBANTE NOTIFY ERROR:", repr(e))
+                log.error("COMPROBANTE NOTIFY ERROR:", repr(e))
             _st_check.pop("awaiting_comprobante", None)
             upsert_quote_state(company["company_id"], from_phone, _st_check)
             _bot_reply_comprobante = "✅ ¡Comprobante recibido! Le avisamos a la empresa y en breve te confirman tu pedido. 🙏"
@@ -1539,7 +1597,7 @@ async def whatsapp_webhook(request: Request):
                 extracted = extract_text_from_image(img_bytes)
                 if extracted:
                     text = f"{caption}\n{extracted}".strip() if caption else extracted
-                    print("IMAGE EXTRACTED:", text[:200])
+                    log.info("IMAGE EXTRACTED:", text[:200])
                 else:
                     send_whatsapp_text(
                         wa_api_key=company["wa_api_key"],
@@ -1549,7 +1607,7 @@ async def whatsapp_webhook(request: Request):
                     )
                     return {"ok": True}
             except Exception as e:
-                print("IMAGE PROCESSING ERROR:", repr(e))
+                log.error("IMAGE PROCESSING ERROR:", repr(e))
                 send_whatsapp_text(
                     wa_api_key=company["wa_api_key"],
                     phone_number_id=company["wa_phone_number_id"],
@@ -1568,18 +1626,18 @@ async def whatsapp_webhook(request: Request):
             text = lr_id if lr_id.upper().startswith("PICK_") else lr_title
         elif itype == "button_reply":
             text = (interactive.get("button_reply") or {}).get("title") or ""
-        print(f"INTERACTIVE MSG: type={itype} text={text!r} from={from_phone}")
+        log.debug(f"INTERACTIVE MSG: type={itype} text={text!r} from={from_phone}")
 
     if text:
         log_message(company["company_id"], from_phone, "user", text)
 
-    print(f"WEBHOOK DISPATCH: msg_type={msg_type} text={text!r} is_interactive={msg_type == 'interactive'}")
+    log.info(f"WEBHOOK DISPATCH: msg_type={msg_type} text={text!r} is_interactive={msg_type == 'interactive'}")
     reply = build_reply_for_company(
         company["company_id"], text,
         wa_from=from_phone,
         is_interactive=(msg_type == "interactive"),
     )
-    print(f"WEBHOOK REPLY: type={type(reply).__name__} empty={not reply} preview={str(reply)[:120] if reply else 'NONE'}")
+    log.info(f"WEBHOOK REPLY: type={type(reply).__name__} empty={not reply} preview={str(reply)[:120] if reply else 'NONE'}")
 
     if not reply:
         return {"ok": True}
@@ -1706,7 +1764,7 @@ def log_message(company_id: str, client_phone: str, role: str, message: str, ext
         cur.close()
         conn.close()
     except Exception as e:
-        print("LOG_MESSAGE ERROR:", repr(e))
+        log.error("LOG_MESSAGE ERROR:", repr(e))
 
 
 # ============================================================
@@ -1735,7 +1793,7 @@ def _load_catalog_for_shadow(company_id: str) -> list[dict]:
             for r in rows
         ]
     except Exception as e:
-        print("SHADOW: catalog load error:", repr(e))
+        log.error("SHADOW: catalog load error:", repr(e))
         return []
 
 def _try_llm_parse(company_id: str, user_text: str) -> dict | None:
@@ -1749,10 +1807,10 @@ def _try_llm_parse(company_id: str, user_text: str) -> dict | None:
         t0 = _t.time()
         result = llm_parse_order(user_text, catalog)
         ms = int((_t.time() - t0) * 1000)
-        print(f"LLM PARSE: {ms}ms, items={len(result.get('items', []))}, "
+        log.info(f"LLM PARSE: {ms}ms, items={len(result.get('items', []))}, "
               f"non_order={result.get('non_order')}, error={result.get('error')}")
         if result.get("error"):
-            print(f"LLM PARSE FAILED: {result['error']} — falling back to regex")
+            log.error(f"LLM PARSE FAILED: {result['error']} — falling back to regex")
             return None
         # Attach catalog lookup dict for downstream use
         cat_by_key = {}
@@ -1763,7 +1821,7 @@ def _try_llm_parse(company_id: str, user_text: str) -> dict | None:
         result["_cat_by_key"] = cat_by_key
         return result
     except Exception as e:
-        print(f"LLM PARSE EXCEPTION: {repr(e)} — falling back to regex")
+        log.error(f"LLM PARSE EXCEPTION: {repr(e)} — falling back to regex")
         return None
 
 def log_parser_shadow(company_id, client_phone, user_text, regex_items):
@@ -1807,12 +1865,12 @@ def log_parser_shadow(company_id, client_phone, user_text, regex_items):
             cur.close()
             conn.close()
         except Exception as e:
-            print("SHADOW: log error:", repr(e))
+            log.error("SHADOW: log error:", repr(e))
     try:
         import threading
         threading.Thread(target=_runner, daemon=True).start()
     except Exception as e:
-        print("SHADOW: thread spawn error:", repr(e))
+        log.error("SHADOW: thread spawn error:", repr(e))
 
 
 @app.get("/api/conversations")
@@ -2254,7 +2312,7 @@ def _handle_construccion(company_id: str, user_text: str, wa_from: str):
         else:
             raise ValueError(f"tipo desconocido: {tipo_key}")
     except Exception as e:
-        print("CALC ERROR:", repr(e))
+        log.error("CALC ERROR:", repr(e))
         state.pop("construccion_state", None)
         upsert_quote_state(company_id, wa_from, state)
         return "Error calculando materiales. Escribe *construccion* para intentar de nuevo."
@@ -2356,7 +2414,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
     }
     _is_button_click = is_interactive and _raw_current_stripped in _button_click_triggers
     if is_interactive:
-        print(f"BTN_DEBUG: raw_stripped={_raw_current_stripped!r} is_button_click={_is_button_click} in_triggers={_raw_current_stripped in _button_click_triggers}")
+        log.debug(f"BTN_DEBUG: raw_stripped={_raw_current_stripped!r} is_button_click={_is_button_click} in_triggers={_raw_current_stripped in _button_click_triggers}")
 
     # Flush stale message buffer (>15s old) — prepend to current message
     # SKIP if current message is a button click (prevents buffer from mangling it)
@@ -2378,7 +2436,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         if _flush_state.get("_msg_buffer"):
             _flush_state.pop("_msg_buffer", None)
             upsert_quote_state(company_id, wa_from, _flush_state)
-            print(f"BUTTON CLICK: cleared stale buffer for {wa_from}")
+            log.info(f"BUTTON CLICK: cleared stale buffer for {wa_from}")
 
     if is_interactive:
         user_text = (user_text or "").strip()
@@ -2389,9 +2447,9 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
     try:
         usage_info = track_conversation_if_new(company_id, wa_from)
         if usage_info.get("limit", 0) > 0 and usage_info.get("usage", 0) > usage_info.get("limit", 0):
-            print("WA LIMIT EXCEEDED:", usage_info)
+            log.info("WA LIMIT EXCEEDED:", usage_info)
     except Exception as e:
-        print("WA TRACK ERROR:", repr(e))
+        log.error("WA TRACK ERROR:", repr(e))
 
     import string as _string
     from spec_definitions import get_spec_steps, already_has_specs, build_spec_query
@@ -2482,10 +2540,10 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 max_tokens=5,
             )
             result = (resp.choices[0].message.content or "").strip().upper()
-            print(f"INTENT CLASSIFY: '{t[:50]}' → {result}")
+            log.info(f"INTENT CLASSIFY: '{t[:50]}' → {result}")
             return "product" if "PRODUCT" in result else "other"
         except Exception as e:
-            print(f"INTENT CLASSIFY ERROR: {repr(e)}")
+            log.error(f"INTENT CLASSIFY ERROR: {repr(e)}")
             return "product"  # fallback seguro: asumir producto
 
     def _escalate_non_quote(company_id_esc: str, wa_from_esc: str, text_esc: str) -> str:
@@ -2511,7 +2569,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 )
                 company_name_esc = row_esc[3] or "la empresa"
         except Exception as e:
-            print(f"ESCALATE NON-QUOTE ERROR: {repr(e)}")
+            log.error(f"ESCALATE NON-QUOTE ERROR: {repr(e)}")
             company_name_esc = "la empresa"
         return (
             f"Ese tema lo maneja directamente el equipo de *{company_name_esc}* 🙋\n\n"
@@ -2677,7 +2735,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         "quitar un producto", "quitar algo",
     }
     if _early_stripped in _early_remove_triggers:
-        print(f"EARLY REMOVE TRIGGER: raw={user_text!r} tnorm={tnorm!r} stripped={_early_stripped!r}")
+        log.debug(f"EARLY REMOVE TRIGGER: raw={user_text!r} tnorm={tnorm!r} stripped={_early_stripped!r}")
         if not _cart:
             return "Tu carrito está vacío."
         # Clear any stale removal-related flags so we re-render the list fresh
@@ -3103,10 +3161,10 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                             state=state_esc,
                         )
                     except Exception as ne:
-                        print("NON-QUOTE NOTIFY ERROR:", repr(ne))
+                        log.error("NON-QUOTE NOTIFY ERROR:", repr(ne))
                 company_name_esc = (row_esc[3] if row_esc else None) or "la empresa"
             except Exception as e:
-                print("NON-QUOTE ESCALATION ERROR:", repr(e))
+                log.error("NON-QUOTE ESCALATION ERROR:", repr(e))
                 company_name_esc = "la empresa"
                 _nq_phone = ""
             if _nq_phone:
@@ -3136,7 +3194,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             or (_state_frust.get("items") and len(_state_frust.get("items", [])) > 0)
         )
         if _has_pending:
-            print(f"FRUSTRATION DETECTED: escalating '{_t_lower}' (pending state exists)")
+            log.info(f"FRUSTRATION DETECTED: escalating '{_t_lower}' (pending state exists)")
             # Force into escalation branch below
             tnorm = "asesor"
 
@@ -3163,9 +3221,9 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                         client_phone=wa_from, reason="Cliente solicitó hablar con un asesor", state=state,
                     )
                 except Exception as ne:
-                    print("ESCALATION NOTIFY ERROR:", repr(ne))
+                    log.error("ESCALATION NOTIFY ERROR:", repr(ne))
         except Exception as e:
-            print("ESCALATION ERROR:", repr(e))
+            log.error("ESCALATION ERROR:", repr(e))
         # Build response with wa.me link if phone is available
         if _atencion_phone:
             _phone_clean = _normalize_mx_phone(_atencion_phone)
@@ -4127,9 +4185,9 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             if address: parts.append(f"📍 *Dirección:* {address}")
             if maps_url: parts.append(f"🗺️ *Google Maps:* {maps_url}")
             if parts:
-                print(f"HOURS HANDLER (early): text='{user_text[:60]}'")
+                log.info(f"HOURS HANDLER (early): text='{user_text[:60]}'")
                 return "\n".join(parts) + "\n\n¿Cotizamos algo? Mándame ej: 10 cemento, 5 varilla 3/8"
-        print(f"HOURS HANDLER (early, no data): text='{user_text[:60]}'")
+        log.info(f"HOURS HANDLER (early, no data): text='{user_text[:60]}'")
         return (
             "📍 Escríbenos directamente para darte la ubicación y horarios.\n\n"
             "Si quieres cotizar: mándame ej: 10 cemento, 5 varilla 3/8"
@@ -4145,9 +4203,9 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
     # Also skip for hours/location questions — they have a dedicated handler
     if _llm_result and _llm_result.get("non_order"):
         if looks_like_hours_question(user_text):
-            print(f"LLM NON_ORDER but is hours question — skipping escalation. text='{user_text[:60]}'")
+            log.warning(f"LLM NON_ORDER but is hours question — skipping escalation. text='{user_text[:60]}'")
         else:
-            print(f"LLM NON_ORDER: escalating to human. text='{user_text[:60]}'")
+            log.info(f"LLM NON_ORDER: escalating to human. text='{user_text[:60]}'")
             return _escalate_non_quote(company_id, wa_from, user_text)
 
     if _llm_result and _llm_result.get("items") and not _llm_result.get("non_order"):
@@ -4155,7 +4213,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         from llm_parser import norm_key as _llm_norm_key
         _cat_by_key = _llm_result.get("_cat_by_key") or {}
         _parser_used = "llm"
-        print(f"LLM ITEMS: {[(it.get('qty'), it.get('key') or it.get('name')) for it in _llm_result['items']]}")
+        log.info(f"LLM ITEMS: {[(it.get('qty'), it.get('key') or it.get('name')) for it in _llm_result['items']]}")
         conn = get_conn()
         try:
             state = get_quote_state(company_id, wa_from) if wa_from else None
@@ -4187,12 +4245,12 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                         for _ck, _cv in _cat_by_key.items():
                             if _nk2 and (_nk2 in _ck or _ck in _nk2):
                                 cat_item = _cv
-                                print(f"LLM FUZZY MATCH: {_key!r} → {_cv.get('name')!r}")
+                                log.info(f"LLM FUZZY MATCH: {_key!r} → {_cv.get('name')!r}")
                                 break
                     if cat_item:
                         # Check if user specified a size — if NOT, prefer is_default product
                         _user_raw = _matched or _name or ""
-                        print(f"IS_DEFAULT CHECK: cat='{cat_item.get('name')}' user_raw='{_user_raw}' matched='{_matched}' name='{_name}'")
+                        log.debug(f"IS_DEFAULT CHECK: cat='{cat_item.get('name')}' user_raw='{_user_raw}' matched='{_matched}' name='{_name}'")
                         _has_user_size = bool(re.search(r"\b\d+\.\d+\b", _user_raw))  # e.g. "4.10", "6.35"
                         if not _has_user_size and not cat_item.get("is_default"):
                             # User didn't specify size → look for is_default product with same base type
@@ -4218,7 +4276,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                                     _def_row = _cur_def.fetchone()
                                     _cur_def.close()
                                     if _def_row:
-                                        print(f"IS_DEFAULT OVERRIDE: '{cat_item.get('name')}' → '{_def_row[1]}' (user had no size, matched on '{_sw}')")
+                                        log.debug(f"IS_DEFAULT OVERRIDE: '{cat_item.get('name')}' → '{_def_row[1]}' (user had no size, matched on '{_sw}')")
                                         cat_item = {
                                             "sku": _def_row[0], "name": _def_row[1],
                                             "unit": _def_row[2], "price": _def_row[3],
@@ -4226,7 +4284,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                                         }
                                         break
                                 except Exception as _def_e:
-                                    print(f"IS_DEFAULT CHECK ERROR: {repr(_def_e)}")
+                                    log.error(f"IS_DEFAULT CHECK ERROR: {repr(_def_e)}")
 
                         state = cart_add_item(state, {
                             "sku": cat_item.get("sku"),
@@ -4238,7 +4296,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                         })
                     else:
                         # Key del LLM no matcheó en catálogo → intenta smart_search
-                        print(f"LLM KEY NOT IN CATALOG: key={_key!r}, trying smart_search")
+                        log.info(f"LLM KEY NOT IN CATALOG: key={_key!r}, trying smart_search")
                         _search_name2 = _name or _matched or _key
                         try:
                             _fb2 = smart_search(conn, company_id, _search_name2, _qty,
@@ -4252,14 +4310,14 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                                     "vat_rate": _fb2["item"].get("vat_rate"),
                                     "qty": _qty,
                                 })
-                                print(f"LLM KEY MISS → SMART_SEARCH: {_search_name2!r} → {_fb2['item'].get('name')!r}")
+                                log.info(f"LLM KEY MISS → SMART_SEARCH: {_search_name2!r} → {_fb2['item'].get('name')!r}")
                             elif _fb2 and _fb2.get("candidates"):
                                 missing.append({"qty": _qty, "raw": _search_name2,
                                                 "candidates": _fb2["candidates"]})
                             else:
                                 missing.append({"qty": _qty, "raw": _matched or _name, "candidates": []})
                         except Exception as _fb2e:
-                            print(f"LLM KEY MISS FALLBACK ERROR: {repr(_fb2e)}")
+                            log.error(f"LLM KEY MISS FALLBACK ERROR: {repr(_fb2e)}")
                             missing.append({"qty": _qty, "raw": _matched or _name, "candidates": []})
                 else:
                     # Low confidence or no key → intenta smart_search como último recurso
@@ -4279,15 +4337,15 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                                     "qty": _qty,
                                 })
                                 _fallback_found = True
-                                print(f"LLM FALLBACK SMART_SEARCH: {_search_name!r} → {_fb_result['item'].get('name')!r}")
+                                log.info(f"LLM FALLBACK SMART_SEARCH: {_search_name!r} → {_fb_result['item'].get('name')!r}")
                             elif _fb_result and _fb_result.get("candidates"):
                                 # Ambiguo: pasar candidatos para que el bot pregunte al cliente
                                 missing.append({"qty": _qty, "raw": _search_name,
                                                 "candidates": _fb_result["candidates"]})
                                 _fallback_found = True
-                                print(f"LLM FALLBACK AMBIGUOUS: {_search_name!r} → {len(_fb_result['candidates'])} candidates")
+                                log.info(f"LLM FALLBACK AMBIGUOUS: {_search_name!r} → {len(_fb_result['candidates'])} candidates")
                         except Exception as _fbe:
-                            print(f"LLM FALLBACK ERROR: {repr(_fbe)}")
+                            log.error(f"LLM FALLBACK ERROR: {repr(_fbe)}")
                     if not _fallback_found:
                         missing.append({"qty": _qty, "raw": _matched or _name, "candidates": []})
 
@@ -4335,11 +4393,11 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                                     reason=_reason, state=state,
                                 )
                             except Exception as _ne:
-                                print("LLM ESCALATION NOTIFY ERROR:", repr(_ne))
+                                log.error("LLM ESCALATION NOTIFY ERROR:", repr(_ne))
                         state["escalated_proactive"] = True
                         if wa_from:
                             upsert_quote_state(company_id, wa_from, state)
-                        print(f"LLM ESCALATION: low={_should_escalate_low} retry={_should_escalate_retry} miss={_miss_count}/{_total_items}")
+                        log.info(f"LLM ESCALATION: low={_should_escalate_low} retry={_should_escalate_retry} miss={_miss_count}/{_total_items}")
                         _phone_clean = _normalize_mx_phone(_atencion) if _atencion else ""
                         _prefix = cart_render_quote(state, company_id=company_id, client_phone=wa_from) + "\n\n" if state.get("cart") else ""
                         if _phone_clean:
@@ -4354,7 +4412,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                             "Un asesor te va a contactar para ayudarte directo 🙏"
                         )
                     except Exception as _e:
-                        print("LLM ESCALATION ERROR:", repr(_e))
+                        log.error("LLM ESCALATION ERROR:", repr(_e))
             else:
                 state.pop("pending", None)
                 state.pop("retry_count", None)
@@ -4393,9 +4451,9 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
     try:
         log_parser_shadow(company_id, wa_from or "", user_text or "", multi or [])
     except Exception as _e:
-        print("SHADOW: skipped:", repr(_e))
+        log.warning("SHADOW: skipped:", repr(_e))
     if multi:
-        print(f"MULTI ITEMS ({_parser_used}): {[(q, p) for q, p, *_ in multi]}")
+        log.info(f"MULTI ITEMS ({_parser_used}): {[(q, p) for q, p, *_ in multi]}")
         conn = get_conn()
         try:
             state = get_quote_state(company_id, wa_from) if wa_from else None
@@ -4435,7 +4493,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                     result = smart_search(conn, company_id, prod_raw, qty,
                                           cart_context=_pedido_raw)
                 except Exception as e:
-                    print("SMART SEARCH ERROR:", repr(e))
+                    log.error("SMART SEARCH ERROR:", repr(e))
                     result = {"status": "not_found", "item": None, "candidates": []}
                     save_search_miss(company_id, prod_raw)
                 if result["status"] == "found":
@@ -4499,12 +4557,12 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                                     reason=_reason, state=state,
                                 )
                             except Exception as _ne:
-                                print("PROACTIVE ESCALATION NOTIFY ERROR:", repr(_ne))
+                                log.error("PROACTIVE ESCALATION NOTIFY ERROR:", repr(_ne))
                         # Mark escalated so we don't spam
                         state["escalated_proactive"] = True
                         if wa_from:
                             upsert_quote_state(company_id, wa_from, state)
-                        print(f"PROACTIVE ESCALATION: low={_should_escalate_low} retry={_should_escalate_retry} miss={_miss_count}/{_total_items}")
+                        log.info(f"PROACTIVE ESCALATION: low={_should_escalate_low} retry={_should_escalate_retry} miss={_miss_count}/{_total_items}")
                         _phone_clean = _normalize_mx_phone(_atencion) if _atencion else ""
                         _prefix = cart_render_quote(state, company_id=company_id, client_phone=wa_from) + "\n\n" if state.get("cart") else ""
                         if _phone_clean:
@@ -4519,7 +4577,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                             "Un asesor te va a contactar para ayudarte directo 🙏"
                         )
                     except Exception as _e:
-                        print("PROACTIVE ESCALATION ERROR:", repr(_e))
+                        log.error("PROACTIVE ESCALATION ERROR:", repr(_e))
             else:
                 state.pop("pending", None)
                 state.pop("retry_count", None)
@@ -4565,7 +4623,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 result = smart_search(conn, company_id, prod_query, qty,
                                       cart_context=_build_cart_context(_single_state))
             except Exception as e:
-                print("SMART SEARCH ERROR:", repr(e))
+                log.error("SMART SEARCH ERROR:", repr(e))
                 result = {"status": "not_found", "item": None, "candidates": []}
                 save_search_miss(company_id, prod_query)
 
@@ -4636,7 +4694,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                         result = smart_search(conn, company_id, prod_raw, qty,
                                               cart_context=_build_cart_context(state))
                     except Exception as e:
-                        print("SMART SEARCH ERROR:", repr(e))
+                        log.error("SMART SEARCH ERROR:", repr(e))
                         result = {"status": "not_found", "item": None, "candidates": []}
                         save_search_miss(company_id, prod_raw)
                     if result["status"] == "found":
@@ -4765,7 +4823,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                         result = smart_search(conn, company_id, prod_raw, qty,
                                               cart_context=_pedido_raw)
                     except Exception as e:
-                        print("SMART SEARCH ERROR:", repr(e))
+                        log.error("SMART SEARCH ERROR:", repr(e))
                         result = {"status": "not_found", "item": None, "candidates": []}
                         save_search_miss(company_id, prod_raw)
                     if result["status"] == "found":
@@ -4835,7 +4893,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                     result = smart_search(conn, company_id, prod_raw, 1,
                                           cart_context="")
                 except Exception as e:
-                    print("SMART SEARCH ERROR:", repr(e))
+                    log.error("SMART SEARCH ERROR:", repr(e))
                     result = {"status": "not_found", "item": None, "candidates": []}
                     save_search_miss(company_id, prod_raw)
                 if result["status"] == "found":
@@ -4882,9 +4940,9 @@ def rebuild_embeddings_endpoint(company_id: str = "30208e3c-70c6-4203-97d9-172fa
         # Auto-generate context groups after rebuilding embeddings
         try:
             cg_result = auto_generate_context_groups(conn, company_id)
-            print(f"AUTO CONTEXT GROUPS after rebuild: {cg_result.get('status')}")
+            log.debug(f"AUTO CONTEXT GROUPS after rebuild: {cg_result.get('status')}")
         except Exception as cge:
-            print(f"AUTO CONTEXT GROUPS ERROR: {repr(cge)}")
+            log.error(f"AUTO CONTEXT GROUPS ERROR: {repr(cge)}")
         return {"ok": True, **result}
     except Exception as e:
         conn.rollback()
@@ -5505,7 +5563,7 @@ def crear_checkout(request: Request, body: CheckoutBody):
         )
         return {"ok": True, "checkout_url": session.url, "session_id": session.id}
     except Exception as e:
-        print("STRIPE CHECKOUT ERROR:", repr(e))
+        log.error("STRIPE CHECKOUT ERROR:", repr(e))
         raise HTTPException(status_code=500, detail=f"Error creando checkout: {str(e)}")
 
 
@@ -5521,7 +5579,7 @@ def pago_estado(request: Request, session_id: str = Query(...)):
         plan = session.metadata.get("plan") if session.metadata else None
         return {"ok": True, "paid": paid, "plan": plan, "status": session.payment_status}
     except Exception as e:
-        print("STRIPE ESTADO ERROR:", repr(e))
+        log.error("STRIPE ESTADO ERROR:", repr(e))
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -5537,11 +5595,11 @@ async def stripe_webhook(request: Request):
     try:
         event = _stripe.Webhook.construct_event(payload, sig_header, _STRIPE_WEBHOOK_SECRET)
     except Exception as e:
-        print("STRIPE WEBHOOK SIGNATURE ERROR:", repr(e))
+        log.error("STRIPE WEBHOOK SIGNATURE ERROR:", repr(e))
         raise HTTPException(status_code=400, detail="Invalid signature")
 
     event_type = event.get("type")
-    print(f"STRIPE EVENT: {event_type}")
+    log.info(f"STRIPE EVENT: {event_type}")
 
     if event_type == "checkout.session.completed":
         session = event["data"]["object"]
@@ -5565,9 +5623,9 @@ async def stripe_webhook(request: Request):
                 row = cur.fetchone()
                 cur.close()
                 conn.close()
-                print(f"STRIPE PLAN ACTIVADO: company={company_id} plan={plan}")
+                log.info(f"STRIPE PLAN ACTIVADO: company={company_id} plan={plan}")
             except Exception as e:
-                print("STRIPE WEBHOOK DB ERROR:", repr(e))
+                log.error("STRIPE WEBHOOK DB ERROR:", repr(e))
 
     elif event_type == "customer.subscription.deleted":
         subscription = event["data"]["object"]
@@ -5582,9 +5640,9 @@ async def stripe_webhook(request: Request):
                 )
                 cur.close()
                 conn.close()
-                print(f"STRIPE SUSCRIPCION CANCELADA: customer={stripe_customer_id}")
+                log.info(f"STRIPE SUSCRIPCION CANCELADA: customer={stripe_customer_id}")
             except Exception as e:
-                print("STRIPE CANCEL DB ERROR:", repr(e))
+                log.error("STRIPE CANCEL DB ERROR:", repr(e))
 
     return {"ok": True}
 
@@ -5635,7 +5693,7 @@ def promo_crear(request: Request, body: PromoCodeCreate):
     except IntegrityError:
         raise HTTPException(status_code=409, detail=f"El código '{code}' ya existe")
     except Exception as e:
-        print("PROMO CREAR ERROR:", repr(e))
+        log.error("PROMO CREAR ERROR:", repr(e))
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if cur: cur.close()
@@ -5670,7 +5728,7 @@ def promo_listar(request: Request):
             })
         return {"ok": True, "promos": promos}
     except Exception as e:
-        print("PROMO LISTAR ERROR:", repr(e))
+        log.error("PROMO LISTAR ERROR:", repr(e))
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if cur: cur.close()
@@ -5695,7 +5753,7 @@ def promo_toggle(promo_id: str, request: Request, body: PromoCodeToggle):
     except HTTPException:
         raise
     except Exception as e:
-        print("PROMO TOGGLE ERROR:", repr(e))
+        log.error("PROMO TOGGLE ERROR:", repr(e))
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if cur: cur.close()
@@ -5719,7 +5777,7 @@ def promo_delete(promo_id: str, request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        print("PROMO DELETE ERROR:", repr(e))
+        log.error("PROMO DELETE ERROR:", repr(e))
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if cur: cur.close()
@@ -5759,7 +5817,7 @@ def promo_validar(body: PromoCodeApply):
             "description": f"Trial gratis {int(dval)} días" if dtype == "trial_days" else f"{int(dval)}% descuento",
         }
     except Exception as e:
-        print("PROMO VALIDAR ERROR:", repr(e))
+        log.error("PROMO VALIDAR ERROR:", repr(e))
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if cur: cur.close()
@@ -5835,12 +5893,12 @@ def promo_aplicar(request: Request, body: PromoCodeApply):
             (promo_id,),
         )
 
-        print(f"PROMO APLICADO: company={company_id} code={code} type={dtype} value={dval}")
+        log.info(f"PROMO APLICADO: company={company_id} code={code} type={dtype} value={dval}")
         return {"ok": True, "message": result_msg, "discount_type": dtype, "discount_value": float(dval)}
     except HTTPException:
         raise
     except Exception as e:
-        print("PROMO APLICAR ERROR:", repr(e))
+        log.error("PROMO APLICAR ERROR:", repr(e))
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if cur: cur.close()
@@ -6038,13 +6096,8 @@ def whatsapp_verify(
     hub_challenge: str = Query(default=None, alias="hub.challenge"),
 ):
     expected = (os.getenv("WA_VERIFY_TOKEN") or "").strip()
-    print("WA VERIFY DEBUG:", {
-        "mode": hub_mode,
-        "got_len": len(hub_verify_token or ""),
-        "exp_len": len(expected or ""),
-        "match": (hub_verify_token or "") == expected,
-        "has_challenge": bool(hub_challenge),
-    })
+    log.debug("WA VERIFY: mode=%s match=%s has_challenge=%s",
+              hub_mode, (hub_verify_token or "") == expected, bool(hub_challenge))
     if hub_mode == "subscribe" and hub_verify_token == expected and hub_challenge:
         return Response(content=str(hub_challenge), media_type="text/plain")
     raise HTTPException(status_code=403, detail="verify failed")
@@ -6112,10 +6165,19 @@ def admin_delete_test_user(body: AdminDeleteTestUserBody):
 
         deleted = {}
 
+        # Whitelisted tables for safe dynamic SQL
+        _SAFE_TABLES = {
+            "sessions", "item_embeddings", "pricebook_items", "wa_quote_state",
+            "wa_conversation_windows", "wa_usage_monthly", "search_misses",
+            "conversations", "api_keys",
+        }
+        _SAFE_COLS = {"user_id", "company_id"}
+
         # Delete in dependency order
         for table, col in [
             ("sessions", "user_id"),
         ]:
+            assert table in _SAFE_TABLES and col in _SAFE_COLS
             cur.execute(f"DELETE FROM {table} WHERE {col} = %s", (user_id,))
             deleted[table] = cur.rowcount
 
@@ -6129,6 +6191,7 @@ def admin_delete_test_user(body: AdminDeleteTestUserBody):
             ("conversations", "company_id"),
             ("api_keys", "company_id"),
         ]:
+            assert table in _SAFE_TABLES and col in _SAFE_COLS
             try:
                 cur.execute(f"DELETE FROM {table} WHERE {col} = %s", (company_id,))
                 deleted[table] = cur.rowcount
@@ -6149,7 +6212,7 @@ def admin_delete_test_user(body: AdminDeleteTestUserBody):
     except HTTPException:
         raise
     except Exception as e:
-        print(f"DELETE TEST USER ERROR: {repr(e)}")
+        log.error(f"DELETE TEST USER ERROR: {repr(e)}")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
     finally:
@@ -6223,9 +6286,9 @@ def register(body: RegisterBody):
                             (_pid,),
                         )
                         promo_applied = f"Trial Pro {int(_dval)} días"
-                        print(f"REGISTRO+PROMO: company={company_id} code={_promo} trial_end={_trial_end}")
+                        log.info(f"REGISTRO+PROMO: company={company_id} code={_promo} trial_end={_trial_end}")
             except Exception as pe:
-                print(f"REGISTRO PROMO ERROR (non-fatal): {repr(pe)}")
+                log.error(f"REGISTRO PROMO ERROR (non-fatal): {repr(pe)}")
 
         return {"ok": True, "user_id": user_id, "company_id": str(company_id), "api_key": token, "promo_applied": promo_applied}
     except IntegrityError:
@@ -6233,7 +6296,7 @@ def register(body: RegisterBody):
     except HTTPException:
         raise
     except Exception as e:
-        print("REGISTER ERROR:", repr(e))
+        log.error("REGISTER ERROR:", repr(e))
         traceback.print_exc()
         raise HTTPException(status_code=500, detail="Error interno")
     finally:
@@ -6304,13 +6367,13 @@ def login(body: LoginBody, response: Response):
         cur = conn.cursor()
         cur.execute("select id, password_hash from users where email=%s and is_active=true", (email,))
         row = cur.fetchone()
-        print("LOGIN email:", repr(email))
-        print("LOGIN row found?:", bool(row))
+        log.info("LOGIN email:", repr(email))
+        log.info("LOGIN row found?:", bool(row))
         if not row:
             raise HTTPException(status_code=401, detail="Credenciales inválidas")
         user_id, password_hash = row
         ok = verify_password(password, password_hash)
-        print("LOGIN verify_password:", ok)
+        log.info("LOGIN verify_password:", ok)
         if not ok:
             raise HTTPException(status_code=401, detail="Credenciales inválidas")
         sid = create_session(conn, int(user_id))
@@ -6323,7 +6386,7 @@ def login(body: LoginBody, response: Response):
     except HTTPException:
         raise
     except Exception as e:
-        print("LOGIN ERROR:", repr(e))
+        log.error("LOGIN ERROR:", repr(e))
         traceback.print_exc()
         raise HTTPException(status_code=500, detail="Error interno")
     finally:
@@ -6359,7 +6422,7 @@ def auth_me(request: Request):
                 if row:
                     u["empresa_nombre"] = row[0]
         except Exception as e:
-            print(f"AUTH ME ENRICH ERROR: {repr(e)}")
+            log.error(f"AUTH ME ENRICH ERROR: {repr(e)}")
         finally:
             if cur: cur.close()
             if conn: conn.close()
@@ -6403,21 +6466,21 @@ def download_template(request: Request):
 
 def _rebuild_embeddings_bg(company_id: str):
     try:
-        print(f"BG EMBEDDINGS START: company={company_id}")
+        log.info(f"BG EMBEDDINGS START: company={company_id}")
         conn = get_conn()
         try:
             result = rebuild_embeddings_for_company(conn, company_id)
-            print(f"BG EMBEDDINGS DONE: {result}")
+            log.info(f"BG EMBEDDINGS DONE: {result}")
             # Auto-generate context groups after rebuilding embeddings
             try:
                 cg_result = auto_generate_context_groups(conn, company_id)
-                print(f"BG CONTEXT GROUPS: {cg_result.get('status')}")
+                log.debug(f"BG CONTEXT GROUPS: {cg_result.get('status')}")
             except Exception as cge:
-                print(f"BG CONTEXT GROUPS ERROR: {repr(cge)}")
+                log.error(f"BG CONTEXT GROUPS ERROR: {repr(cge)}")
         finally:
             conn.close()
     except Exception as e:
-        print(f"BG EMBEDDINGS ERROR: {repr(e)}")
+        log.error(f"BG EMBEDDINGS ERROR: {repr(e)}")
 
 @app.post("/api/carga-productos/rapida")
 async def carga_productos_rapida(request: Request, background_tasks: BackgroundTasks = None):
@@ -6465,7 +6528,7 @@ async def carga_productos_rapida(request: Request, background_tasks: BackgroundT
                         if k.isdigit() and int(k)-1 < len(batch):
                             synonyms_map[batch[int(k)-1]] = v
                 except Exception as e:
-                    print(f"BATCH SYNONYMS ERROR (rapida): {repr(e)}")
+                    log.error(f"BATCH SYNONYMS ERROR (rapida): {repr(e)}")
 
         for p in productos:
             nombre = normalize_display_name(p.get("nombre", "").strip())
@@ -6507,7 +6570,7 @@ async def carga_productos_rapida(request: Request, background_tasks: BackgroundT
                 else:
                     actualizados += 1
             except Exception as e:
-                print(f"RAPIDA INSERT ERROR {nombre}: {repr(e)}")
+                log.error(f"RAPIDA INSERT ERROR {nombre}: {repr(e)}")
                 errores.append(f"Error con '{nombre}': {str(e)}")
 
         conn.commit()
@@ -6520,7 +6583,7 @@ async def carga_productos_rapida(request: Request, background_tasks: BackgroundT
                 rebuild_embeddings_for_company(conn, company_id)
                 auto_generate_context_groups(conn, company_id)
             except Exception as e:
-                print(f"EMBEDDINGS/CTX REBUILD ERROR (rapida): {repr(e)}")
+                log.error(f"EMBEDDINGS/CTX REBUILD ERROR (rapida): {repr(e)}")
 
         return {
             "ok": True,
@@ -6531,7 +6594,7 @@ async def carga_productos_rapida(request: Request, background_tasks: BackgroundT
     except HTTPException:
         raise
     except Exception as e:
-        print(f"CARGA RAPIDA ERROR: {repr(e)}")
+        log.error(f"CARGA RAPIDA ERROR: {repr(e)}")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
     finally:
@@ -6657,7 +6720,7 @@ def pricebook_upload(
                     if k.isdigit() and int(k)-1 < len(names_batch)
                 }
             except Exception as e:
-                print("BATCH SYNONYMS ERROR:", repr(e))
+                log.error("BATCH SYNONYMS ERROR:", repr(e))
                 return {}
 
         synonyms_map = {}
@@ -6692,7 +6755,7 @@ def pricebook_upload(
                 )
                 rows_upserted += 1
             except Exception as e:
-                print(f"ROW INSERT ERROR {name}:", repr(e))
+                log.error(f"ROW INSERT ERROR {name}:", repr(e))
                 rows_skipped += 1
 
         cur.execute(
@@ -6706,14 +6769,14 @@ def pricebook_upload(
             try:
                 rebuild_embeddings_for_company(conn, company_id)
             except Exception as e:
-                print("EMBEDDINGS REBUILD ERROR:", repr(e))
+                log.error("EMBEDDINGS REBUILD ERROR:", repr(e))
 
         return {"ok": True, "company_id": company_id, "upload_id": str(upload_id), "rows_total": rows_total, "rows_upserted": rows_upserted, "rows_skipped": rows_skipped}
 
     except HTTPException:
         raise
     except Exception as e:
-        print("UPLOAD ERROR:", repr(e))
+        log.error("UPLOAD ERROR:", repr(e))
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
     finally:
@@ -6776,7 +6839,7 @@ def pricebook_items(
         if conn:
             try: conn.rollback()
             except Exception: pass
-        print("PRICEBOOK ITEMS ERROR:", repr(e))
+        log.error("PRICEBOOK ITEMS ERROR:", repr(e))
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"pricebook_items failed: {type(e).__name__}: {e}")
     finally:
@@ -6863,7 +6926,7 @@ def pricebook_item_create(request: Request, body: PricebookItemCreateBody):
         try:
             upsert_single_embedding(conn, company_id, new_id, name, sku or "", unit or "", synonyms or "")
         except Exception as e:
-            print("SINGLE EMBEDDING ERROR:", repr(e))
+            log.error("SINGLE EMBEDDING ERROR:", repr(e))
         return {"ok": True, "id": str(new_id)}
     except IntegrityError as e:
         msg = str(e).lower()
@@ -6873,7 +6936,7 @@ def pricebook_item_create(request: Request, body: PricebookItemCreateBody):
     except HTTPException:
         raise
     except Exception as e:
-        print("PRICEBOOK CREATE ERROR:", repr(e))
+        log.error("PRICEBOOK CREATE ERROR:", repr(e))
         traceback.print_exc()
         raise HTTPException(status_code=500, detail="pricebook_item_create failed")
     finally:
@@ -6932,20 +6995,20 @@ def pricebook_bulk_create(request: Request, body: PricebookBulkBody):
                 try:
                     upsert_single_embedding(conn, company_id, row[0], name, "", unit, synonyms)
                 except Exception as e:
-                    print(f"BULK EMBEDDING ERROR for '{name}': {repr(e)}")
+                    log.error(f"BULK EMBEDDING ERROR for '{name}': {repr(e)}")
         conn.commit()
         # Auto-generate context groups after bulk product upload
         if created >= 3:
             try:
                 cg_result = auto_generate_context_groups(conn, company_id)
-                print(f"BULK CONTEXT GROUPS: {cg_result.get('status')}")
+                log.debug(f"BULK CONTEXT GROUPS: {cg_result.get('status')}")
             except Exception as cge:
-                print(f"BULK CONTEXT GROUPS ERROR: {repr(cge)}")
+                log.error(f"BULK CONTEXT GROUPS ERROR: {repr(cge)}")
         return {"ok": True, "created": created}
     except HTTPException:
         raise
     except Exception as e:
-        print(f"PRICEBOOK BULK ERROR: {repr(e)}")
+        log.error(f"PRICEBOOK BULK ERROR: {repr(e)}")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail="Error en carga masiva")
     finally:
@@ -6972,7 +7035,7 @@ def pricebook_item_delete(request: Request, item_id: str):
     except HTTPException:
         raise
     except Exception as e:
-        print("PRICEBOOK DELETE ERROR:", repr(e))
+        log.error("PRICEBOOK DELETE ERROR:", repr(e))
         traceback.print_exc()
         raise HTTPException(status_code=500, detail="pricebook_item_delete failed")
     finally:
@@ -7034,7 +7097,7 @@ def pricebook_item_update(request: Request, item_id: str, body: PricebookItemUpd
         try:
             upsert_single_embedding(conn, company_id, item_id, name, sku or "", unit or "", synonyms or "")
         except Exception as e:
-            print("EMBEDDING UPDATE ERROR:", repr(e))
+            log.error("EMBEDDING UPDATE ERROR:", repr(e))
 
         return {"ok": True}
     finally:
@@ -7068,7 +7131,7 @@ def synonyms_suggestions(request: Request, item_id: str):
                 raw = resp.choices[0].message.content or ""
                 suggestions = [s.strip().lower() for s in raw.split(",") if s.strip()]
             except Exception as e:
-                print("SYNONYMS GPT ERROR:", repr(e))
+                log.error("SYNONYMS GPT ERROR:", repr(e))
         existing_list = [s.strip().lower() for s in existing.split(",") if s.strip()]
         suggestions = [s for s in suggestions if s not in existing_list]
         return {"ok": True, "suggestions": suggestions, "existing": existing_list}
@@ -7120,7 +7183,7 @@ def create_company(body: CompanyCreateBody):
     except IntegrityError:
         raise HTTPException(status_code=409, detail="Slug ya existe o conflicto")
     except Exception as e:
-        print("CREATE COMPANY ERROR:", repr(e))
+        log.error("CREATE COMPANY ERROR:", repr(e))
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
     finally:
@@ -7254,7 +7317,7 @@ def ner_extract_items(user_text: str):
         parsed = json.loads(raw)
         return [(int(it["qty"]), str(it["product"]).strip(), False) for it in parsed if it.get("qty") and it.get("product")]
     except Exception as e:
-        print("NER ERROR:", repr(e))
+        log.error("NER ERROR:", repr(e))
         return []
 
 def extract_qty_items_robust(text: str):
@@ -7440,7 +7503,7 @@ def extract_qty_items_robust(text: str):
                         _yp_tokens = set(re.findall(r"[a-záéíóúñ]{3,}", _yp_lc))
                         # If >=70% of meaningful tokens are preamble markers, it's a phantom
                         if _yp_tokens and len(_yp_tokens & _preamble_markers) / len(_yp_tokens) >= 0.7:
-                            print(f"PARSER FILTER: dropping phantom preamble item '{_yp}'")
+                            log.info(f"PARSER FILTER: dropping phantom preamble item '{_yp}'")
                             continue
                         items.append((qty, _yp, _is_bun))
     return items
@@ -7566,21 +7629,21 @@ async def twilio_webhook(
     if MessageSid:
         cache_key = f"msid:{MessageSid}"
         if cache_key in _processed_sids:
-            print(f"DUPLICATE WEBHOOK ignored: {MessageSid}")
+            log.info(f"DUPLICATE WEBHOOK ignored: {MessageSid}")
             return TWIML_OK
         _processed_sids.add(cache_key)
         if len(_processed_sids) > 1000:
             _processed_sids.clear()
 
     try:
-        print("TWILIO IN:", {"from": From, "to": To, "body": Body})
+        log.info("TWILIO IN:", {"from": From, "to": To, "body": Body})
 
         if not Body and int(NumMedia or 0) > 0 and MediaUrl0:
             if "image" in (MediaContentType0 or ""):
                 cached = _image_cache.get(MessageSid)
                 if cached:
                     Body = cached
-                    print("TWILIO IMAGE FROM CACHE:", Body[:200])
+                    log.info("TWILIO IMAGE FROM CACHE:", Body[:200])
                 else:
                     try:
                         twilio_sid = (os.getenv("TWILIO_ACCOUNT_SID") or "").strip()
@@ -7593,12 +7656,12 @@ async def twilio_webhook(
                             _image_cache[MessageSid] = extracted
                             if len(_image_cache) > 200:
                                 _image_cache.clear()
-                            print("TWILIO IMAGE EXTRACTED:", Body[:200])
+                            log.info("TWILIO IMAGE EXTRACTED:", Body[:200])
                         else:
                             twilio_send_whatsapp(to_user_whatsapp=From, text="📷 Vi tu imagen pero no encontré una lista de productos.\n\nMándame el pedido así:\n10 cemento, 5 varilla 3/8")
                             return TWIML_OK
                     except Exception as e:
-                        print("TWILIO IMAGE ERROR:", repr(e))
+                        log.error("TWILIO IMAGE ERROR:", repr(e))
                         twilio_send_whatsapp(to_user_whatsapp=From, text="No pude leer la imagen 😔 Intenta enviarla más clara o escribe el pedido.")
                         return TWIML_OK
 
@@ -7607,7 +7670,7 @@ async def twilio_webhook(
             return TWIML_OK
 
         company = get_company_by_twilio_number(To)
-        print("TWILIO company:", company)
+        log.info("TWILIO company:", company)
 
         if not company:
             twilio_send_whatsapp(to_user_whatsapp=From, text="Hola 👋 Este número aún no está ligado a una empresa.")
@@ -7653,11 +7716,11 @@ async def twilio_webhook(
             reply_text = (reply or "").strip() or "¿Me repites eso?"
             twilio_send_whatsapp(to_user_whatsapp=From, text=reply_text)
 
-        print("WHATSAPP ENVIADO OK")
+        log.info("WHATSAPP ENVIADO OK")
         return TWIML_OK
 
     except Exception as e:
-        print("TWILIO WEBHOOK ERROR:", repr(e))
+        log.error("TWILIO WEBHOOK ERROR:", repr(e))
         traceback.print_exc()
         try:
             twilio_send_whatsapp(to_user_whatsapp=From, text="Error interno. Intenta de nuevo en 1 minuto.")
@@ -7785,9 +7848,9 @@ def _run_onboarding_migrations(conn):
                     END IF;
                 END $$;
             """)
-        print("ONBOARDING MIGRATIONS: OK")
+        log.info("ONBOARDING MIGRATIONS: OK")
     except Exception as e:
-        print(f"ONBOARDING MIGRATION ERROR: {repr(e)}")
+        log.error(f"ONBOARDING MIGRATION ERROR: {repr(e)}")
     finally:
         cur.close()
 
@@ -7895,7 +7958,7 @@ def empresa_perfil_update(request: Request, body: EmpresaPerfilBody):
     except HTTPException:
         raise
     except Exception as e:
-        print(f"EMPRESA PERFIL ERROR: {repr(e)}")
+        log.error(f"EMPRESA PERFIL ERROR: {repr(e)}")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail="Error guardando perfil")
     finally:
@@ -7925,7 +7988,7 @@ def empresa_onboarding_complete(request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        print(f"ONBOARDING COMPLETE ERROR: {repr(e)}")
+        log.error(f"ONBOARDING COMPLETE ERROR: {repr(e)}")
         raise HTTPException(status_code=500, detail="Error actualizando onboarding")
     finally:
         if cur: cur.close()
@@ -7953,7 +8016,7 @@ def empresa_onboarding_status(request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        print(f"ONBOARDING STATUS ERROR: {repr(e)}")
+        log.error(f"ONBOARDING STATUS ERROR: {repr(e)}")
         return {"ok": True, "onboarding_completed": False}
     finally:
         if cur: cur.close()
@@ -7987,22 +8050,22 @@ def whatsapp_embedded_signup(request: Request, body: EmbeddedSignupBody):
     waba_id = (body.waba_id or "").strip()
 
     # Step 1: Exchange code for access token
-    print(f"EMBEDDED SIGNUP: exchanging code for company={company_id}")
+    log.info(f"EMBEDDED SIGNUP: exchanging code for company={company_id}")
     token_resp = http_requests.get(f"{_META_GRAPH_URL}/oauth/access_token", params={
         "client_id": _META_APP_ID,
         "client_secret": _META_APP_SECRET,
         "code": code,
     })
     if token_resp.status_code != 200:
-        print(f"EMBEDDED SIGNUP TOKEN ERROR: {token_resp.status_code} {token_resp.text}")
+        log.error(f"EMBEDDED SIGNUP TOKEN ERROR: {token_resp.status_code} {token_resp.text}")
         raise HTTPException(status_code=400, detail="Error al obtener token de Meta")
     token_data = token_resp.json()
     access_token = token_data.get("access_token")
     if not access_token:
-        print(f"EMBEDDED SIGNUP: no access_token in response: {token_data}")
+        log.info(f"EMBEDDED SIGNUP: no access_token in response: {token_data}")
         raise HTTPException(status_code=400, detail="No se obtuvo token de acceso")
 
-    print(f"EMBEDDED SIGNUP: got access token for company={company_id}")
+    log.info(f"EMBEDDED SIGNUP: got access token for company={company_id}")
 
     # Step 2: If we don't have phone_number_id/waba_id from session, try to get from API
     if not waba_id:
@@ -8020,9 +8083,9 @@ def whatsapp_embedded_signup(request: Request, body: EmbeddedSignupBody):
                     if target_ids:
                         waba_id = target_ids[0]
                         break
-            print(f"EMBEDDED SIGNUP: resolved waba_id={waba_id} from debug_token")
+            log.info(f"EMBEDDED SIGNUP: resolved waba_id={waba_id} from debug_token")
         except Exception as e:
-            print(f"EMBEDDED SIGNUP: debug_token error: {repr(e)}")
+            log.error(f"EMBEDDED SIGNUP: debug_token error: {repr(e)}")
 
     if not phone_number_id and waba_id:
         # Get phone numbers for this WABA
@@ -8034,12 +8097,12 @@ def whatsapp_embedded_signup(request: Request, body: EmbeddedSignupBody):
             phones_data = phones_resp.json().get("data", [])
             if phones_data:
                 phone_number_id = phones_data[0].get("id")
-                print(f"EMBEDDED SIGNUP: resolved phone_number_id={phone_number_id}")
+                log.info(f"EMBEDDED SIGNUP: resolved phone_number_id={phone_number_id}")
         except Exception as e:
-            print(f"EMBEDDED SIGNUP: phone_numbers error: {repr(e)}")
+            log.error(f"EMBEDDED SIGNUP: phone_numbers error: {repr(e)}")
 
     if not phone_number_id:
-        print(f"EMBEDDED SIGNUP: could not resolve phone_number_id")
+        log.info(f"EMBEDDED SIGNUP: could not resolve phone_number_id")
         raise HTTPException(status_code=400, detail="No se pudo obtener el número de teléfono. Intenta de nuevo.")
 
     # Step 3: Get phone number display info
@@ -8052,9 +8115,9 @@ def whatsapp_embedded_signup(request: Request, body: EmbeddedSignupBody):
         phone_info = phone_info_resp.json()
         phone_display = phone_info.get("display_phone_number", "")
         verified_name = phone_info.get("verified_name", "")
-        print(f"EMBEDDED SIGNUP: phone={phone_display} name={verified_name}")
+        log.info(f"EMBEDDED SIGNUP: phone={phone_display} name={verified_name}")
     except Exception as e:
-        print(f"EMBEDDED SIGNUP: phone info error: {repr(e)}")
+        log.error(f"EMBEDDED SIGNUP: phone info error: {repr(e)}")
 
     # Step 4: Subscribe app to WABA (to receive webhooks)
     if waba_id:
@@ -8063,9 +8126,9 @@ def whatsapp_embedded_signup(request: Request, body: EmbeddedSignupBody):
                 f"{_META_GRAPH_URL}/{waba_id}/subscribed_apps",
                 params={"access_token": access_token}
             )
-            print(f"EMBEDDED SIGNUP: subscribe app to WABA: {sub_resp.status_code} {sub_resp.text}")
+            log.info(f"EMBEDDED SIGNUP: subscribe app to WABA: {sub_resp.status_code} {sub_resp.text}")
         except Exception as e:
-            print(f"EMBEDDED SIGNUP: subscribe error: {repr(e)}")
+            log.error(f"EMBEDDED SIGNUP: subscribe error: {repr(e)}")
 
     # Step 5: Register phone number for Cloud API
     try:
@@ -8074,9 +8137,9 @@ def whatsapp_embedded_signup(request: Request, body: EmbeddedSignupBody):
             json={"messaging_product": "whatsapp", "pin": "123456"},
             params={"access_token": access_token}
         )
-        print(f"EMBEDDED SIGNUP: register phone: {reg_resp.status_code} {reg_resp.text}")
+        log.info(f"EMBEDDED SIGNUP: register phone: {reg_resp.status_code} {reg_resp.text}")
     except Exception as e:
-        print(f"EMBEDDED SIGNUP: register phone error: {repr(e)}")
+        log.error(f"EMBEDDED SIGNUP: register phone error: {repr(e)}")
 
     # Step 6: Save to database — create/update channel + update company
     conn = get_conn()
@@ -8136,7 +8199,7 @@ def whatsapp_embedded_signup(request: Request, body: EmbeddedSignupBody):
         """, (access_token, phone_number_id, company_id))
 
         conn.commit()
-        print(f"EMBEDDED SIGNUP: SUCCESS company={company_id} channel={channel_id} phone={phone_display}")
+        log.info(f"EMBEDDED SIGNUP: SUCCESS company={company_id} channel={channel_id} phone={phone_display}")
         return {
             "ok": True,
             "channel_id": channel_id,
@@ -8146,7 +8209,7 @@ def whatsapp_embedded_signup(request: Request, body: EmbeddedSignupBody):
         }
     except Exception as e:
         conn.rollback()
-        print(f"EMBEDDED SIGNUP DB ERROR: {repr(e)}")
+        log.error(f"EMBEDDED SIGNUP DB ERROR: {repr(e)}")
         raise HTTPException(status_code=500, detail="Error al guardar la configuración")
     finally:
         cur.close()
@@ -8251,7 +8314,7 @@ def admin_stats_overview(request: Request):
             },
         }
     except Exception as e:
-        print(f"ADMIN STATS ERROR: {repr(e)}")
+        log.error(f"ADMIN STATS ERROR: {repr(e)}")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if cur: cur.close()
@@ -8293,7 +8356,7 @@ def admin_top_errors(request: Request, days: int = 7, limit: int = 20):
             })
         return {"ok": True, "errors": errors}
     except Exception as e:
-        print(f"ADMIN TOP ERRORS: {repr(e)}")
+        log.error(f"ADMIN TOP ERRORS: {repr(e)}")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if cur: cur.close()
@@ -8335,7 +8398,7 @@ def admin_top_searches(request: Request, days: int = 7, limit: int = 30):
             })
         return {"ok": True, "searches": searches}
     except Exception as e:
-        print(f"ADMIN TOP SEARCHES: {repr(e)}")
+        log.info(f"ADMIN TOP SEARCHES: {repr(e)}")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if cur: cur.close()
@@ -8378,7 +8441,7 @@ def admin_stats_by_company(request: Request, days: int = 7):
             })
         return {"ok": True, "companies": companies}
     except Exception as e:
-        print(f"ADMIN BY COMPANY: {repr(e)}")
+        log.info(f"ADMIN BY COMPANY: {repr(e)}")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if cur: cur.close()
@@ -8428,7 +8491,7 @@ def admin_jerga_list(request: Request, page: int = 1, per_page: int = 50):
             })
         return {"ok": True, "jerga": jerga, "total": total, "page": page, "per_page": per_page}
     except Exception as e:
-        print(f"ADMIN JERGA LIST: {repr(e)}")
+        log.info(f"ADMIN JERGA LIST: {repr(e)}")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if cur: cur.close()
@@ -8473,7 +8536,7 @@ def admin_jerga_update(request: Request, body: AdminJergaUpdate):
     except HTTPException:
         raise
     except Exception as e:
-        print(f"ADMIN JERGA UPDATE: {repr(e)}")
+        log.info(f"ADMIN JERGA UPDATE: {repr(e)}")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if cur: cur.close()
@@ -8506,7 +8569,7 @@ def admin_jerga_create(request: Request, body: AdminJergaCreate):
         )
         return {"ok": True, "created": body.termino_original}
     except Exception as e:
-        print(f"ADMIN JERGA CREATE: {repr(e)}")
+        log.info(f"ADMIN JERGA CREATE: {repr(e)}")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if cur: cur.close()
@@ -8530,7 +8593,7 @@ def admin_jerga_delete(request: Request, termino: str):
     except HTTPException:
         raise
     except Exception as e:
-        print(f"ADMIN JERGA DELETE: {repr(e)}")
+        log.info(f"ADMIN JERGA DELETE: {repr(e)}")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if cur: cur.close()
@@ -8563,7 +8626,7 @@ def company_jerga_list(request: Request):
             for r in rows
         ]}
     except Exception as e:
-        print(f"JERGA LOCAL LIST: {repr(e)}")
+        log.info(f"JERGA LOCAL LIST: {repr(e)}")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if cur: cur.close()
@@ -8618,7 +8681,7 @@ def suggest_competitor_brands(request: Request, body: BrandSuggestBody):
         suggestions = [s for s in suggestions if s.lower() not in _own]
         return {"suggestions": suggestions[:15]}
     except Exception as e:
-        print(f"BRAND SUGGEST ERROR: {repr(e)}")
+        log.error(f"BRAND SUGGEST ERROR: {repr(e)}")
         return {"suggestions": []}
 
 
@@ -8643,7 +8706,7 @@ def company_jerga_create(request: Request, body: JergaLocalBody):
         )
         return {"ok": True, "termino_original": orig, "termino_normalizado": norm}
     except Exception as e:
-        print(f"JERGA LOCAL CREATE: {repr(e)}")
+        log.info(f"JERGA LOCAL CREATE: {repr(e)}")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if cur: cur.close()
@@ -8666,7 +8729,7 @@ def company_jerga_delete(request: Request, termino: str):
     except HTTPException:
         raise
     except Exception as e:
-        print(f"JERGA LOCAL DELETE: {repr(e)}")
+        log.info(f"JERGA LOCAL DELETE: {repr(e)}")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if cur: cur.close()
@@ -8726,7 +8789,7 @@ def admin_query_log(request: Request, days: int = 1, limit: int = 100,
             })
         return {"ok": True, "events": events}
     except Exception as e:
-        print(f"ADMIN QUERY LOG: {repr(e)}")
+        log.info(f"ADMIN QUERY LOG: {repr(e)}")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if cur: cur.close()
