@@ -4143,10 +4143,11 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 if _force_def:
                     try:
                         _cur_alias = conn.cursor()
+                        # Use 'canal %' (with space) to match "Canal 6.35..." but NOT "Canaleta..."
                         _cur_alias.execute(
                             "SELECT sku, name, unit, price, vat_rate FROM pricebook_items "
                             "WHERE company_id=%s AND is_default=true "
-                            "AND lower(name) LIKE lower(%s) || '%%' LIMIT 1",
+                            "AND lower(name) LIKE lower(%s) || ' %%' LIMIT 1",
                             (company_id, _force_def),
                         )
                         _alias_row = _cur_alias.fetchone()
@@ -4203,7 +4204,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                                     _cur_def.execute(
                                         "SELECT sku, name, unit, price, vat_rate FROM pricebook_items "
                                         "WHERE company_id=%s AND is_default=true "
-                                        "AND lower(name) LIKE lower(%s) || '%%' LIMIT 1",
+                                        "AND lower(name) LIKE lower(%s) || ' %%' LIMIT 1",
                                         (company_id, _sw),
                                     )
                                     _def_row = _cur_def.fetchone()
