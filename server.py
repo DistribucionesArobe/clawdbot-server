@@ -1657,7 +1657,7 @@ def _load_catalog_for_shadow(company_id: str) -> list[dict]:
         conn = get_conn()
         cur = conn.cursor()
         cur.execute(
-            "SELECT sku, name, unit, price, vat_rate FROM pricebook_items "
+            "SELECT sku, name, unit, price, vat_rate, is_default FROM pricebook_items "
             "WHERE company_id = %s ORDER BY name",
             (company_id,),
         )
@@ -1667,7 +1667,8 @@ def _load_catalog_for_shadow(company_id: str) -> list[dict]:
         return [
             {"sku": r[0], "name": r[1], "unit": r[2],
              "price": float(r[3]) if r[3] is not None else None,
-             "vat_rate": float(r[4]) if r[4] is not None else None}
+             "vat_rate": float(r[4]) if r[4] is not None else None,
+             "is_default": bool(r[5]) if r[5] is not None else False}
             for r in rows
         ]
     except Exception as e:

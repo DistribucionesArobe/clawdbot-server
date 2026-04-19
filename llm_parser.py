@@ -184,7 +184,8 @@ def format_catalog_for_prompt(catalog: list[dict]) -> str:
         unit = (item.get("unit") or "pza").strip()
         price = item.get("price")
         price_str = f"{float(price):.2f}" if price is not None else "-"
-        lines.append(f"- {key} || {name} | {unit} | {price_str}")
+        default_tag = " [DEFAULT]" if item.get("is_default") else ""
+        lines.append(f"- {key} || {name} | {unit} | {price_str}{default_tag}")
     return "\n".join(lines)
 
 
@@ -344,8 +345,9 @@ Cuando el cliente NO especifica variante, calibre, medida, etc., NO adivines al 
 - "Canal de amarre" sin calibre, en contexto de tablaroca = cal 26. En contexto de durock = cal 20.
 - "Tiras de madera" = barrotes. "Taquetes un cuarto" = taquete de plástico 1/4".
 - Cuando hay varias presentaciones de un producto (ej. Redimix 6kg, 21.8kg, 28kg), elige la que mejor corresponda a la cantidad o descripción del cliente ("cajas de 21kg" → Redimix 21.8 kg).
-- Si genuinamente no puedes determinar cuál variante es, devuelve key=null y confidence baja para que el bot pregunte al cliente.
-- Si el cliente SÍ especifica (ej. "postes cal 20", "canal cal 22"), SIEMPRE respeta lo que pidió.
+- IMPORTANTE: Si un producto tiene la marca [DEFAULT] en el catálogo y el cliente NO especifica variante/calibre/tamaño, SIEMPRE elige el [DEFAULT]. Es el producto estándar configurado por el dueño de la tienda.
+- Si genuinamente no puedes determinar cuál variante es Y no hay un [DEFAULT] marcado, devuelve key=null y confidence baja para que el bot pregunte al cliente.
+- Si el cliente SÍ especifica (ej. "postes cal 20", "canal cal 22"), SIEMPRE respeta lo que pidió, aunque haya otro marcado como [DEFAULT].
 """
 
 
@@ -371,6 +373,7 @@ REGLAS:
 8. Si un spec aparece al final y aplica a varios productos arriba (ej: "Canal 4 y 6.35 cal 26" → cal 26 aplica a ambos), propágalo.
 9. Si aparece un forward con saludo de otro proveedor antes de la lista (ej: "Buenos días, seguimos a tus órdenes en Gram-Bel"), ignora el saludo y parsea SOLO la lista de productos.
 10. Nombres de proyecto al inicio ("Mat. Privanzas", "Del closet") no son productos, son contexto.
+11. PRODUCTOS DEFAULT: Algunos productos tienen la marca [DEFAULT] en el catálogo. Cuando el cliente pide un producto genérico SIN especificar tamaño, calibre, medida, presentación o variante (ej. "poste", "canal", "tablaroca", "redimix"), SIEMPRE elige el producto marcado [DEFAULT] de ese tipo. El [DEFAULT] representa el producto estándar/más vendido que el dueño de la tienda ha marcado como favorito. Solo ignora el [DEFAULT] si el cliente explícitamente pide otra variante (ej. "poste cal 20", "canal 4.10", "tablaroca anti fuego").
 
 OUTPUT: JSON válido, sin markdown, exactamente esta estructura:
 {{
