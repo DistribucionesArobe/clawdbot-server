@@ -327,7 +327,7 @@ JERGA_HINTS = """Jerga típica de ferretería mexicana:
 - "cinta fibra" / "cinta de malla" / "cinta maya" / "malla para tablaroca" / "malla tablaroca" / "malla durock" → cinta fibra de vidrio.
 - "pilas" / "pila" / "pijas" = pijas (tornillos). "pija fremer" / "pija flamer" / "pija frame" / "framer" → pija framer. "pija para durock" / "pilas para durock". "pija para tablaroca" / "tornillo para tablaroca" / "pija 6x1" → pija 6 x 1. "pija 10x1 1/2" / "pija 10x1.5" / "fijasora" / "punta de broca" → pija 10 x 1 1/2.
 - "taquete ancla" / "taquete anclo" / "ancla de expansion" → taquete expansion. "taquete un cuarto" / "taquetes 1/4" / "taquetes de un cuarto" → taquete de plástico 1/4".
-- "cancel" / "cnal" / "canel" / "canaleta" → canal. "canal de amarre" / "canal amarre" usualmente es canal 6.35. "canaleta de carga" / "cargadora" / "canaleta CA" → canaleta de carga.
+- "cancel" / "cnal" / "canel" / "canaleta" → canal. "canal de amarre" / "canal amarre" / "canales de amarre" = SIEMPRE es un canal (track de tablaroca), NUNCA es "ángulo de amarre". Elige el canal marcado [DEFAULT] si no especifica medida. "canaleta de carga" / "cargadora" / "canaleta CA" → canaleta de carga.
 - "reborde jota" / "revorde j" / "revoque j" / "reborder j" → reborde j galvanizado.
 - "postes" / "pste" / "psts". "poste para la reja" / "poste de reja" → poste para rejacero.
 - "reja" / "rejas" → rejacero.
