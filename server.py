@@ -2,6 +2,7 @@ from prompts_cotizabot import COTIZABOT_SYSTEM_PROMPT
 from fastapi.background import BackgroundTasks
 import asyncio
 import json
+import logging
 import os
 import re
 import hashlib
@@ -18,6 +19,15 @@ from rapidfuzz import fuzz
 import bcrypt
 import psycopg2
 from psycopg2 import IntegrityError
+
+# ── Logging configuration ──
+_log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=getattr(logging, _log_level, logging.INFO),
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+log = logging.getLogger("cotizaexpress")
 
 from openai import OpenAI
 from semantic_search import smart_search, rebuild_embeddings_for_company, upsert_single_embedding, seed_jerga_global, auto_generate_context_groups
@@ -747,7 +757,7 @@ def _get_pool() -> _pg_pool.ThreadedConnectionPool:
             dsn=dsn,
             connect_timeout=5,
         )
-        print("DB POOL: initialized (min=2, max=20)")
+        log.info("DB POOL: initialized (min=2, max=20)")
     return _connection_pool
 
 class _PooledConnection:
