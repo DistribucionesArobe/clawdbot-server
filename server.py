@@ -4072,42 +4072,11 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             "Si quieres cotizar: mándame ej: 10 cemento, 5 varilla 3/8"
         )
 
-    # ── Common name aliases: fix LLM mismatches for well-known colloquial names ──
-    # "canal de amarre" is colloquial for "Canal" (drywall track), NOT "Angulo de amarre"
-    _COLLOQUIAL_ALIASES = {
-        "canal de amarre": "canal",
-        "canales de amarre": "canal",
-    }
-
     # ── LLM-first parser: intenta LLM primero, regex como fallback ──
     # SKIP LLM for known button clicks — they have their own handlers downstream
     _llm_result = None
     if _PARSER_LLM_FIRST and not _is_button_click:
         _llm_result = _try_llm_parse(company_id, user_text)
-        # Post-LLM correction: fix known mismatches
-        if _llm_result and _llm_result.get("items"):
-            for _fix_item in _llm_result["items"]:
-                _fix_matched = (_fix_item.get("matched_text") or "").strip().lower()
-                _fix_name = (_fix_item.get("name") or "").strip().lower()
-                # Check if user's original text matches an alias
-                for _alias, _correct_base in _COLLOQUIAL_ALIASES.items():
-                    if _alias in _fix_matched or _alias in _fix_name:
-                        # LLM might have matched to wrong product — override key to force is_default search
-                        _fix_item["_force_default_search"] = _correct_base
-                        print(f"ALIAS FIX: '{_fix_matched}' → force default search for '{_correct_base}'")
-                        break
-                    # Also check in the original user_text lines
-                for _alias, _correct_base in _COLLOQUIAL_ALIASES.items():
-                    if _alias in user_text.lower() and _correct_base in (_fix_item.get("key") or "").lower()[:10]:
-                        break  # Already handled
-                    # Check if this item's matched_text corresponds to a line with the alias
-                    _fix_qty = _fix_item.get("qty", 0)
-                    for _uline in user_text.lower().split("\n"):
-                        _uline = _uline.strip()
-                        if _alias in _uline and str(_fix_qty) in _uline:
-                            _fix_item["_force_default_search"] = _correct_base
-                            print(f"ALIAS FIX (line match): qty={_fix_qty} line='{_uline}' → force '{_correct_base}'")
-                            break
 
     # ── LLM detectó que NO es una orden → escalar a humano directo ──
     # Also skip for hours/location questions — they have a dedicated handler
@@ -4138,31 +4107,6 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 _conf = item.get("confidence", 0)
                 _matched = item.get("matched_text", "")
                 _name = item.get("name", _matched)
-
-                # If alias correction flagged this item, go straight to is_default search
-                _force_def = item.get("_force_default_search")
-                if _force_def:
-                    try:
-                        _cur_alias = conn.cursor()
-                        # Use 'canal %' (with space) to match "Canal 6.35..." but NOT "Canaleta..."
-                        _cur_alias.execute(
-                            "SELECT sku, name, unit, price, vat_rate FROM pricebook_items "
-                            "WHERE company_id=%s AND is_default=true "
-                            "AND lower(name) LIKE lower(%s) || ' %%' LIMIT 1",
-                            (company_id, _force_def),
-                        )
-                        _alias_row = _cur_alias.fetchone()
-                        _cur_alias.close()
-                        if _alias_row:
-                            print(f"ALIAS DEFAULT FOUND: '{_force_def}' → '{_alias_row[1]}'")
-                            state = cart_add_item(state, {
-                                "sku": _alias_row[0], "name": _alias_row[1],
-                                "unit": _alias_row[2] or "pza", "price": float(_alias_row[3] or 0),
-                                "vat_rate": _alias_row[4], "qty": _qty,
-                            })
-                            continue
-                    except Exception as _ae:
-                        print(f"ALIAS DEFAULT ERROR: {repr(_ae)}")
 
                 if _key and _conf >= 0.7:
                     cat_item = _cat_by_key.get(_key)
