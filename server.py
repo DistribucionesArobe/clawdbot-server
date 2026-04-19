@@ -77,9 +77,7 @@ Traduces y explicas textos ES/EN de forma natural.
 # App
 # -------------------------
 app = FastAPI(title="Clawdbot Server", version="1.0")
-app.include_router(pricebook_router)
-app.include_router(pagos_router)
-app.include_router(company_router)
+# NOTE: app.include_router() calls are after router imports (~line 715)
 
 # ── Silence detector: escalamiento proactivo por inactividad ──────────────
 # Corre cada 5 min. Si un cliente tiene pending/awaiting state sin actividad
@@ -711,6 +709,11 @@ import migrations
 from routes.pricebook import router as pricebook_router
 from routes.pagos import router as pagos_router
 from routes.company import router as company_router
+
+app.include_router(pricebook_router)
+app.include_router(pagos_router)
+app.include_router(company_router)
+
 # Run migrations at startup (idempotent)
 try:
     _mig_conn = get_conn()
