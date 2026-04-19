@@ -697,120 +697,21 @@ api_key_hash = hash_api_key  # alias for backward compat
 # -------------------------
 # DB
 # -------------------------
-def save_search_miss(company_id: str, term: str):
-    """Guarda términos que el bot no encontró para aprendizaje continuo."""
-    if not company_id or not term or len(term.strip()) < 3:
-        return
-    try:
-        conn = get_conn()
-        cur = conn.cursor()
-        cur.execute(
-            """
-            INSERT INTO search_misses (company_id, term, created_at)
-            VALUES (%s, %s, now())
-            ON CONFLICT DO NOTHING
-            """,
-            (company_id, term.strip().lower()),
-        )
-        cur.close()
-        conn.close()
-    except Exception as e:
-        log.error("SAVE_MISS ERROR:", repr(e))
+# save_search_miss imported from queries.py
 
 from db import get_conn, print_db_fingerprint
 
 print_db_fingerprint()
 
 
-def _run_pricebook_migrations(conn):
-    """Idempotent DB migrations."""
-    cur = conn.cursor()
-    try:
-        cur.execute("""
-            DO $$
-            BEGIN
-                IF NOT EXISTS (
-                    SELECT 1 FROM information_schema.columns
-                    WHERE table_name='pricebook_items' AND column_name='bundle_size'
-                ) THEN
-                    ALTER TABLE pricebook_items ADD COLUMN bundle_size INTEGER;
-                END IF;
-                IF NOT EXISTS (
-                    SELECT 1 FROM information_schema.columns
-                    WHERE table_name='companies' AND column_name='context_groups'
-                ) THEN
-                    ALTER TABLE companies ADD COLUMN context_groups JSONB;
-                END IF;
-                IF NOT EXISTS (
-                    SELECT 1 FROM information_schema.columns
-                    WHERE table_name='pricebook_items' AND column_name='is_default'
-                ) THEN
-                    ALTER TABLE pricebook_items ADD COLUMN is_default BOOLEAN DEFAULT FALSE;
-                END IF;
-            END $$;
-        """)
-        conn.commit()
-        log.debug("PRICEBOOK MIGRATIONS: OK (bundle_size, context_groups, is_default)")
-    except Exception as e:
-        log.error("PRICEBOOK MIGRATION ERROR:", repr(e))
-        conn.rollback()
-    finally:
-        cur.close()
-
-
-def _run_promo_codes_migration(conn):
-    """Create promo_codes tables + trial_end column (idempotent)."""
-    cur = conn.cursor()
-    try:
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS promo_codes (
-                id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                code        TEXT NOT NULL UNIQUE,
-                discount_type TEXT NOT NULL DEFAULT 'trial_days',
-                discount_value NUMERIC NOT NULL DEFAULT 10,
-                max_uses    INT DEFAULT NULL,
-                times_used  INT NOT NULL DEFAULT 0,
-                one_per_customer BOOLEAN NOT NULL DEFAULT TRUE,
-                active      BOOLEAN NOT NULL DEFAULT TRUE,
-                created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-                expires_at  TIMESTAMPTZ DEFAULT NULL
-            );
-            CREATE TABLE IF NOT EXISTS promo_code_uses (
-                id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                promo_code_id UUID NOT NULL REFERENCES promo_codes(id),
-                company_id  UUID NOT NULL,
-                applied_at  TIMESTAMPTZ NOT NULL DEFAULT now()
-            );
-            CREATE INDEX IF NOT EXISTS idx_promo_code_uses_company
-                ON promo_code_uses(company_id);
-            CREATE INDEX IF NOT EXISTS idx_promo_code_uses_code
-                ON promo_code_uses(promo_code_id);
-        """)
-        cur.execute("""
-            DO $$
-            BEGIN
-                IF NOT EXISTS (
-                    SELECT 1 FROM information_schema.columns
-                    WHERE table_name = 'companies' AND column_name = 'trial_end'
-                ) THEN
-                    ALTER TABLE companies ADD COLUMN trial_end TIMESTAMPTZ DEFAULT NULL;
-                END IF;
-            END $$;
-        """)
-        log.info("PROMO_CODES MIGRATION: OK")
-    except Exception as e:
-        log.error(f"PROMO_CODES MIGRATION ERROR: {repr(e)}")
-    finally:
-        cur.close()
-
-# Run pricebook migrations at startup (idempotent)
+import migrations
+# Run migrations at startup (idempotent)
 try:
     _mig_conn = get_conn()
-    _run_pricebook_migrations(_mig_conn)
-    _run_promo_codes_migration(_mig_conn)
+    migrations.run_all(_mig_conn)
     _mig_conn.close()
 except Exception as e:
-    log.error(f"PRICEBOOK MIGRATION STARTUP ERROR: {repr(e)}")
+    log.error(f"MIGRATION STARTUP ERROR: {repr(e)}")
 
 # Seed jerga_global con términos críticos al iniciar
 try:
@@ -823,7 +724,8 @@ except Exception as e:
 from queries import (
     get_company_by_twilio_number, get_company_by_phone_number_id,
     get_quote_state, upsert_quote_state, clear_quote_state,
-    save_quote, get_company_plan_code, get_plan_limit,
+    save_quote, save_search_miss, log_message,
+    get_company_plan_code, get_plan_limit,
     get_monthly_usage, increment_monthly_usage, track_conversation_if_new,
     WA_LIMIT_COMPLETE, WA_LIMIT_PRO, WA_CONVERSATION_WINDOW_HOURS,
 )
@@ -1143,23 +1045,7 @@ async def whatsapp_webhook(request: Request):
 
 # ── Conversation logging ──────────────────────────────────────────────────────
 
-def log_message(company_id: str, client_phone: str, role: str, message: str, extra: dict = None):
-    try:
-        conn = get_conn()
-        cur  = conn.cursor()
-        cur.execute(
-            """
-            INSERT INTO conversation_messages
-                (company_id, client_phone, role, message, extra, created_at)
-            VALUES (%s, %s, %s, %s, %s::jsonb, now())
-            """,
-            (company_id, client_phone, role, (message or "")[:4000],
-             json.dumps(extra or {})),
-        )
-        cur.close()
-        conn.close()
-    except Exception as e:
-        log.error("LOG_MESSAGE ERROR:", repr(e))
+# log_message imported from queries.py
 
 
 # ============================================================

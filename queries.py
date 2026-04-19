@@ -265,6 +265,47 @@ def increment_monthly_usage(company_id: str, year_month: str, delta: int = 1) ->
         conn.close()
 
 
+def save_search_miss(company_id: str, term: str):
+    """Guarda términos que el bot no encontró para aprendizaje continuo."""
+    if not company_id or not term or len(term.strip()) < 3:
+        return
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO search_misses (company_id, term, created_at)
+            VALUES (%s, %s, now())
+            ON CONFLICT DO NOTHING
+            """,
+            (company_id, term.strip().lower()),
+        )
+        cur.close()
+        conn.close()
+    except Exception as e:
+        log.error("SAVE_MISS ERROR: %s", repr(e))
+
+
+def log_message(company_id: str, client_phone: str, role: str, message: str, extra: dict = None):
+    """Log a conversation message to the database."""
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO conversation_messages
+                (company_id, client_phone, role, message, extra, created_at)
+            VALUES (%s, %s, %s, %s, %s::jsonb, now())
+            """,
+            (company_id, client_phone, role, (message or "")[:4000],
+             json.dumps(extra or {})),
+        )
+        cur.close()
+        conn.close()
+    except Exception as e:
+        log.error("LOG_MESSAGE ERROR: %s", repr(e))
+
+
 def track_conversation_if_new(company_id: str, wa_from: str) -> dict:
     wa_from = (wa_from or "").strip()
     if not wa_from:
