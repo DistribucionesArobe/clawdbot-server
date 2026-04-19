@@ -192,63 +192,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Rate limiting middleware (in-memory, per-IP) ──────────────────────────
-# Protects against abuse. Limits per window (sliding).
-# WhatsApp webhook gets a higher limit (Meta sends bursts).
-import time as _time_mod
-from collections import defaultdict as _defaultdict
-
-_RATE_LIMITS = {
-    "/webhook/whatsapp": {"max_requests": 120, "window_seconds": 60},
-    "/api/auth/login": {"max_requests": 10, "window_seconds": 60},
-    "/api/auth/register": {"max_requests": 5, "window_seconds": 60},
-    "_default": {"max_requests": 60, "window_seconds": 60},
-}
-_rate_store: dict[str, list[float]] = _defaultdict(list)
-
-@app.middleware("http")
-async def rate_limit_middleware(request: Request, call_next):
-    client_ip = request.headers.get("x-forwarded-for", request.client.host if request.client else "unknown")
-    client_ip = client_ip.split(",")[0].strip()
-    path = request.url.path
-
-    # Find matching limit
-    limit_cfg = _RATE_LIMITS.get(path, _RATE_LIMITS["_default"])
-    max_req = limit_cfg["max_requests"]
-    window = limit_cfg["window_seconds"]
-
-    # Rate key = IP + path bucket
-    bucket = path if path in _RATE_LIMITS else "_default"
-    rate_key = f"{client_ip}:{bucket}"
-
-    now = _time_mod.time()
-    # Prune old entries
-    _rate_store[rate_key] = [t for t in _rate_store[rate_key] if now - t < window]
-
-    if len(_rate_store[rate_key]) >= max_req:
-        log.warning(f"RATE LIMIT: {client_ip} hit {max_req}/{window}s on {path}")
-        return Response(
-            content='{"detail":"Too many requests"}',
-            status_code=429,
-            media_type="application/json",
-        )
-
-    _rate_store[rate_key].append(now)
-    response = await call_next(request)
-    return response
-
-# Cleanup stale rate entries every 10 minutes
-async def _cleanup_rate_store():
-    while True:
-        await asyncio.sleep(600)
-        now = _time_mod.time()
-        stale = [k for k, v in _rate_store.items() if not v or now - v[-1] > 120]
-        for k in stale:
-            del _rate_store[k]
-
-@app.on_event("startup")
-async def _start_rate_cleanup():
-    asyncio.create_task(_cleanup_rate_store())
+from middleware import register_middleware
+register_middleware(app)
 
 # -------------------------
 
@@ -274,27 +219,7 @@ WA_CONVERSATION_WINDOW_HOURS = int((os.getenv("WA_CONVERSATION_WINDOW_HOURS") or
 
 
 # -------------------------
-# Helpers password
-# -------------------------
-def _pw_bytes(password: str) -> bytes:
-    return (password or "").strip().encode("utf-8")
-
-
-def hash_password(password: str) -> str:
-    pw = _pw_bytes(password)
-    if len(pw) > 72:
-        raise HTTPException(status_code=400, detail="Password demasiado largo (máx 72 bytes)")
-    salt = bcrypt.gensalt(rounds=12)
-    return bcrypt.hashpw(pw, salt).decode("utf-8")
-
-
-def verify_password(password: str, password_hash: str) -> bool:
-    pw = _pw_bytes(password)
-    if len(pw) > 72:
-        return False
-    if not password_hash:
-        return False
-    return bcrypt.checkpw(pw, password_hash.encode("utf-8"))
+from auth import hash_password, verify_password, hash_api_key, api_key_prefix
 
 def looks_like_product_phrase(text: str) -> bool:
     t = norm_name(text)
@@ -766,12 +691,8 @@ def cart_render_quote(state: dict, company_id: str = "", client_phone: str = "")
         + "\n\n💳 Escribe *pagar* y te mandamos datos bancarios o link para pago con tarjeta."
     )
 
-def api_key_prefix(token: str) -> str:
-    return token[:API_KEY_PREFIX_LEN]
-
-def api_key_hash(token: str) -> str:
-    return hashlib.sha256(token.encode("utf-8")).hexdigest()
-
+# api_key_prefix and hash_api_key imported from auth.py
+api_key_hash = hash_api_key  # alias for backward compat
 
 # -------------------------
 # DB
@@ -796,78 +717,7 @@ def save_search_miss(company_id: str, term: str):
     except Exception as e:
         log.error("SAVE_MISS ERROR:", repr(e))
 
-from psycopg2 import pool as _pg_pool
-
-_connection_pool: _pg_pool.ThreadedConnectionPool | None = None
-
-def _get_pool() -> _pg_pool.ThreadedConnectionPool:
-    """Inicializa el pool de conexiones (lazy, thread-safe)."""
-    global _connection_pool
-    if _connection_pool is None or _connection_pool.closed:
-        dsn = (os.getenv("DATABASE_URL") or "").strip()
-        if not dsn:
-            raise RuntimeError("DATABASE_URL missing")
-        if "sslmode=" not in dsn:
-            dsn = dsn + ("&" if "?" in dsn else "?") + "sslmode=require"
-        _connection_pool = _pg_pool.ThreadedConnectionPool(
-            minconn=2,
-            maxconn=20,
-            dsn=dsn,
-            connect_timeout=5,
-        )
-        log.info("DB POOL: initialized (min=2, max=20)")
-    return _connection_pool
-
-class _PooledConnection:
-    """Wrapper que intercepta .close() para devolver al pool en vez de cerrar."""
-    def __init__(self, real_conn, pool):
-        self._conn = real_conn
-        self._pool = pool
-    def close(self):
-        try:
-            if self._pool and not self._pool.closed:
-                self._pool.putconn(self._conn)
-            else:
-                self._conn.close()
-        except Exception:
-            try:
-                self._conn.close()
-            except Exception:
-                pass
-    def cursor(self, *a, **kw):
-        return self._conn.cursor(*a, **kw)
-    def commit(self):
-        return self._conn.commit()
-    def rollback(self):
-        return self._conn.rollback()
-    @property
-    def autocommit(self):
-        return self._conn.autocommit
-    @autocommit.setter
-    def autocommit(self, val):
-        self._conn.autocommit = val
-    def __enter__(self):
-        return self
-    def __exit__(self, *exc):
-        self.close()
-        return False
-
-def get_conn():
-    """Obtiene una conexión del pool. conn.close() la devuelve al pool automáticamente."""
-    pool = _get_pool()
-    real_conn = pool.getconn()
-    real_conn.autocommit = True
-    return _PooledConnection(real_conn, pool)
-
-def print_db_fingerprint():
-    try:
-        conn = get_conn()
-        cur = conn.cursor()
-        cur.execute("select inet_server_addr(), inet_server_port(), current_database()")
-        log.debug("DB FINGERPRINT (Render):", cur.fetchone())
-        conn.close()
-    except Exception as e:
-        log.error("DB FINGERPRINT ERROR:", repr(e))
+from db import get_conn, print_db_fingerprint
 
 print_db_fingerprint()
 
