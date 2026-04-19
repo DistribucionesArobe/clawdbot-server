@@ -4127,6 +4127,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                     if cat_item:
                         # Check if user specified a size — if NOT, prefer is_default product
                         _user_raw = _matched or _name or ""
+                        print(f"IS_DEFAULT CHECK: cat='{cat_item.get('name')}' user_raw='{_user_raw}' matched='{_matched}' name='{_name}'")
                         _has_user_size = bool(re.search(r"\b\d+\.\d+\b", _user_raw))  # e.g. "4.10", "6.35"
                         if not _has_user_size and not cat_item.get("is_default"):
                             # User didn't specify size → look for is_default product with same base type
