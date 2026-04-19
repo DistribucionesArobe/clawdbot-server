@@ -77,6 +77,7 @@ Traduces y explicas textos ES/EN de forma natural.
 # App
 # -------------------------
 app = FastAPI(title="Clawdbot Server", version="1.0")
+app.include_router(pricebook_router)
 
 # ── Silence detector: escalamiento proactivo por inactividad ──────────────
 # Corre cada 5 min. Si un cliente tiene pending/awaiting state sin actividad
@@ -705,6 +706,7 @@ print_db_fingerprint()
 
 
 import migrations
+from routes.pricebook import router as pricebook_router
 # Run migrations at startup (idempotent)
 try:
     _mig_conn = get_conn()
@@ -768,27 +770,7 @@ class CompanyCreateBody(BaseModel):
     slug: Optional[str] = None
     key_name: str = "default"
 
-class PricebookItemCreateBody(BaseModel):
-    name: str
-    sku: Optional[str] = None
-    unit: Optional[str] = None
-    price: Optional[float] = None
-    vat_rate: Optional[float] = 0.16
-    source: Optional[str] = "manual"
-    synonyms: Optional[str] = None
-    bundle_size: Optional[int] = None
-
-# ── NUEVO: schema para PATCH (todos los campos opcionales) ────────────────────
-class PricebookItemUpdateBody(BaseModel):
-    name: Optional[str] = None
-    sku: Optional[str] = None
-    unit: Optional[str] = None
-    price: Optional[float] = None
-    vat_rate: Optional[float] = None
-    synonyms: Optional[str] = None
-    bundle_size: Optional[int] = None
-    is_default: Optional[bool] = None
-# ─────────────────────────────────────────────────────────────────────────────
+# PricebookItemCreateBody, PricebookItemUpdateBody → routes/pricebook.py
 
 
 @app.get("/")
@@ -4052,6 +4034,11 @@ def generate_context_groups_endpoint(company_id: str = "30208e3c-70c6-4203-97d9-
         conn.close()
 
 
+def _auto_plural_singular(name: str) -> list:
+    """Disabled: auto-plurals cause more harm than good."""
+    return []
+
+
 @app.post("/api/admin/rebuild-synonyms-public")
 def rebuild_synonyms_public(company_id: str = "30208e3c-70c6-4203-97d9-172fad7d3c75"):
     conn = get_conn()
@@ -5138,36 +5125,11 @@ def company_me(request: Request):
         if cur: cur.close()
         if conn: conn.close()
 
-@app.post("/api/pricebook/rebuild-synonyms")
-def rebuild_synonyms(request: Request):
-    company_id = require_company_id(request)
-    conn = get_conn()
-    cur = conn.cursor()
-    try:
-        cur.execute(
-            "SELECT id, name, synonyms FROM pricebook_items WHERE company_id=%s",
-            (company_id,)
-        )
-        rows = cur.fetchall()
-        updated = 0
-        for item_id, name, synonyms in rows:
-            existing = (synonyms or "").strip()
-            auto_vars = _auto_plural_singular(name)
-            if auto_vars:
-                existing_set = {s.strip().lower() for s in existing.split(",") if s.strip()}
-                new_vars = [v for v in auto_vars if v not in existing_set]
-                if new_vars:
-                    new_synonyms = (existing + ", " + ", ".join(new_vars)).strip(", ")
-                    cur.execute(
-                        "UPDATE pricebook_items SET synonyms=%s, updated_at=now() WHERE id=%s",
-                        (new_synonyms, item_id)
-                    )
-                    updated += 1
-        return {"ok": True, "company_id": company_id, "total": len(rows), "updated": updated}
-    finally:
-        cur.close()
-        conn.close()
 
+# ── Pricebook routes → routes/pricebook.py ──────────────────────────────────
+
+
+# ── Health / utility endpoints ──────────────────────────────────────────────
 
 @app.get("/api/health")
 def api_health():
@@ -5223,6 +5185,8 @@ def db_test():
     finally:
         if conn: conn.close()
 
+
+# ── Admin endpoints ─────────────────────────────────────────────────────────
 
 class AdminDeleteTestUserBody(BaseModel):
     email: str
@@ -5300,13 +5264,15 @@ def admin_delete_test_user(body: AdminDeleteTestUserBody):
     except HTTPException:
         raise
     except Exception as e:
-        log.error(f"DELETE TEST USER ERROR: {repr(e)}")
+        log.error("DELETE TEST USER ERROR: %s", repr(e))
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if cur: cur.close()
         if conn: conn.close()
 
+
+# ── Auth endpoints ──────────────────────────────────────────────────────────
 
 @app.post("/api/auth/register")
 def register(body: RegisterBody):
@@ -5374,9 +5340,9 @@ def register(body: RegisterBody):
                             (_pid,),
                         )
                         promo_applied = f"Trial Pro {int(_dval)} días"
-                        log.info(f"REGISTRO+PROMO: company={company_id} code={_promo} trial_end={_trial_end}")
+                        log.info("REGISTRO+PROMO: company=%s code=%s trial_end=%s", company_id, _promo, _trial_end)
             except Exception as pe:
-                log.error(f"REGISTRO PROMO ERROR (non-fatal): {repr(pe)}")
+                log.error("REGISTRO PROMO ERROR (non-fatal): %s", repr(pe))
 
         return {"ok": True, "user_id": user_id, "company_id": str(company_id), "api_key": token, "promo_applied": promo_applied}
     except IntegrityError:
@@ -5384,7 +5350,7 @@ def register(body: RegisterBody):
     except HTTPException:
         raise
     except Exception as e:
-        log.error("REGISTER ERROR:", repr(e))
+        log.error("REGISTER ERROR: %s", repr(e))
         traceback.print_exc()
         raise HTTPException(status_code=500, detail="Error interno")
     finally:
@@ -5455,13 +5421,13 @@ def login(body: LoginBody, response: Response):
         cur = conn.cursor()
         cur.execute("select id, password_hash from users where email=%s and is_active=true", (email,))
         row = cur.fetchone()
-        log.info("LOGIN email:", repr(email))
-        log.info("LOGIN row found?:", bool(row))
+        log.info("LOGIN email: %s", repr(email))
+        log.info("LOGIN row found?: %s", bool(row))
         if not row:
             raise HTTPException(status_code=401, detail="Credenciales inválidas")
         user_id, password_hash = row
         ok = verify_password(password, password_hash)
-        log.info("LOGIN verify_password:", ok)
+        log.info("LOGIN verify_password: %s", ok)
         if not ok:
             raise HTTPException(status_code=401, detail="Credenciales inválidas")
         sid = create_session(conn, int(user_id))
@@ -5474,7 +5440,7 @@ def login(body: LoginBody, response: Response):
     except HTTPException:
         raise
     except Exception as e:
-        log.error("LOGIN ERROR:", repr(e))
+        log.error("LOGIN ERROR: %s", repr(e))
         traceback.print_exc()
         raise HTTPException(status_code=500, detail="Error interno")
     finally:
@@ -5510,7 +5476,7 @@ def auth_me(request: Request):
                 if row:
                     u["empresa_nombre"] = row[0]
         except Exception as e:
-            log.error(f"AUTH ME ENRICH ERROR: {repr(e)}")
+            log.error("AUTH ME ENRICH ERROR: %s", repr(e))
         finally:
             if cur: cur.close()
             if conn: conn.close()
@@ -5535,718 +5501,6 @@ def auth_logout(request: Request, response: Response):
     response.delete_cookie(key=SESSION_COOKIE_NAME, path="/", domain=".cotizaexpress.com")
     return {"ok": True}
 
-@app.get("/api/web/pricebook/template")
-def download_template(request: Request):
-    _ = get_user_from_session(request)
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "pricebook"
-    ws.append(["nombre", "precio_base", "unidad", "sku", "vat_rate"])
-    bio = BytesIO()
-    wb.save(bio)
-    bio.seek(0)
-    filename = "plantilla-cotizaexpress.xlsx"
-    return StreamingResponse(
-        bio,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-    )
-
-def _rebuild_embeddings_bg(company_id: str):
-    try:
-        log.info(f"BG EMBEDDINGS START: company={company_id}")
-        conn = get_conn()
-        try:
-            result = rebuild_embeddings_for_company(conn, company_id)
-            log.info(f"BG EMBEDDINGS DONE: {result}")
-            # Auto-generate context groups after rebuilding embeddings
-            try:
-                cg_result = auto_generate_context_groups(conn, company_id)
-                log.debug(f"BG CONTEXT GROUPS: {cg_result.get('status')}")
-            except Exception as cge:
-                log.error(f"BG CONTEXT GROUPS ERROR: {repr(cge)}")
-        finally:
-            conn.close()
-    except Exception as e:
-        log.error(f"BG EMBEDDINGS ERROR: {repr(e)}")
-
-@app.post("/api/carga-productos/rapida")
-async def carga_productos_rapida(request: Request, background_tasks: BackgroundTasks = None):
-    """Carga rápida de productos: recibe lista de {nombre, precio_base, categoria, unidad}."""
-    user = get_user_from_session(request)
-    company_id = require_company_id(request)
-    body = await request.json()
-    productos = body.get("productos") or []
-    if not productos:
-        raise HTTPException(status_code=400, detail="No hay productos para cargar")
-
-    conn = None
-    cur = None
-    try:
-        conn = get_conn()
-        cur = conn.cursor()
-        insertados = 0
-        actualizados = 0
-        errores = []
-
-        # Generar sinónimos por batch
-        names_list = [normalize_display_name(p["nombre"]) for p in productos if p.get("nombre")]
-        synonyms_map = {}
-        if openai_client:
-            for i in range(0, len(names_list), 20):
-                batch = names_list[i:i+20]
-                try:
-                    numbered = "\n".join(f"{j+1}. {n}" for j, n in enumerate(batch))
-                    resp = openai_client.chat.completions.create(
-                        model="gpt-4o-mini",
-                        messages=[
-                            {"role": "system", "content": (
-                                "Eres experto en ferreterías de México. Para cada producto numerado, "
-                                "genera hasta 5 sinónimos coloquiales, typos comunes o marcas usadas como nombre genérico. "
-                                'Responde SOLO en JSON válido así: {"1": "sin1, sin2", "2": "sin1, sin2"} '
-                                "Sin explicación, sin markdown, solo el JSON."
-                            )},
-                            {"role": "user", "content": numbered}
-                        ],
-                        temperature=0.3, max_tokens=300,
-                    )
-                    raw = (resp.choices[0].message.content or "{}").strip().replace("```json", "").replace("```", "").strip()
-                    parsed_syns = json.loads(raw)
-                    for k, v in parsed_syns.items():
-                        if k.isdigit() and int(k)-1 < len(batch):
-                            synonyms_map[batch[int(k)-1]] = v
-                except Exception as e:
-                    log.error(f"BATCH SYNONYMS ERROR (rapida): {repr(e)}")
-
-        for p in productos:
-            nombre = normalize_display_name(p.get("nombre", "").strip())
-            if not nombre:
-                continue
-            try:
-                precio = float(str(p.get("precio_base", 0)).replace("$", "").replace(",", ""))
-            except Exception:
-                errores.append(f"Precio inválido para '{nombre}'")
-                continue
-            if precio <= 0:
-                errores.append(f"Precio debe ser > 0 para '{nombre}'")
-                continue
-
-            unidad = p.get("unidad", "Pieza") or "Pieza"
-            name_norm = norm_name(nombre)
-            auto_syn = synonyms_map.get(nombre, "")
-
-            try:
-                cur.execute(
-                    """
-                    INSERT INTO pricebook_items
-                        (company_id, name, name_norm, unit, price, synonyms, source, updated_at)
-                    VALUES
-                        (%s, %s, %s, %s, %s, %s, 'rapida', now())
-                    ON CONFLICT (company_id, name_norm)
-                    DO UPDATE SET
-                        name = EXCLUDED.name, unit = EXCLUDED.unit,
-                        price = EXCLUDED.price,
-                        synonyms = COALESCE(NULLIF(pricebook_items.synonyms, ''), EXCLUDED.synonyms),
-                        source = 'rapida', updated_at = now()
-                    RETURNING (xmax = 0) AS is_insert
-                    """,
-                    (company_id, nombre, name_norm, unidad, precio, auto_syn),
-                )
-                row = cur.fetchone()
-                if row and row[0]:
-                    insertados += 1
-                else:
-                    actualizados += 1
-            except Exception as e:
-                log.error(f"RAPIDA INSERT ERROR {nombre}: {repr(e)}")
-                errores.append(f"Error con '{nombre}': {str(e)}")
-
-        conn.commit()
-
-        # Rebuild embeddings + context groups en background
-        if background_tasks:
-            background_tasks.add_task(_rebuild_embeddings_bg, company_id)
-        else:
-            try:
-                rebuild_embeddings_for_company(conn, company_id)
-                auto_generate_context_groups(conn, company_id)
-            except Exception as e:
-                log.error(f"EMBEDDINGS/CTX REBUILD ERROR (rapida): {repr(e)}")
-
-        return {
-            "ok": True,
-            "productos_insertados": insertados,
-            "productos_actualizados": actualizados,
-            "errores": errores,
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        log.error(f"CARGA RAPIDA ERROR: {repr(e)}")
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        if cur: cur.close()
-        if conn: conn.close()
-
-
-@app.post("/api/pricebook/upload")
-def pricebook_upload(
-    request: Request,
-    authorization: str = Header(default=""),
-    file: UploadFile = File(...),
-    background_tasks: BackgroundTasks = None,
-):
-    if authorization and authorization.lower().startswith("bearer "):
-        tenant = get_company_from_bearer(authorization)
-        company_id = tenant["company_id"]
-    else:
-        company_id = require_company_id(request)
-
-    if not file.filename.lower().endswith((".xlsx", ".xlsm")):
-        raise HTTPException(status_code=400, detail="Solo archivos .xlsx o .xlsm")
-
-    conn = None
-    cur = None
-    upload_id = None
-
-    try:
-        conn = get_conn()
-        cur = conn.cursor()
-        cur.execute(
-            "INSERT INTO pricebook_uploads (company_id, filename, status) VALUES (%s, %s, 'processing') RETURNING id",
-            (company_id, file.filename),
-        )
-        upload_id = cur.fetchone()[0]
-
-        content = file.file.read()
-        wb = load_workbook(BytesIO(content))
-        ws = wb.active
-
-        header_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True))
-        headers_raw = [str(h or "") for h in header_row]
-        headers_norm = [h.strip().lower() for h in headers_raw]
-
-        alias = {
-            "nombre": "name", "producto": "name", "product": "name",
-            "precio": "price", "precio_base": "price", "precio unitario": "price",
-            "costo": "price", "cost": "price",
-            "unidad": "unit", "uom": "unit",
-            "vat_rate": "vat_rate", "iva": "vat_rate",
-            "sku": "sku",
-        }
-
-        headers_mapped = [alias.get(h, h) for h in headers_norm]
-        idx = {h: i for i, h in enumerate(headers_mapped)}
-
-        required = {"name", "price"}
-        missing_cols = required - set(headers_mapped)
-        if missing_cols:
-            raise HTTPException(
-                status_code=400,
-                detail={"error": f"Faltan columnas requeridas: {sorted(missing_cols)}", "headers_detectadas": headers_norm, "headers_mapeadas": headers_mapped},
-            )
-
-        parsed_rows = []
-        for r in ws.iter_rows(min_row=2, values_only=True):
-            if r is None or all(v is None or str(v).strip() == "" for v in r):
-                continue
-            name = normalize_display_name(str(r[idx["name"]])) if r[idx["name"]] is not None else ""
-            price_raw = r[idx["price"]] if idx.get("price") is not None else None
-            if not name or price_raw is None:
-                continue
-            try:
-                price = float(str(price_raw).replace("$", "").replace(",", "").strip())
-            except Exception:
-                continue
-
-            unit = None
-            if "unit" in idx and idx["unit"] < len(r) and r[idx["unit"]] is not None:
-                unit = str(r[idx["unit"]]).strip() or None
-
-            vat_rate = None
-            if "vat_rate" in idx and idx["vat_rate"] < len(r) and r[idx["vat_rate"]] is not None:
-                try:
-                    vat_rate = float(r[idx["vat_rate"]])
-                except Exception:
-                    vat_rate = None
-
-            sku = None
-            if "sku" in idx and idx["sku"] < len(r) and r[idx["sku"]] is not None:
-                sku_val = str(r[idx["sku"]]).strip()
-                sku = sku_val if sku_val else None
-
-            parsed_rows.append({"name": name, "price": price, "unit": unit, "vat_rate": vat_rate, "sku": sku})
-
-        def _clean_name(n):
-            return re.sub(r'[\"\'\\]', '', n)
-
-        def _batch_synonyms(names_batch: list) -> dict:
-            if not openai_client:
-                return {}
-            try:
-                numbered = "\n".join(f"{i+1}. {_clean_name(n)}" for i, n in enumerate(names_batch))
-                resp = openai_client.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[
-                        {"role": "system", "content": (
-                            "Eres experto en ferreterías de México. Para cada producto numerado, "
-                            "genera hasta 5 sinónimos coloquiales, typos comunes o marcas usadas como nombre genérico. "
-                            'Responde SOLO en JSON válido así: {"1": "sin1, sin2", "2": "sin1, sin2"} '
-                            "Sin explicación, sin markdown, solo el JSON."
-                        )},
-                        {"role": "user", "content": numbered}
-                    ],
-                    temperature=0.3, max_tokens=300,
-                )
-                raw = (resp.choices[0].message.content or "{}").strip()
-                raw = raw.replace("```json", "").replace("```", "").strip()
-                parsed = json.loads(raw)
-                return {
-                    names_batch[int(k)-1]: v
-                    for k, v in parsed.items()
-                    if k.isdigit() and int(k)-1 < len(names_batch)
-                }
-            except Exception as e:
-                log.error("BATCH SYNONYMS ERROR:", repr(e))
-                return {}
-
-        synonyms_map = {}
-        names_list = [r["name"] for r in parsed_rows]
-        for i in range(0, len(names_list), 20):
-            batch = names_list[i:i+20]
-            synonyms_map.update(_batch_synonyms(batch))
-
-        rows_total = len(parsed_rows)
-        rows_upserted = 0
-        rows_skipped = 0
-
-        for row in parsed_rows:
-            name = row["name"]
-            name_norm = norm_name(name)
-            auto_syn = synonyms_map.get(name, "")
-            try:
-                cur.execute(
-                    """
-                    INSERT INTO pricebook_items
-                        (company_id, sku, name, name_norm, unit, price, vat_rate, synonyms, source, updated_at)
-                    VALUES
-                        (%s, %s, %s, %s, %s, %s, %s, %s, 'excel', now())
-                    ON CONFLICT (company_id, name_norm)
-                    DO UPDATE SET
-                        sku = EXCLUDED.sku, name = EXCLUDED.name, unit = EXCLUDED.unit,
-                        price = EXCLUDED.price, vat_rate = EXCLUDED.vat_rate,
-                        synonyms = COALESCE(NULLIF(pricebook_items.synonyms, ''), EXCLUDED.synonyms),
-                        source = 'excel', updated_at = now()
-                    """,
-                    (company_id, row["sku"], name, name_norm, row["unit"], row["price"], row["vat_rate"], auto_syn),
-                )
-                rows_upserted += 1
-            except Exception as e:
-                log.error(f"ROW INSERT ERROR {name}:", repr(e))
-                rows_skipped += 1
-
-        cur.execute(
-            "UPDATE pricebook_uploads SET status='success', rows_total=%s, rows_upserted=%s, error=NULL, finished_at=now() WHERE id=%s",
-            (rows_total, rows_upserted, upload_id),
-        )
-
-        if background_tasks:
-            background_tasks.add_task(_rebuild_embeddings_bg, company_id)
-        else:
-            try:
-                rebuild_embeddings_for_company(conn, company_id)
-            except Exception as e:
-                log.error("EMBEDDINGS REBUILD ERROR:", repr(e))
-
-        return {"ok": True, "company_id": company_id, "upload_id": str(upload_id), "rows_total": rows_total, "rows_upserted": rows_upserted, "rows_skipped": rows_skipped}
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        log.error("UPLOAD ERROR:", repr(e))
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        if cur: cur.close()
-        if conn: conn.close()
-
-@app.get("/api/pricebook/items")
-def pricebook_items(
-    request: Request,
-    authorization: str = Header(default=""),
-    q: Optional[str] = Query(default=None),
-    limit: int = Query(default=20, ge=1, le=1000),
-):
-    conn = None
-    cur = None
-    try:
-        if authorization and authorization.lower().startswith("bearer "):
-            company_id = get_company_from_bearer(authorization)["company_id"]
-        else:
-            _ = get_user_from_session(request)
-            company_id = require_company_id(request)
-        if not company_id:
-            raise HTTPException(status_code=400, detail="No pude resolver company_id")
-        conn = get_conn()
-        cur = conn.cursor()
-        if q:
-            like = f"%{q.strip()}%"
-            cur.execute(
-                """
-                select id, company_id, sku, name, unit, price, vat_rate, source, updated_at, created_at, bundle_size, coalesce(is_default, false)
-                from pricebook_items
-                where company_id = %s and (sku ilike %s or name ilike %s or name_norm ilike %s)
-                order by name asc limit %s
-                """,
-                (company_id, like, like, like, limit),
-            )
-        else:
-            cur.execute(
-                "select id, company_id, sku, name, unit, price, vat_rate, source, updated_at, created_at, bundle_size, coalesce(is_default, false) from pricebook_items where company_id = %s order by name asc limit %s",
-                (company_id, limit),
-            )
-        rows = cur.fetchall()
-        items = []
-        for r in rows:
-            items.append({
-                "id": r[0], "company_id": r[1], "sku": r[2],
-                "name": r[3], "description": r[3], "unit": r[4],
-                "price": float(r[5]) if r[5] is not None else None,
-                "vat_rate": float(r[6]) if r[6] is not None else None,
-                "source": r[7],
-                "updated_at": r[8].isoformat() if r[8] else None,
-                "created_at": r[9].isoformat() if r[9] else None,
-                "bundle_size": r[10],
-                "is_default": bool(r[11]) if len(r) > 11 else False,
-            })
-        return {"ok": True, "items": items}
-    except HTTPException:
-        raise
-    except Exception as e:
-        if conn:
-            try: conn.rollback()
-            except Exception: pass
-        log.error("PRICEBOOK ITEMS ERROR:", repr(e))
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"pricebook_items failed: {type(e).__name__}: {e}")
-    finally:
-        if cur: cur.close()
-        if conn: conn.close()
-
-def _auto_plural_singular(name: str) -> list:
-    """
-    Genera variantes plural/singular para los tokens del nombre.
-    Solo genera para tokens limpios (sin caracteres especiales).
-    Returns empty list — we no longer auto-generate plural synonyms
-    because they pollute the synonym field and embeddings without
-    providing meaningful search value (the search already handles
-    plurals via _singulars_es and phonetic matching).
-    """
-    # Disabled: auto-plurals cause more harm than good.
-    # The search system already handles plural/singular via:
-    # - _singulars_es() in synonym matching
-    # - _phonetic() normalization
-    # - ILIKE patterns with wildcards
-    return []
-    
-@app.post("/api/pricebook/items")
-def pricebook_item_create(request: Request, body: PricebookItemCreateBody):
-    _ = get_user_from_session(request)
-    company_id = require_company_id(request)
-    if not company_id:
-        raise HTTPException(status_code=500, detail="DEFAULT_COMPANY_ID missing en Render")
-
-    name = normalize_display_name(body.name or "")
-    if not name:
-        raise HTTPException(status_code=400, detail="name requerido")
-
-    sku = (body.sku or "").strip() or None
-    unit = (body.unit or "").strip() or None
-    source = (body.source or "manual").strip() or "manual"
-
-    price = body.price
-    if price is not None:
-        try: price = float(price)
-        except Exception: raise HTTPException(status_code=400, detail="price inválido")
-        if price < 0: raise HTTPException(status_code=400, detail="price debe ser >= 0")
-
-    vat_rate = body.vat_rate
-    if vat_rate is not None:
-        try: vat_rate = float(vat_rate)
-        except Exception: raise HTTPException(status_code=400, detail="vat_rate inválido")
-        if vat_rate < 0 or vat_rate > 1: raise HTTPException(status_code=400, detail="vat_rate debe estar entre 0 y 1")
-
-    name_norm = norm_name(name)
-
-    # Auto-generar plurales/singulares como sinónimos
-    synonyms = (body.synonyms or "").strip()
-    _auto_vars = _auto_plural_singular(name)
-    if _auto_vars:
-        existing_set = {s.strip().lower() for s in synonyms.split(",") if s.strip()}
-        new_vars = [v for v in _auto_vars if v not in existing_set]
-        if new_vars:
-            synonyms = (synonyms + ", " + ", ".join(new_vars)).strip(", ")
-
-    bundle_size = body.bundle_size
-    if bundle_size is not None:
-        bundle_size = int(bundle_size) if bundle_size > 0 else None
-
-    conn = None
-    cur = None
-    try:
-        conn = get_conn()
-        cur = conn.cursor()
-        cur.execute(
-            """
-            INSERT INTO pricebook_items (company_id, sku, name, name_norm, unit, price, vat_rate, synonyms, source, bundle_size, updated_at, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now())
-            ON CONFLICT (company_id, name_norm)
-            DO UPDATE SET sku=EXCLUDED.sku, name=EXCLUDED.name, unit=EXCLUDED.unit,
-                price=EXCLUDED.price, vat_rate=EXCLUDED.vat_rate,
-                synonyms=COALESCE(NULLIF(pricebook_items.synonyms,''), EXCLUDED.synonyms),
-                source=EXCLUDED.source, bundle_size=EXCLUDED.bundle_size, updated_at=now()
-            RETURNING id
-            """,
-            (company_id, sku, name, name_norm, unit, price, vat_rate, synonyms, source, bundle_size),
-        )
-        new_id = cur.fetchone()[0]
-        try:
-            upsert_single_embedding(conn, company_id, new_id, name, sku or "", unit or "", synonyms or "")
-        except Exception as e:
-            log.error("SINGLE EMBEDDING ERROR:", repr(e))
-        return {"ok": True, "id": str(new_id)}
-    except IntegrityError as e:
-        msg = str(e).lower()
-        if "duplicate" in msg or "unique" in msg:
-            raise HTTPException(status_code=409, detail="Producto ya existe (conflicto)")
-        raise HTTPException(status_code=400, detail="Integridad inválida")
-    except HTTPException:
-        raise
-    except Exception as e:
-        log.error("PRICEBOOK CREATE ERROR:", repr(e))
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail="pricebook_item_create failed")
-    finally:
-        if cur: cur.close()
-        if conn: conn.close()
-
-
-class PricebookBulkBody(BaseModel):
-    items: list  # list of {name, price, unit, category}
-
-
-@app.post("/api/pricebook/bulk")
-def pricebook_bulk_create(request: Request, body: PricebookBulkBody):
-    """Bulk create products (used by onboarding wizard)."""
-    company_id = require_company_id(request)
-    if not body.items:
-        raise HTTPException(status_code=400, detail="items vacío")
-    if len(body.items) > 50:
-        raise HTTPException(status_code=400, detail="Máximo 50 productos por lote")
-
-    conn = None
-    cur = None
-    created = 0
-    try:
-        conn = get_conn()
-        cur = conn.cursor()
-        for item in body.items:
-            name = normalize_display_name((item.get("name") or "").strip())
-            if not name:
-                continue
-            price = item.get("price")
-            try:
-                price = float(price) if price is not None else None
-            except (ValueError, TypeError):
-                price = None
-            unit = (item.get("unit") or "Pieza").strip()
-            name_n = norm_name(name)
-
-            # Auto-generate plural/singular synonyms
-            synonyms_list = _auto_plural_singular(name)
-            synonyms = ", ".join(synonyms_list) if synonyms_list else ""
-
-            cur.execute(
-                """
-                INSERT INTO pricebook_items (company_id, name, name_norm, unit, price, vat_rate, synonyms, source, updated_at, created_at)
-                VALUES (%s, %s, %s, %s, %s, 0.16, %s, 'onboarding', now(), now())
-                ON CONFLICT (company_id, name_norm)
-                DO UPDATE SET price = EXCLUDED.price, unit = EXCLUDED.unit, updated_at = now()
-                RETURNING id
-                """,
-                (company_id, name, name_n, unit, price, synonyms),
-            )
-            row = cur.fetchone()
-            if row:
-                created += 1
-                try:
-                    upsert_single_embedding(conn, company_id, row[0], name, "", unit, synonyms)
-                except Exception as e:
-                    log.error(f"BULK EMBEDDING ERROR for '{name}': {repr(e)}")
-        conn.commit()
-        # Auto-generate context groups after bulk product upload
-        if created >= 3:
-            try:
-                cg_result = auto_generate_context_groups(conn, company_id)
-                log.debug(f"BULK CONTEXT GROUPS: {cg_result.get('status')}")
-            except Exception as cge:
-                log.error(f"BULK CONTEXT GROUPS ERROR: {repr(cge)}")
-        return {"ok": True, "created": created}
-    except HTTPException:
-        raise
-    except Exception as e:
-        log.error(f"PRICEBOOK BULK ERROR: {repr(e)}")
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail="Error en carga masiva")
-    finally:
-        if cur: cur.close()
-        if conn: conn.close()
-
-
-@app.delete("/api/pricebook/items/{item_id}")
-def pricebook_item_delete(request: Request, item_id: str):
-    _ = get_user_from_session(request)
-    company_id = require_company_id(request)
-    if not company_id:
-        raise HTTPException(status_code=500, detail="DEFAULT_COMPANY_ID missing en Render")
-    conn = None
-    cur = None
-    try:
-        conn = get_conn()
-        cur = conn.cursor()
-        cur.execute("DELETE FROM pricebook_items WHERE company_id = %s AND id = %s RETURNING id", (company_id, item_id))
-        row = cur.fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="Producto no encontrado")
-        return {"ok": True}
-    except HTTPException:
-        raise
-    except Exception as e:
-        log.error("PRICEBOOK DELETE ERROR:", repr(e))
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail="pricebook_item_delete failed")
-    finally:
-        if cur: cur.close()
-        if conn: conn.close()
-
-
-# ── PATCH actualizado: usa PricebookItemUpdateBody (todos los campos opcionales) ──
-
-@app.patch("/api/pricebook/items/{item_id}")
-def pricebook_item_update(request: Request, item_id: str, body: PricebookItemUpdateBody):
-    _ = get_user_from_session(request)
-    company_id = require_company_id(request)
-
-    conn = get_conn()
-    cur = conn.cursor()
-    try:
-        cur.execute(
-            "SELECT name, sku, unit, price, vat_rate, synonyms, bundle_size, coalesce(is_default, false) FROM pricebook_items WHERE id=%s AND company_id=%s",
-            (item_id, company_id),
-        )
-        row = cur.fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="Producto no encontrado")
-
-        name     = (body.name.strip() if body.name is not None else None) or row[0]
-        sku      = (body.sku.strip()  if body.sku  is not None else None) or row[1]
-        unit     = (body.unit.strip() if body.unit is not None else None) or row[2]
-        price    = body.price    if body.price    is not None else row[3]
-        vat_rate = body.vat_rate if body.vat_rate is not None else row[4]
-        synonyms = (body.synonyms.strip() if body.synonyms is not None else None) or row[5] or ""
-        bundle_size = body.bundle_size if body.bundle_size is not None else row[6]
-        if bundle_size is not None and bundle_size <= 0:
-            bundle_size = None
-        is_default = body.is_default if body.is_default is not None else row[7]
-
-        # Auto-generar plurales/singulares como sinónimos
-        _auto_vars = _auto_plural_singular(name)
-        if _auto_vars:
-            existing_set = {s.strip().lower() for s in synonyms.split(",") if s.strip()}
-            new_vars = [v for v in _auto_vars if v not in existing_set]
-            if new_vars:
-                synonyms = (synonyms + ", " + ", ".join(new_vars)).strip(", ")
-
-        name_norm = norm_name(name)
-
-        cur.execute(
-            """
-            UPDATE pricebook_items
-            SET name=%s, name_norm=%s, sku=%s, unit=%s, price=%s, vat_rate=%s, synonyms=%s, bundle_size=%s, is_default=%s, updated_at=now()
-            WHERE id=%s AND company_id=%s
-            RETURNING id
-            """,
-            (name, name_norm, sku, unit, price, vat_rate, synonyms, bundle_size, is_default, item_id, company_id),
-        )
-        if not cur.fetchone():
-            raise HTTPException(status_code=404, detail="Producto no encontrado")
-
-        try:
-            upsert_single_embedding(conn, company_id, item_id, name, sku or "", unit or "", synonyms or "")
-        except Exception as e:
-            log.error("EMBEDDING UPDATE ERROR:", repr(e))
-
-        return {"ok": True}
-    finally:
-        cur.close()
-        conn.close()
-
-@app.get("/api/pricebook/items/{item_id}/synonyms-suggestions")
-def synonyms_suggestions(request: Request, item_id: str):
-    _ = get_user_from_session(request)
-    company_id = require_company_id(request)
-    conn = get_conn()
-    cur = conn.cursor()
-    try:
-        cur.execute("SELECT name, synonyms FROM pricebook_items WHERE id=%s AND company_id=%s", (item_id, company_id))
-        row = cur.fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="Producto no encontrado")
-        name = (row[0] or "").strip()
-        existing = (row[1] or "")
-        suggestions = []
-        if openai_client and name:
-            try:
-                resp = openai_client.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[
-                        {"role": "system", "content": "Eres un experto en ferreterías de México. Dado un producto, devuelve palabras alternativas coloquiales que usarían clientes o ferreteros para pedirlo. Responde SOLO con las palabras separadas por coma, sin explicación, sin puntos, en minúsculas."},
-                        {"role": "user", "content": f"Producto: {name}\nDame 4 sinónimos o nombres alternativos coloquiales."}
-                    ],
-                    temperature=0.3, max_tokens=60,
-                )
-                raw = resp.choices[0].message.content or ""
-                suggestions = [s.strip().lower() for s in raw.split(",") if s.strip()]
-            except Exception as e:
-                log.error("SYNONYMS GPT ERROR:", repr(e))
-        existing_list = [s.strip().lower() for s in existing.split(",") if s.strip()]
-        suggestions = [s for s in suggestions if s not in existing_list]
-        return {"ok": True, "suggestions": suggestions, "existing": existing_list}
-    finally:
-        cur.close()
-        conn.close()
-
-@app.post("/api/pricebook/deduplicate")
-def pricebook_deduplicate(request: Request):
-    company_id = require_company_id(request)
-    conn = get_conn()
-    cur = conn.cursor()
-    try:
-        cur.execute(
-            """
-            DELETE FROM pricebook_items
-            WHERE id NOT IN (
-                SELECT MIN(id::text)::uuid FROM pricebook_items WHERE company_id=%s GROUP BY name_norm
-            ) AND company_id=%s
-            """,
-            (company_id, company_id),
-        )
-        deleted = cur.rowcount
-        return {"ok": True, "deleted": deleted}
-    finally:
-        cur.close()
-        conn.close()
 
 @app.post("/api/companies")
 def create_company(body: CompanyCreateBody):
