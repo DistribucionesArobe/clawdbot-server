@@ -1842,7 +1842,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         if len(_cart) > 9:
             _body_msg += f"\n\n(Mostrando 9 de {len(_cart)}. O escribe el nombre directo.)"
         return {
-            "type": "list",
+            "type": "list_sections",
             "body": _body_msg,
             "sections": [{"title": "Tu carrito", "rows": _removal_rows}],
             "button_label": "Ver productos",
