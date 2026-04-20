@@ -128,6 +128,7 @@ def extract_text_from_image(image_bytes: bytes) -> str | None:
 # ── WhatsApp Business Profile ───────────────────────────────────────────
 
 _META_APP_ID = "1461694011992339"
+_COTIZABOT_LOGO_PATH = os.path.join(os.path.dirname(__file__), "static", "logo-cotizabot.png")
 _WA_PROFILE_SIZE = 640
 _WA_PROFILE_PADDING = 0.15  # 15% padding on each side so logo fits in circle
 
@@ -185,12 +186,106 @@ def _prepare_profile_image(img_bytes: bytes) -> bytes:
         return img_bytes
 
 
+def combine_with_cotizabot(client_logo_bytes: bytes) -> bytes:
+    """Combine client logo with CotizaBot branding for WhatsApp profile.
+
+    Layout (640x640):
+    - Top 60%: client logo centered with padding
+    - Bottom 30%: CotizaBot logo (robot icon only, no text)
+    - 10% gap between them
+
+    Returns PNG bytes of the combined image.
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        log.warning("WA PROFILE COMBINE: Pillow not installed")
+        return client_logo_bytes
+
+    try:
+        SIZE = 640
+
+        # Load client logo
+        client_img = Image.open(io.BytesIO(client_logo_bytes))
+        if client_img.mode in ("RGBA", "LA", "P"):
+            bg = Image.new("RGBA", client_img.size, (255, 255, 255, 255))
+            if client_img.mode == "P":
+                client_img = client_img.convert("RGBA")
+            bg.paste(client_img, mask=client_img.split()[-1] if client_img.mode == "RGBA" else None)
+            client_img = bg.convert("RGB")
+        elif client_img.mode != "RGB":
+            client_img = client_img.convert("RGB")
+
+        # Load CotizaBot logo
+        if not os.path.exists(_COTIZABOT_LOGO_PATH):
+            log.warning("WA PROFILE COMBINE: CotizaBot logo not found at %s", _COTIZABOT_LOGO_PATH)
+            return _prepare_profile_image(client_logo_bytes)
+
+        cbot_img = Image.open(_COTIZABOT_LOGO_PATH)
+        if cbot_img.mode != "RGBA":
+            cbot_img = cbot_img.convert("RGBA")
+
+        # Create white canvas
+        canvas = Image.new("RGB", (SIZE, SIZE), (255, 255, 255))
+
+        # --- Client logo: top 55% of canvas ---
+        client_area_h = int(SIZE * 0.52)
+        client_area_w = int(SIZE * 0.75)
+        client_pad_top = int(SIZE * 0.06)
+
+        cw, ch = client_img.size
+        c_scale = min(client_area_w / cw, client_area_h / ch)
+        new_cw, new_ch = int(cw * c_scale), int(ch * c_scale)
+        client_img = client_img.resize((new_cw, new_ch), Image.LANCZOS)
+
+        cx = (SIZE - new_cw) // 2
+        cy = client_pad_top + (client_area_h - new_ch) // 2
+        canvas.paste(client_img, (cx, cy))
+
+        # --- CotizaBot logo: bottom 30% ---
+        bot_area_h = int(SIZE * 0.28)
+        bot_area_w = int(SIZE * 0.65)
+        bot_y_start = int(SIZE * 0.65)
+
+        bw, bh = cbot_img.size
+        b_scale = min(bot_area_w / bw, bot_area_h / bh)
+        new_bw, new_bh = int(bw * b_scale), int(bh * b_scale)
+        cbot_img = cbot_img.resize((new_bw, new_bh), Image.LANCZOS)
+
+        bx = (SIZE - new_bw) // 2
+        by = bot_y_start + (bot_area_h - new_bh) // 2
+
+        # Paste with alpha mask for transparency
+        canvas.paste(cbot_img, (bx, by), mask=cbot_img.split()[-1])
+
+        # --- Subtle separator line ---
+        from PIL import ImageDraw
+        draw = ImageDraw.Draw(canvas)
+        sep_y = int(SIZE * 0.62)
+        line_w = int(SIZE * 0.4)
+        line_x = (SIZE - line_w) // 2
+        draw.line([(line_x, sep_y), (line_x + line_w, sep_y)],
+                  fill=(220, 220, 220), width=1)
+
+        buf = io.BytesIO()
+        canvas.save(buf, format="PNG", optimize=True)
+        log.info("WA PROFILE COMBINE: Created combined image %dx%d", SIZE, SIZE)
+        return buf.getvalue()
+
+    except Exception as e:
+        log.error("WA PROFILE COMBINE: Failed: %s — falling back to standard", repr(e))
+        return _prepare_profile_image(client_logo_bytes)
+
+
 def update_wa_profile_photo(wa_api_key: str, phone_number_id: str,
-                            img_bytes: bytes, mime_type: str = "image/png") -> dict:
+                            img_bytes: bytes, mime_type: str = "image/png",
+                            with_cotizabot: bool = False) -> dict:
     """Upload an image and set it as the WhatsApp Business profile photo.
 
     Automatically resizes and pads the image to 640x640 with white background
     so it looks good in WhatsApp's circular crop.
+
+    If with_cotizabot=True, combines the logo with CotizaBot branding.
 
     Uses the Resumable Upload API to get a file handle, then sets it
     as profile_picture_handle on the WhatsApp Business Profile.
@@ -198,7 +293,10 @@ def update_wa_profile_photo(wa_api_key: str, phone_number_id: str,
     Returns dict with keys: ok (bool), step, error (optional).
     """
     # Pre-process: resize and pad for WhatsApp circle crop
-    img_bytes = _prepare_profile_image(img_bytes)
+    if with_cotizabot:
+        img_bytes = combine_with_cotizabot(img_bytes)
+    else:
+        img_bytes = _prepare_profile_image(img_bytes)
     mime_type = "image/png"  # always PNG after processing
 
     headers = {"Authorization": f"Bearer {wa_api_key}"}

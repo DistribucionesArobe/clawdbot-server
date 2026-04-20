@@ -274,6 +274,7 @@ def company_settings_get(request: Request):
 async def upload_company_logo(
     request: Request,
     file: UploadFile = File(...),
+    with_cotizabot: bool = False,
 ):
     company_id = require_company_id(request)
 
@@ -316,6 +317,7 @@ async def upload_company_logo(
                 phone_number_id=wa_row[1],
                 img_bytes=content,
                 mime_type=mime,
+                with_cotizabot=with_cotizabot,
             )
             log.info("LOGO UPLOAD: WA profile result: %s", wa_profile_result)
         else:
@@ -326,6 +328,47 @@ async def upload_company_logo(
             "logo_url": data_url,
             "wa_profile_updated": wa_profile_result.get("ok") if wa_profile_result else None,
         }
+    finally:
+        if cur:  cur.close()
+        if conn: conn.close()
+
+
+@router.post("/api/company/logo/update-wa-profile")
+def update_wa_profile_from_logo(request: Request, with_cotizabot: bool = False):
+    """Re-upload existing logo to WhatsApp profile, optionally with CotizaBot branding."""
+    company_id = require_company_id(request)
+    conn = None
+    cur = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT logo_url, wa_api_key, wa_phone_number_id FROM companies WHERE id=%s",
+            (company_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Company no encontrada")
+
+        logo_url, wa_key, wa_phone = row
+        if not logo_url or not logo_url.startswith("data:"):
+            raise HTTPException(status_code=400, detail="Primero sube un logo")
+        if not wa_key or not wa_phone:
+            raise HTTPException(status_code=400, detail="WhatsApp no configurado")
+
+        # Parse data URL
+        header, b64_data = logo_url.split(",", 1)
+        mime_type = header.split(":")[1].split(";")[0]
+        img_bytes = base64.b64decode(b64_data)
+
+        result = update_wa_profile_photo(
+            wa_api_key=wa_key,
+            phone_number_id=wa_phone,
+            img_bytes=img_bytes,
+            mime_type=mime_type,
+            with_cotizabot=with_cotizabot,
+        )
+        return result
     finally:
         if cur:  cur.close()
         if conn: conn.close()
