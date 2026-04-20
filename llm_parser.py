@@ -99,6 +99,16 @@ _WA_TIMESTAMP_RE = re.compile(
 # Prefijos tipo viñeta markdown "•⁠  ⁠" (WhatsApp copia)
 _BULLET_PREFIX_RE = re.compile(r"^\s*[•·⁠\-*]+\s*", re.MULTILINE)
 
+# ── Pre-LLM phrase normalization ──────────────────────────────────────────
+# Phrases the LLM consistently misparses. We rewrite them BEFORE sending to
+# the model so it never sees the confusing token.  Each tuple is
+# (compiled regex, replacement string).
+_PHRASE_NORMALIZATIONS = [
+    # "canal de amarre" / "canal amarre" / "canales de amarre" → just "canal"
+    # The word "amarre" tricks GPT into matching "ángulo de amarre" instead.
+    (re.compile(r"\bcanal(?:es)?\s+(?:de\s+)?amarre\b", re.IGNORECASE), "canal"),
+]
+
 # Líneas que son nombres de proyecto al inicio ("Mat. Privanzas", "Del closet")
 _PROJECT_HEADER_RE = re.compile(
     r"^\s*(mat\.?|material|materiales|proyecto|del?|para|obra)\b[^\n]{0,40}$",
@@ -141,6 +151,10 @@ def preclean_message(text: str) -> str:
 
     # Quitar viñetas al inicio de cada línea
     t = _BULLET_PREFIX_RE.sub("", t)
+
+    # Normalize known ambiguous phrases BEFORE the LLM sees them
+    for _pat, _repl in _PHRASE_NORMALIZATIONS:
+        t = _pat.sub(_repl, t)
 
     # Partir en líneas, quitar headers de proyecto de las primeras 2 líneas
     lines = [ln.rstrip() for ln in t.splitlines()]
@@ -538,6 +552,12 @@ def llm_parse_order(
             "needs_escalation": needs_escalation,
         })
 
+    # ── Post-LLM corrections ──────────────────────────────────────────────
+    # Safety net: catch known LLM misparses that slip through despite hints.
+    # We check the ORIGINAL user text (before preclean) so we can detect
+    # when the user said "canal" but the LLM returned "angulo".
+    items_out = _post_correct_items(items_out, text)
+
     return {
         "items": items_out,
         "non_order": bool(parsed.get("non_order", False)),
@@ -547,6 +567,46 @@ def llm_parse_order(
         "error": None,
         "precleaned_text": cleaned,
     }
+
+
+def _post_correct_items(items: list[dict], original_text: str) -> list[dict]:
+    """
+    Fix known LLM misparses after the fact.
+
+    Currently handles:
+    - User said "canal de amarre" but LLM returned "angulo de amarre" → null out
+      the key so it falls through to smart_search / DEFAULT logic, which will
+      correctly find the canal product.
+    """
+    if not items or not original_text:
+        return items
+
+    orig_lower = original_text.lower()
+    has_canal_amarre = bool(re.search(r"\bcanal(?:es)?\s+(?:de\s+)?amarre\b", orig_lower))
+
+    if not has_canal_amarre:
+        return items
+
+    import logging
+    _log = logging.getLogger("cotizaexpress.llm_parser")
+
+    corrected = []
+    for it in items:
+        key = it.get("key") or ""
+        name = it.get("name") or ""
+        # If the LLM returned an "angulo" product but the user said "canal de amarre"
+        if "angulo" in key or "angulo" in name.lower():
+            _log.warning(
+                "POST-CORRECT: user said 'canal de amarre' but LLM returned '%s' — "
+                "nulling key so DEFAULT canal is used instead", key or name
+            )
+            it["key"] = None
+            it["name"] = "canal"
+            it["notes"] = "post-corrected: canal de amarre, not angulo"
+            it["confidence"] = 0.5  # force needs_escalation so smart_search kicks in
+            it["needs_escalation"] = True
+        corrected.append(it)
+    return corrected
 
 
 # ---------------------------------------------------------------------------
