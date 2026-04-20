@@ -128,17 +128,79 @@ def extract_text_from_image(image_bytes: bytes) -> str | None:
 # ── WhatsApp Business Profile ───────────────────────────────────────────
 
 _META_APP_ID = "1461694011992339"
+_WA_PROFILE_SIZE = 640
+_WA_PROFILE_PADDING = 0.15  # 15% padding on each side so logo fits in circle
+
+
+def _prepare_profile_image(img_bytes: bytes) -> bytes:
+    """Resize and pad an image to fit well in WhatsApp's circular profile photo.
+
+    - Creates a 640x640 white square
+    - Centers the logo with padding so it doesn't get clipped by circle crop
+    - Returns PNG bytes
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        log.warning("WA PROFILE: Pillow not installed, skipping image processing")
+        return img_bytes
+
+    try:
+        img = Image.open(io.BytesIO(img_bytes))
+
+        # Convert to RGBA for transparency handling, then paste on white
+        if img.mode in ("RGBA", "LA", "P"):
+            bg = Image.new("RGB", img.size, (255, 255, 255))
+            if img.mode == "P":
+                img = img.convert("RGBA")
+            bg.paste(img, mask=img.split()[-1] if img.mode == "RGBA" else None)
+            img = bg
+        elif img.mode != "RGB":
+            img = img.convert("RGB")
+
+        size = _WA_PROFILE_SIZE
+        pad = int(size * _WA_PROFILE_PADDING)
+        available = size - 2 * pad  # area for the logo
+
+        # Resize logo to fit within the available area, keeping aspect ratio
+        w, h = img.size
+        scale = min(available / w, available / h)
+        new_w, new_h = int(w * scale), int(h * scale)
+        img = img.resize((new_w, new_h), Image.LANCZOS)
+
+        # Create white canvas and paste centered
+        canvas = Image.new("RGB", (size, size), (255, 255, 255))
+        x = (size - new_w) // 2
+        y = (size - new_h) // 2
+        canvas.paste(img, (x, y))
+
+        buf = io.BytesIO()
+        canvas.save(buf, format="PNG", optimize=True)
+        log.info("WA PROFILE: Image processed %dx%d → %dx%d (centered on %dx%d)",
+                 w, h, new_w, new_h, size, size)
+        return buf.getvalue()
+
+    except Exception as e:
+        log.error("WA PROFILE: Image processing failed: %s — using original", repr(e))
+        return img_bytes
 
 
 def update_wa_profile_photo(wa_api_key: str, phone_number_id: str,
                             img_bytes: bytes, mime_type: str = "image/png") -> dict:
     """Upload an image and set it as the WhatsApp Business profile photo.
 
+    Automatically resizes and pads the image to 640x640 with white background
+    so it looks good in WhatsApp's circular crop.
+
     Uses the Resumable Upload API to get a file handle, then sets it
     as profile_picture_handle on the WhatsApp Business Profile.
 
     Returns dict with keys: ok (bool), step, error (optional).
     """
+    # Pre-process: resize and pad for WhatsApp circle crop
+    img_bytes = _prepare_profile_image(img_bytes)
+    mime_type = "image/png"  # always PNG after processing
+
     headers = {"Authorization": f"Bearer {wa_api_key}"}
     file_size = len(img_bytes)
 

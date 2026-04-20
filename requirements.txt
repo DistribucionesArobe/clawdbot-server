@@ -13,3 +13,4 @@ rapidfuzz
 pgvector
 reportlab
 stripe
+Pillow
