@@ -802,160 +802,77 @@ def _dedup_cleanup():
     for k in stale:
         del _processed_msg_ids[k]
 
-@app.post("/webhook/whatsapp")
-async def whatsapp_webhook(request: Request):
-    payload = await request.json()
-    try:
-        phone_number_id = payload["entry"][0]["changes"][0]["value"]["metadata"]["phone_number_id"]
-    except Exception:
-        return {"ok": True}
+# ── Per-user message accumulator for rapid-fire messages ─────────────────
+# When a client sends 15 product lines as individual WhatsApp messages,
+# each arrives as a separate webhook. Without batching, we'd process each
+# one independently causing race conditions, duplicate responses, and chaos.
+#
+# Strategy:
+#   1. Each webhook extracts msg data and appends to an in-memory queue
+#   2. A per-user asyncio.Lock prevents concurrent processing
+#   3. Before processing, wait BATCH_WAIT_SECS for more messages to arrive
+#   4. Combine all queued text messages into one and process as a single call
+#   5. Interactive (button) clicks and images bypass batching — processed immediately
+import time as _time_mod
 
-    company = get_company_by_phone_number_id(phone_number_id)
-    if not company:
-        return {"ok": True}
+_BATCH_WAIT_SECS = 3.0           # seconds to wait for more messages
+_BATCH_MAX_WAIT_SECS = 12.0      # absolute max wait from first message in batch
+_user_locks: dict = {}            # (company_id, phone) → asyncio.Lock
+_user_msg_queues: dict = {}       # (company_id, phone) → [{"text":..., "ts":...}, ...]
+_user_batch_first_ts: dict = {}   # (company_id, phone) → timestamp of first msg in batch
 
-    value = payload["entry"][0]["changes"][0]["value"]
-    messages = value.get("messages") or []
-    if not messages:
-        return {"ok": True}
+def _get_user_lock(company_id: str, phone: str) -> asyncio.Lock:
+    key = (company_id, phone)
+    if key not in _user_locks:
+        _user_locks[key] = asyncio.Lock()
+    # Periodic cleanup of stale locks (>30 min unused)
+    if len(_user_locks) > 200:
+        _now = _time_mod.time()
+        stale = [k for k in list(_user_locks.keys())
+                 if k not in _user_msg_queues and k not in _user_batch_first_ts]
+        for k in stale[:50]:
+            _user_locks.pop(k, None)
+    return _user_locks[key]
 
-    msg = messages[0]
 
-    # ── Deduplication: Meta retries webhooks if response is slow ─────────
-    import time
-    wa_msg_id = msg.get("id", "")
-    if wa_msg_id:
-        if wa_msg_id in _processed_msg_ids:
-            log.debug(f"DEDUP: skipping already-processed message {wa_msg_id}")
-            return {"ok": True}
-        _processed_msg_ids[wa_msg_id] = time.time()
-        if len(_processed_msg_ids) > 500:
-            _dedup_cleanup()
+def _queue_message(company_id: str, phone: str, text: str):
+    """Append a text message to the user's queue for batching."""
+    key = (company_id, phone)
+    if key not in _user_msg_queues:
+        _user_msg_queues[key] = []
+    _user_msg_queues[key].append({"text": text, "ts": _time_mod.time()})
+    if key not in _user_batch_first_ts:
+        _user_batch_first_ts[key] = _time_mod.time()
 
-    from_phone = msg.get("from")
-    msg_type = msg.get("type", "text")
 
-    text = ""
-    if msg_type == "text":
-        text = (msg.get("text") or {}).get("body") or ""
+def _drain_queue(company_id: str, phone: str) -> list:
+    """Take all queued messages for this user and clear the queue."""
+    key = (company_id, phone)
+    msgs = _user_msg_queues.pop(key, [])
+    _user_batch_first_ts.pop(key, None)
+    return msgs
 
-    elif msg_type == "image":
-        image_id = (msg.get("image") or {}).get("id")
-        caption = (msg.get("image") or {}).get("caption") or ""
 
-        _st_check = get_quote_state(company["company_id"], from_phone) or {}
-        if _st_check.get("awaiting_comprobante"):
-            try:
-                conn2 = get_conn()
-                cur2 = conn2.cursor()
-                cur2.execute(
-                    "SELECT owner_phone, wa_api_key, wa_phone_number_id FROM companies WHERE id=%s",
-                    (company["company_id"],)
-                )
-                owner_row = cur2.fetchone()
-                cur2.close()
-                conn2.close()
-                if owner_row and owner_row[0]:
-                    notify_owner_comprobante(
-                        wa_api_key=owner_row[1],
-                        phone_number_id=owner_row[2],
-                        owner_phone=owner_row[0],
-                        client_phone=from_phone,
-                        state=_st_check,
-                    )
-            except Exception as e:
-                log.error("COMPROBANTE NOTIFY ERROR:", repr(e))
-            _st_check.pop("awaiting_comprobante", None)
-            upsert_quote_state(company["company_id"], from_phone, _st_check)
-            _bot_reply_comprobante = "✅ ¡Comprobante recibido! Le avisamos a la empresa y en breve te confirman tu pedido. 🙏"
-            log_message(company["company_id"], from_phone, "user", "📎 [Imagen de comprobante de pago]")
-            log_message(company["company_id"], from_phone, "bot", _bot_reply_comprobante, {
-                "cart":  _st_check.get("cart") or [],
-                "folio": _st_check.get("folio") or None,
-            })
-            send_whatsapp_text(
-                wa_api_key=company["wa_api_key"],
-                phone_number_id=company["wa_phone_number_id"],
-                to=from_phone,
-                text=_bot_reply_comprobante,
-            )
-            return {"ok": True}
+def _reply_text_for_log(r) -> str:
+    if isinstance(r, dict):
+        rtype = r.get("type", "")
+        if rtype in ("text_then_list_sections", "text_then_buttons"):
+            body = (r.get("text") or "") + "\n" + (r.get("body") or "")
+        else:
+            body = r.get("body") or ""
+        for section in (r.get("sections") or []):
+            for row in (section.get("rows") or []):
+                body += "\n  " + row.get("id","") + " " + row.get("title","") + " " + row.get("description","")
+        for opt in (r.get("options") or []):
+            body += "\n  • " + str(opt)
+        return body.strip()
+    return (r or "").strip()
 
-        if image_id and company.get("wa_api_key"):
-            try:
-                img_bytes = download_whatsapp_media(image_id, company["wa_api_key"])
-                extracted = extract_text_from_image(img_bytes)
-                if extracted:
-                    text = f"{caption}\n{extracted}".strip() if caption else extracted
-                    log.info("IMAGE EXTRACTED:", text[:200])
-                else:
-                    send_whatsapp_text(
-                        wa_api_key=company["wa_api_key"],
-                        phone_number_id=company["wa_phone_number_id"],
-                        to=from_phone,
-                        text="📷 Vi tu imagen pero no encontré una lista de productos.\n\nMándame el pedido así:\n10 cemento, 5 varilla 3/8",
-                    )
-                    return {"ok": True}
-            except Exception as e:
-                log.error("IMAGE PROCESSING ERROR:", repr(e))
-                send_whatsapp_text(
-                    wa_api_key=company["wa_api_key"],
-                    phone_number_id=company["wa_phone_number_id"],
-                    to=from_phone,
-                    text="No pude leer la imagen 😔 Intenta enviarla más clara o escribe el pedido.",
-                )
-                return {"ok": True}
 
-    elif msg_type == "interactive":
-        interactive = msg.get("interactive") or {}
-        itype = interactive.get("type")
-        if itype == "list_reply":
-            list_reply = interactive.get("list_reply") or {}
-            lr_id = (list_reply.get("id") or "").strip()
-            lr_title = (list_reply.get("title") or "").strip()
-            text = lr_id if lr_id.upper().startswith("PICK_") else lr_title
-        elif itype == "button_reply":
-            text = (interactive.get("button_reply") or {}).get("title") or ""
-        log.debug(f"INTERACTIVE MSG: type={itype} text={text!r} from={from_phone}")
-
-    if text:
-        log_message(company["company_id"], from_phone, "user", text)
-
-    log.info(f"WEBHOOK DISPATCH: msg_type={msg_type} text={text!r} is_interactive={msg_type == 'interactive'}")
-    reply = build_reply_for_company(
-        company["company_id"], text,
-        wa_from=from_phone,
-        is_interactive=(msg_type == "interactive"),
-    )
-    log.info(f"WEBHOOK REPLY: type={type(reply).__name__} empty={not reply} preview={str(reply)[:120] if reply else 'NONE'}")
-
+def _send_reply(company, from_phone, reply):
+    """Send a reply dict/str to the user via WhatsApp."""
     if not reply:
-        return {"ok": True}
-
-    def _reply_text_for_log(r) -> str:
-        if isinstance(r, dict):
-            rtype = r.get("type", "")
-            if rtype in ("text_then_list_sections", "text_then_buttons"):
-                body = (r.get("text") or "") + "\n" + (r.get("body") or "")
-            else:
-                body = r.get("body") or ""
-            for section in (r.get("sections") or []):
-                for row in (section.get("rows") or []):
-                    body += "\n  " + row.get("id","") + " " + row.get("title","") + " " + row.get("description","")
-            for opt in (r.get("options") or []):
-                body += "\n  • " + str(opt)
-            return body.strip()
-        return (r or "").strip()
-
-    try:
-        _state_for_log = get_quote_state(company["company_id"], from_phone) or {}
-        _log_extra = {
-            "cart":  _state_for_log.get("cart") or [],
-            "folio": _state_for_log.get("folio") or None,
-        }
-    except Exception:
-        _log_extra = {}
-    log_message(company["company_id"], from_phone, "bot", _reply_text_for_log(reply), _log_extra)
+        return
 
     if isinstance(reply, dict) and reply.get("type") == "list":
         send_whatsapp_list(
@@ -1031,6 +948,235 @@ async def whatsapp_webhook(request: Request):
             to=from_phone,
             text=text_body,
         )
+
+
+def _extract_msg_content(msg, company):
+    """
+    Extract text from a WhatsApp message object.
+    Returns (text, msg_type, should_batch, early_reply).
+    - should_batch: True if this message should be accumulated with others
+    - early_reply: if set, send this reply immediately and skip further processing
+    """
+    msg_type = msg.get("type", "text")
+    from_phone = msg.get("from")
+    text = ""
+    early_reply = None
+
+    if msg_type == "text":
+        text = (msg.get("text") or {}).get("body") or ""
+
+    elif msg_type == "image":
+        image_id = (msg.get("image") or {}).get("id")
+        caption = (msg.get("image") or {}).get("caption") or ""
+
+        _st_check = get_quote_state(company["company_id"], from_phone) or {}
+        if _st_check.get("awaiting_comprobante"):
+            try:
+                conn2 = get_conn()
+                cur2 = conn2.cursor()
+                cur2.execute(
+                    "SELECT owner_phone, wa_api_key, wa_phone_number_id FROM companies WHERE id=%s",
+                    (company["company_id"],)
+                )
+                owner_row = cur2.fetchone()
+                cur2.close()
+                conn2.close()
+                if owner_row and owner_row[0]:
+                    notify_owner_comprobante(
+                        wa_api_key=owner_row[1],
+                        phone_number_id=owner_row[2],
+                        owner_phone=owner_row[0],
+                        client_phone=from_phone,
+                        state=_st_check,
+                    )
+            except Exception as e:
+                log.error("COMPROBANTE NOTIFY ERROR:", repr(e))
+            _st_check.pop("awaiting_comprobante", None)
+            upsert_quote_state(company["company_id"], from_phone, _st_check)
+            _bot_reply_comprobante = "✅ ¡Comprobante recibido! Le avisamos a la empresa y en breve te confirman tu pedido. 🙏"
+            log_message(company["company_id"], from_phone, "user", "📎 [Imagen de comprobante de pago]")
+            log_message(company["company_id"], from_phone, "bot", _bot_reply_comprobante, {
+                "cart":  _st_check.get("cart") or [],
+                "folio": _st_check.get("folio") or None,
+            })
+            send_whatsapp_text(
+                wa_api_key=company["wa_api_key"],
+                phone_number_id=company["wa_phone_number_id"],
+                to=from_phone,
+                text=_bot_reply_comprobante,
+            )
+            return "", msg_type, False, "HANDLED"
+
+        if image_id and company.get("wa_api_key"):
+            try:
+                img_bytes = download_whatsapp_media(image_id, company["wa_api_key"])
+                extracted = extract_text_from_image(img_bytes)
+                if extracted:
+                    text = f"{caption}\n{extracted}".strip() if caption else extracted
+                    log.info("IMAGE EXTRACTED:", text[:200])
+                else:
+                    send_whatsapp_text(
+                        wa_api_key=company["wa_api_key"],
+                        phone_number_id=company["wa_phone_number_id"],
+                        to=from_phone,
+                        text="📷 Vi tu imagen pero no encontré una lista de productos.\n\nMándame el pedido así:\n10 cemento, 5 varilla 3/8",
+                    )
+                    return "", msg_type, False, "HANDLED"
+            except Exception as e:
+                log.error("IMAGE PROCESSING ERROR:", repr(e))
+                send_whatsapp_text(
+                    wa_api_key=company["wa_api_key"],
+                    phone_number_id=company["wa_phone_number_id"],
+                    to=from_phone,
+                    text="No pude leer la imagen 😔 Intenta enviarla más clara o escribe el pedido.",
+                )
+                return "", msg_type, False, "HANDLED"
+
+    elif msg_type == "interactive":
+        interactive = msg.get("interactive") or {}
+        itype = interactive.get("type")
+        if itype == "list_reply":
+            list_reply = interactive.get("list_reply") or {}
+            lr_id = (list_reply.get("id") or "").strip()
+            lr_title = (list_reply.get("title") or "").strip()
+            text = lr_id if lr_id.upper().startswith("PICK_") else lr_title
+        elif itype == "button_reply":
+            text = (interactive.get("button_reply") or {}).get("title") or ""
+        log.debug(f"INTERACTIVE MSG: type={itype} text={text!r} from={from_phone}")
+
+    # Decide if this message should be batched:
+    # - Interactive (button/list clicks) → NEVER batch, process immediately
+    # - Images → don't batch (already handled above or extracted text is complete)
+    # - Text messages → batch if they look like product lines or short fragments
+    should_batch = (msg_type == "text")
+
+    return text, msg_type, should_batch, early_reply
+
+
+@app.post("/webhook/whatsapp")
+async def whatsapp_webhook(request: Request):
+    payload = await request.json()
+    try:
+        phone_number_id = payload["entry"][0]["changes"][0]["value"]["metadata"]["phone_number_id"]
+    except Exception:
+        return {"ok": True}
+
+    company = get_company_by_phone_number_id(phone_number_id)
+    if not company:
+        return {"ok": True}
+
+    value = payload["entry"][0]["changes"][0]["value"]
+    messages = value.get("messages") or []
+    if not messages:
+        return {"ok": True}
+
+    msg = messages[0]
+
+    # ── Deduplication: Meta retries webhooks if response is slow ─────────
+    wa_msg_id = msg.get("id", "")
+    if wa_msg_id:
+        if wa_msg_id in _processed_msg_ids:
+            log.debug(f"DEDUP: skipping already-processed message {wa_msg_id}")
+            return {"ok": True}
+        _processed_msg_ids[wa_msg_id] = _time_mod.time()
+        if len(_processed_msg_ids) > 500:
+            _dedup_cleanup()
+
+    from_phone = msg.get("from")
+
+    # ── Extract message content ─────────────────────────────────────────
+    text, msg_type, should_batch, early_reply = _extract_msg_content(msg, company)
+    if early_reply == "HANDLED":
+        return {"ok": True}
+
+    # ── Interactive messages (button clicks) bypass batching entirely ────
+    if msg_type == "interactive" or not should_batch:
+        # Acquire lock to avoid racing with a batch that's being processed
+        lock = _get_user_lock(company["company_id"], from_phone)
+        async with lock:
+            if text:
+                log_message(company["company_id"], from_phone, "user", text)
+            log.info(f"WEBHOOK IMMEDIATE: msg_type={msg_type} text={text!r}")
+            # Run blocking bot logic in a thread to not block the event loop
+            reply = await asyncio.to_thread(
+                build_reply_for_company,
+                company["company_id"], text,
+                wa_from=from_phone,
+                is_interactive=(msg_type == "interactive"),
+            )
+            if reply:
+                try:
+                    _state_for_log = get_quote_state(company["company_id"], from_phone) or {}
+                    _log_extra = {"cart": _state_for_log.get("cart") or [], "folio": _state_for_log.get("folio") or None}
+                except Exception:
+                    _log_extra = {}
+                log_message(company["company_id"], from_phone, "bot", _reply_text_for_log(reply), _log_extra)
+                _send_reply(company, from_phone, reply)
+        return {"ok": True}
+
+    # ── Text messages: accumulate and batch ──────────────────────────────
+    key = (company["company_id"], from_phone)
+    lock = _get_user_lock(company["company_id"], from_phone)
+
+    # If someone else is already processing for this user, just queue and return fast
+    if lock.locked():
+        if text:
+            _queue_message(company["company_id"], from_phone, text)
+            log.info(f"BATCH QUEUE (lock held): queued '{text[:60]}' for {from_phone}")
+        return {"ok": True}
+
+    # We're the first — acquire lock and become the batch processor
+    async with lock:
+        if text:
+            _queue_message(company["company_id"], from_phone, text)
+            log.info(f"BATCH START: queued '{text[:60]}' for {from_phone}, waiting {_BATCH_WAIT_SECS}s...")
+
+        # Wait for more messages to accumulate
+        _batch_start = _time_mod.time()
+        _last_count = 0
+        while True:
+            await asyncio.sleep(_BATCH_WAIT_SECS)
+            queued = _user_msg_queues.get(key, [])
+            _elapsed = _time_mod.time() - _batch_start
+
+            # If no new messages arrived since last check, or we hit max wait → process
+            if len(queued) == _last_count or _elapsed >= _BATCH_MAX_WAIT_SECS:
+                break
+            # New messages arrived — wait one more cycle
+            _last_count = len(queued)
+            log.info(f"BATCH EXTEND: {len(queued)} msgs queued for {from_phone}, waiting more... ({_elapsed:.1f}s)")
+
+        # Drain all accumulated messages
+        batch = _drain_queue(company["company_id"], from_phone)
+        if not batch:
+            return {"ok": True}
+
+        # Combine all texts: join with newline (like a product list)
+        all_texts = [m["text"] for m in batch if m.get("text")]
+        combined_text = "\n".join(all_texts)
+        log.info(f"BATCH PROCESS: {len(batch)} msgs for {from_phone} → combined {len(combined_text)} chars: {combined_text[:120]!r}")
+
+        # Log each individual message as "user" for conversation history
+        for m_text in all_texts:
+            log_message(company["company_id"], from_phone, "user", m_text)
+
+        # Process the combined batch as one call (in thread to not block event loop)
+        reply = await asyncio.to_thread(
+            build_reply_for_company,
+            company["company_id"], combined_text,
+            wa_from=from_phone,
+            is_interactive=False,
+        )
+        log.info(f"BATCH REPLY: type={type(reply).__name__} empty={not reply} preview={str(reply)[:120] if reply else 'NONE'}")
+
+        if reply:
+            try:
+                _state_for_log = get_quote_state(company["company_id"], from_phone) or {}
+                _log_extra = {"cart": _state_for_log.get("cart") or [], "folio": _state_for_log.get("folio") or None}
+            except Exception:
+                _log_extra = {}
+            log_message(company["company_id"], from_phone, "bot", _reply_text_for_log(reply), _log_extra)
+            _send_reply(company, from_phone, reply)
 
     return {"ok": True}
 
@@ -1497,27 +1643,12 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
     if is_interactive:
         log.debug(f"BTN_DEBUG: raw_stripped={_raw_current_stripped!r} is_button_click={_is_button_click} in_triggers={_raw_current_stripped in _button_click_triggers}")
 
-    # Flush stale message buffer (>15s old) — prepend to current message
-    # SKIP if current message is a button click (prevents buffer from mangling it)
-    if wa_from and not _is_button_click:
-        import time as _tflush
-        _flush_state = get_quote_state(company_id, wa_from) or {}
-        _flush_buf = _flush_state.get("_msg_buffer")
-        if _flush_buf:
-            _flush_age = _tflush.time() - (_flush_buf.get("ts") or 0)
-            if _flush_age > 15:
-                _old = _flush_buf.get("texts") or []
-                if _old:
-                    user_text = " ".join(_old) + " " + user_text
-                _flush_state.pop("_msg_buffer", None)
-                upsert_quote_state(company_id, wa_from, _flush_state)
-    elif wa_from and _is_button_click:
-        # Clear the buffer silently — the button click should take priority
+    # Clean up any legacy _msg_buffer from DB state (batching now handled at webhook level)
+    if wa_from:
         _flush_state = get_quote_state(company_id, wa_from) or {}
         if _flush_state.get("_msg_buffer"):
             _flush_state.pop("_msg_buffer", None)
             upsert_quote_state(company_id, wa_from, _flush_state)
-            log.info(f"BUTTON CLICK: cleared stale buffer for {wa_from}")
 
     if is_interactive:
         user_text = (user_text or "").strip()
@@ -3176,82 +3307,9 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             hint_txt = "\n\nEj:\n10 cemento\n5 varilla 3/8\n20 block 15x20"
         return f"¡Claro! Mándame el nombre del material y la cantidad:{hint_txt}\n\nO todo en una línea separado por comas."
 
-    # ── Message accumulator for rapid-fire short messages ─────────────────────
-    # People sometimes type in fragments: "me puedes" / "pasar" / "precio" / "de material"
-    # We buffer short messages (no numbers, ≤4 words) and concatenate within 8s window
-    import time as _time
-    _msg_words = user_text.strip().split()
-    _has_digits = bool(re.search(r"\d", user_text))
-    _is_short_fragment = len(_msg_words) <= 4 and not _has_digits and len(user_text.strip()) < 30
-
-    # Don't buffer messages that contain clear intent keywords (cotizar, precio, horario, etc.)
-    # Include common misspellings: cotisame/cotiseme (s→z), presio (s→c)
-    _intent_keywords_nobuffer = re.search(
-        r"\b(cotiz|cotis|coti[sz]a|coti[sz]e|precio|presio|cuanto|cuánto|necesito|ocupo|quiero|"
-        r"horario|ubicacion|ubicación|factura|pagar|asesor|ayuda|hablar|gracias|hola|buenas|"
-        r"buenos|menu|menú|salir|cancelar)\b",
-        user_text.lower()
-    )
-    if _intent_keywords_nobuffer:
-        _is_short_fragment = False
-
-    # Button clicks (interactive) should NEVER be buffered
-    if _is_short_fragment and wa_from and not _is_button_click:
-        _buf_state = get_quote_state(company_id, wa_from) or {}
-        _buf = _buf_state.get("_msg_buffer") or {}
-        _buf_ts = _buf.get("ts") or 0
-        _buf_texts = _buf.get("texts") or []
-        _now = _time.time()
-
-        if _buf_texts and (_now - _buf_ts) < 8:
-            # Append to existing buffer
-            _buf_texts.append(user_text.strip())
-            _combined = " ".join(_buf_texts)
-            # Check if combined text matches a conversational intent
-            _combined_norm = re.sub(r"[¿?¡!.,]", "", norm_name(_combined)).strip()
-            _is_intent = any(re.search(p, _combined_norm) for p in _intent_patterns)
-            if _is_intent:
-                # Clear buffer and redirect to cotizar
-                _buf_state.pop("_msg_buffer", None)
-                upsert_quote_state(company_id, wa_from, _buf_state)
-                try:
-                    conn_wh = get_conn()
-                    cur_wh = conn_wh.cursor()
-                    cur_wh.execute("SELECT welcome_products_hint FROM companies WHERE id=%s", (company_id,))
-                    row_wh = cur_wh.fetchone()
-                    cur_wh.close()
-                    conn_wh.close()
-                    hint = (row_wh[0] or "").strip() if row_wh else ""
-                except Exception:
-                    hint = ""
-                if hint:
-                    ejemplos = "\n".join(f"10 {p.strip()}" for p in hint.split(",") if p.strip())
-                    hint_txt = f"\n\nEj:\n{ejemplos}"
-                else:
-                    hint_txt = "\n\nEj:\n10 cemento\n5 varilla 3/8\n20 block 15x20"
-                return f"¡Claro! Mándame el nombre del material y la cantidad:{hint_txt}"
-            else:
-                # Keep buffering — don't respond yet
-                _buf_state["_msg_buffer"] = {"ts": _buf_ts, "texts": _buf_texts}
-                upsert_quote_state(company_id, wa_from, _buf_state)
-                return None  # Signal to webhook: don't send any reply
-        else:
-            # Start new buffer
-            _buf_state["_msg_buffer"] = {"ts": _now, "texts": [user_text.strip()]}
-            upsert_quote_state(company_id, wa_from, _buf_state)
-            return None  # Signal to webhook: don't send any reply
-
-    # Clear any stale buffer since we got a real message (with numbers or long enough)
-    if wa_from:
-        _buf_state2 = get_quote_state(company_id, wa_from) or {}
-        if _buf_state2.get("_msg_buffer"):
-            # There was a buffer — prepend buffered text to current message
-            _old_texts = _buf_state2["_msg_buffer"].get("texts") or []
-            if _old_texts:
-                user_text = " ".join(_old_texts) + " " + user_text
-                tnorm = norm_name(user_text)
-            _buf_state2.pop("_msg_buffer", None)
-            upsert_quote_state(company_id, wa_from, _buf_state2)
+    # NOTE: Message batching/accumulation is now handled at the webhook level
+    # (per-user async lock + in-memory queue with 3s debounce window).
+    # The old _msg_buffer DB-based approach has been removed.
 
     # ── Handle hours/location question BEFORE LLM parser ──────────────
     # Otherwise LLM parses "Horarios y ubicación" as product names
