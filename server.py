@@ -1666,7 +1666,9 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         # Exact match: pure greetings only
         if t in {"hola", "buenas", "hey", "holi", "menu", "menú", "ayuda", "inicio",
                  "buen dia", "buen día", "buenos dias", "buenos días",
-                 "buenas tardes", "buenas noches"}:
+                 "buenas tardes", "buenas noches",
+                 "que onda", "qué onda", "que tal", "qué tal", "que paso", "qué paso",
+                 "como estas", "cómo estás", "como andas", "cómo andas"}:
             return True
         # If the message contains product/order signals, it's NOT a pure greeting
         # e.g. "hola buenas tardes me podras cotizar 3 cajas de redimix"
@@ -1680,6 +1682,12 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         if t.startswith("hola"):
             return True
         if t.startswith("buenos") or t.startswith("buenas") or t.startswith("buen"):
+            return True
+        if t.startswith("que onda") or t.startswith("qué onda"):
+            return True
+        if t.startswith("que tal") or t.startswith("qué tal"):
+            return True
+        if t.startswith("como estas") or t.startswith("cómo estás"):
             return True
         return False
 
@@ -3281,10 +3289,12 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         _llm_result = _try_llm_parse(company_id, user_text)
 
     # ── LLM detectó que NO es una orden → escalar a humano directo ──
-    # Also skip for hours/location questions — they have a dedicated handler
+    # Skip for hours/location questions and greetings — they have dedicated handlers
     if _llm_result and _llm_result.get("non_order"):
         if looks_like_hours_question(user_text):
             log.warning(f"LLM NON_ORDER but is hours question — skipping escalation. text='{user_text[:60]}'")
+        elif _is_greeting_like(tnorm):
+            log.warning(f"LLM NON_ORDER but is greeting — skipping escalation. text='{user_text[:60]}'")
         else:
             log.info(f"LLM NON_ORDER: escalating to human. text='{user_text[:60]}'")
             return _escalate_non_quote(company_id, wa_from, user_text)
