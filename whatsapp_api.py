@@ -5,6 +5,7 @@ Thin wrappers around the Meta Graph API for sending messages,
 downloading media, and extracting text from images via OpenAI Vision.
 """
 
+import io
 import logging
 import os
 
@@ -122,6 +123,58 @@ def extract_text_from_image(image_bytes: bytes) -> str | None:
     except Exception as e:
         log.error("VISION ERROR: %s", repr(e))
         return None
+
+
+# ── WhatsApp Business Profile ───────────────────────────────────────────
+
+def update_wa_profile_photo(wa_api_key: str, phone_number_id: str,
+                            img_bytes: bytes, mime_type: str = "image/png") -> dict:
+    """Upload an image and set it as the WhatsApp Business profile photo.
+
+    Returns dict with keys: ok (bool), step, error (optional).
+    """
+    headers = {"Authorization": f"Bearer {wa_api_key}"}
+
+    # Step 1: Upload image as media
+    try:
+        upload_resp = requests.post(
+            f"{WA_API_BASE}/{phone_number_id}/media",
+            headers=headers,
+            files={"file": ("profile.png", io.BytesIO(img_bytes), mime_type)},
+            data={"messaging_product": "whatsapp", "type": mime_type},
+            timeout=30,
+        )
+    except Exception as e:
+        log.error("WA PROFILE: media upload error: %s", repr(e))
+        return {"ok": False, "step": "media_upload", "error": str(e)}
+
+    if upload_resp.status_code != 200:
+        log.error("WA PROFILE: media upload failed %s: %s",
+                  upload_resp.status_code, upload_resp.text[:500])
+        return {"ok": False, "step": "media_upload",
+                "error": upload_resp.text[:500]}
+
+    media_id = upload_resp.json().get("id")
+    log.info("WA PROFILE: media uploaded, id=%s", media_id)
+
+    # Step 2: Set as profile picture
+    try:
+        profile_resp = requests.post(
+            f"{WA_API_BASE}/{phone_number_id}/whatsapp_business_profile",
+            headers={**headers, "Content-Type": "application/json"},
+            json={"messaging_product": "whatsapp",
+                  "profile_picture_handle": media_id},
+            timeout=30,
+        )
+    except Exception as e:
+        log.error("WA PROFILE: profile update error: %s", repr(e))
+        return {"ok": False, "step": "profile_update", "error": str(e)}
+
+    ok = profile_resp.status_code == 200
+    log.info("WA PROFILE: profile update %s — %s",
+             "OK" if ok else "FAILED", profile_resp.text[:300])
+    return {"ok": ok, "step": "profile_update",
+            "response": profile_resp.text[:500]}
 
 
 # ── Phone normalization ──────────────────────────────────────────────────

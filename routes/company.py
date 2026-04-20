@@ -13,6 +13,7 @@ from pydantic import BaseModel, validator
 
 from auth import require_company_id
 from db import get_conn
+from whatsapp_api import update_wa_profile_photo
 
 log = logging.getLogger("cotizaexpress.company")
 
@@ -290,6 +291,7 @@ async def upload_company_logo(
 
     conn = None
     cur  = None
+    wa_profile_result = None
     try:
         conn = get_conn()
         cur  = conn.cursor()
@@ -300,7 +302,30 @@ async def upload_company_logo(
         if not cur.fetchone():
             raise HTTPException(status_code=404, detail="Company no encontrada")
         conn.commit()
-        return {"ok": True, "logo_url": data_url}
+
+        # Also update WhatsApp Business profile photo if WA is configured
+        cur.execute(
+            "SELECT wa_api_key, wa_phone_number_id FROM companies WHERE id=%s",
+            (company_id,),
+        )
+        wa_row = cur.fetchone()
+        if wa_row and wa_row[0] and wa_row[1]:
+            log.info("LOGO UPLOAD: also updating WhatsApp profile photo for company=%s", company_id)
+            wa_profile_result = update_wa_profile_photo(
+                wa_api_key=wa_row[0],
+                phone_number_id=wa_row[1],
+                img_bytes=content,
+                mime_type=mime,
+            )
+            log.info("LOGO UPLOAD: WA profile result: %s", wa_profile_result)
+        else:
+            log.info("LOGO UPLOAD: WhatsApp not configured, skipping profile photo update")
+
+        return {
+            "ok": True,
+            "logo_url": data_url,
+            "wa_profile_updated": wa_profile_result.get("ok") if wa_profile_result else None,
+        }
     finally:
         if cur:  cur.close()
         if conn: conn.close()
