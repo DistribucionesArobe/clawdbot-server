@@ -228,10 +228,10 @@ def combine_with_cotizabot(client_logo_bytes: bytes) -> bytes:
         # Create white canvas
         canvas = Image.new("RGB", (SIZE, SIZE), (255, 255, 255))
 
-        # --- Client logo: top 55% of canvas ---
-        client_area_h = int(SIZE * 0.52)
+        # --- Client logo: top 45% of canvas ---
+        client_area_h = int(SIZE * 0.42)
         client_area_w = int(SIZE * 0.75)
-        client_pad_top = int(SIZE * 0.06)
+        client_pad_top = int(SIZE * 0.04)
 
         cw, ch = client_img.size
         c_scale = min(client_area_w / cw, client_area_h / ch)
@@ -242,10 +242,19 @@ def combine_with_cotizabot(client_logo_bytes: bytes) -> bytes:
         cy = client_pad_top + (client_area_h - new_ch) // 2
         canvas.paste(client_img, (cx, cy))
 
-        # --- CotizaBot logo: bottom 30% ---
-        bot_area_h = int(SIZE * 0.28)
-        bot_area_w = int(SIZE * 0.65)
-        bot_y_start = int(SIZE * 0.65)
+        # --- Subtle separator line ---
+        from PIL import ImageDraw
+        draw = ImageDraw.Draw(canvas)
+        sep_y = int(SIZE * 0.49)
+        line_w = int(SIZE * 0.35)
+        line_x = (SIZE - line_w) // 2
+        draw.line([(line_x, sep_y), (line_x + line_w, sep_y)],
+                  fill=(215, 215, 215), width=1)
+
+        # --- CotizaBot logo: bottom 45% ---
+        bot_area_h = int(SIZE * 0.42)
+        bot_area_w = int(SIZE * 0.75)
+        bot_y_start = int(SIZE * 0.52)
 
         bw, bh = cbot_img.size
         b_scale = min(bot_area_w / bw, bot_area_h / bh)
@@ -257,15 +266,6 @@ def combine_with_cotizabot(client_logo_bytes: bytes) -> bytes:
 
         # Paste with alpha mask for transparency
         canvas.paste(cbot_img, (bx, by), mask=cbot_img.split()[-1])
-
-        # --- Subtle separator line ---
-        from PIL import ImageDraw
-        draw = ImageDraw.Draw(canvas)
-        sep_y = int(SIZE * 0.62)
-        line_w = int(SIZE * 0.4)
-        line_x = (SIZE - line_w) // 2
-        draw.line([(line_x, sep_y), (line_x + line_w, sep_y)],
-                  fill=(220, 220, 220), width=1)
 
         buf = io.BytesIO()
         canvas.save(buf, format="PNG", optimize=True)

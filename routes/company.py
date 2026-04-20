@@ -13,7 +13,7 @@ from pydantic import BaseModel, validator
 
 from auth import require_company_id
 from db import get_conn
-from whatsapp_api import update_wa_profile_photo
+from whatsapp_api import update_wa_profile_photo, combine_with_cotizabot, _prepare_profile_image
 
 log = logging.getLogger("cotizaexpress.company")
 
@@ -328,6 +328,35 @@ async def upload_company_logo(
             "logo_url": data_url,
             "wa_profile_updated": wa_profile_result.get("ok") if wa_profile_result else None,
         }
+    finally:
+        if cur:  cur.close()
+        if conn: conn.close()
+
+
+@router.get("/api/company/logo/wa-preview")
+def wa_profile_preview(request: Request, with_cotizabot: bool = False):
+    """Return a preview of what the WhatsApp profile photo will look like."""
+    company_id = require_company_id(request)
+    conn = None
+    cur = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT logo_url FROM companies WHERE id=%s", (company_id,))
+        row = cur.fetchone()
+        if not row or not row[0] or not row[0].startswith("data:"):
+            raise HTTPException(status_code=400, detail="Primero sube un logo")
+
+        header, b64_data = row[0].split(",", 1)
+        img_bytes = base64.b64decode(b64_data)
+
+        if with_cotizabot:
+            result_bytes = combine_with_cotizabot(img_bytes)
+        else:
+            result_bytes = _prepare_profile_image(img_bytes)
+
+        result_b64 = base64.b64encode(result_bytes).decode()
+        return {"ok": True, "preview": f"data:image/png;base64,{result_b64}"}
     finally:
         if cur:  cur.close()
         if conn: conn.close()
