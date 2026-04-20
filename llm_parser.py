@@ -573,40 +573,124 @@ def _post_correct_items(items: list[dict], original_text: str) -> list[dict]:
     """
     Fix known LLM misparses after the fact.
 
-    Currently handles:
-    - User said "canal de amarre" but LLM returned "angulo de amarre" → null out
-      the key so it falls through to smart_search / DEFAULT logic, which will
-      correctly find the canal product.
+    Two checks:
+    1. Specific: "canal de amarre" → never "angulo de amarre"
+    2. General: if the user's first noun (e.g. "canal") doesn't match the
+       product's first word (e.g. "angulo"), null the key so smart_search
+       re-resolves it correctly. This catches ALL product-type swaps, not
+       just the ones we know about.
     """
     if not items or not original_text:
-        return items
-
-    orig_lower = original_text.lower()
-    has_canal_amarre = bool(re.search(r"\bcanal(?:es)?\s+(?:de\s+)?amarre\b", orig_lower))
-
-    if not has_canal_amarre:
         return items
 
     import logging
     _log = logging.getLogger("cotizaexpress.llm_parser")
 
+    # ── Build a map of what the user actually asked for ────────────────
+    # Parse "15 canal de amarre, 24 tablaroca" → {item_index: first_product_word}
+    # We match each LLM item's matched_text back to the original to extract
+    # the user's intended product type (first non-numeric word).
+
+    # Words that are filler, not product types
+    _FILLER = {"de", "del", "la", "las", "los", "el", "un", "una", "unos",
+               "unas", "para", "con", "por", "en", "y", "o", "x", "mt",
+               "mts", "metro", "metros", "pza", "pzas", "pieza", "piezas",
+               "rollo", "rollos", "caja", "cajas", "bolsa", "bolsas",
+               "bulto", "bultos", "kg", "kgs", "lt", "lts", "pqt", "cal",
+               "calibre", "mm", "cm", "m", "pulgada", "pulgadas"}
+
+    def _first_product_word(text: str) -> str:
+        """Extract the first meaningful product-type word from text."""
+        text_n = norm_key(text)
+        for tok in re.findall(r"[a-z]{3,}", text_n):
+            if tok not in _FILLER and not tok.isdigit():
+                return tok
+        return ""
+
     corrected = []
     for it in items:
         key = it.get("key") or ""
         name = it.get("name") or ""
-        # If the LLM returned an "angulo" product but the user said "canal de amarre"
-        if "angulo" in key or "angulo" in name.lower():
-            _log.warning(
-                "POST-CORRECT: user said 'canal de amarre' but LLM returned '%s' — "
-                "nulling key so DEFAULT canal is used instead", key or name
-            )
-            it["key"] = None
-            it["name"] = "canal"
-            it["notes"] = "post-corrected: canal de amarre, not angulo"
-            it["confidence"] = 0.5  # force needs_escalation so smart_search kicks in
-            it["needs_escalation"] = True
+        matched = it.get("matched_text") or ""
+        conf = it.get("confidence", 0)
+
+        # Only check high-confidence matches — low-confidence already go to fallback
+        if not key or conf < 0.7:
+            corrected.append(it)
+            continue
+
+        # What the user said (from matched_text which is the original fragment)
+        user_word = _first_product_word(matched)
+        # What the LLM returned (from the catalog product name)
+        product_word = _first_product_word(name) or _first_product_word(key)
+
+        if user_word and product_word and user_word != product_word:
+            # The user said one product type, the LLM returned a different one.
+            # Check if they're known synonyms (e.g. "pija" vs "tornillo")
+            if not _are_synonym_types(user_word, product_word):
+                _log.warning(
+                    "POST-CORRECT TYPE MISMATCH: user said '%s' (word='%s') "
+                    "but LLM returned '%s' (word='%s') — nulling key for re-search",
+                    matched, user_word, name, product_word
+                )
+                it["key"] = None
+                it["name"] = user_word  # use the user's word for smart_search
+                it["notes"] = f"post-corrected: user said '{user_word}', LLM returned '{product_word}'"
+                it["confidence"] = 0.5
+                it["needs_escalation"] = True
+
         corrected.append(it)
     return corrected
+
+
+# Product-type words that are synonyms and should NOT trigger a mismatch correction
+# Groups of words that refer to the same product type.
+# If user says any word in a group and LLM returns a product whose first word
+# is also in that group, it's NOT a mismatch.
+_SYNONYM_TYPE_GROUPS = [
+    {"pija", "pijas", "tornillo", "tornillos", "pilas", "fijasora"},
+    {"taquete", "taquetes", "ancla", "anclas"},
+    {"tablaroca", "panel", "hoja", "hojas", "tabla", "lamina"},
+    {"barrote", "barrotes", "tira", "tiras", "liston", "listones", "tramos"},
+    {"plafon", "plafones", "galleta", "galletas"},
+    {"reja", "rejas", "rejacero"},
+    {"canal", "canales", "cancel", "canaleta", "canaletas", "cnal", "canel"},
+    {"poste", "postes", "pste", "psts"},
+    {"redimix", "redemix", "ready"},
+    {"perfacinta", "perfacita", "prefacinta", "cinta"},
+    {"basecoat", "pasta", "compuesto", "biscoat"},
+    {"durock", "duroc", "durrock"},
+    {"securock", "securok"},
+    {"abrazadera", "abrazaderas"},
+    {"reborde", "revorde", "jota"},
+    {"angulo", "angulos"},
+    {"pija", "framer", "fremer", "flamer"},
+    {"impermeabilizante", "impermeabilizantes", "impermeable"},
+    {"pintura", "pinturas", "esmalte", "vinilica"},
+]
+
+# Build a lookup: word → set of group indices (a word can be in multiple groups)
+_SYNONYM_LOOKUP: dict[str, set[int]] = {}
+for _gi, _group in enumerate(_SYNONYM_TYPE_GROUPS):
+    for _word in _group:
+        _SYNONYM_LOOKUP.setdefault(_word, set()).add(_gi)
+
+
+def _are_synonym_types(word_a: str, word_b: str) -> bool:
+    """Check if two product-type words refer to the same product type."""
+    if word_a == word_b:
+        return True
+    # Strip trailing 's' for basic plural handling
+    a_base = word_a.rstrip("s") if len(word_a) > 3 else word_a
+    b_base = word_b.rstrip("s") if len(word_b) > 3 else word_b
+    if a_base == b_base:
+        return True
+    # Check if both share any synonym group
+    def _groups(w):
+        return _SYNONYM_LOOKUP.get(w, set()) | _SYNONYM_LOOKUP.get(
+            w.rstrip("s") if len(w) > 3 else w, set()
+        )
+    return bool(_groups(word_a) & _groups(word_b))
 
 
 # ---------------------------------------------------------------------------
