@@ -2546,8 +2546,8 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                         return {"status": "ambiguous", "item": None, "candidates": _items}
                 else:
                     q_first_token = q.split()[0] if q.split() else q
-                    filtered = [(s, r) for s, r in scored[:5] if _phonetic((r[1] or "").lower()).startswith(q_first_token)]
-                    candidates = filtered if filtered else scored[:5]
+                    filtered = [(s, r) for s, r in scored[:10] if _phonetic((r[1] or "").lower()).startswith(q_first_token)]
+                    candidates = filtered if filtered else scored[:10]
                     # ── ALL-TOKEN RESOLVER for this path too ──
                     if len(candidates) >= 2 and len(_q_sig_tokens) >= 2:
                         _atm2 = [(s, r) for s, r in candidates
@@ -2694,8 +2694,8 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
 
             print(f"FUZZY AMBIGUOUS: query='{user_query}' found={len(scored)}")
             q_first_token = q.split()[0] if q.split() else q
-            filtered = [(s, item) for s, item in scored[:5] if _phonetic((item.get("name") or "").lower()).startswith(q_first_token)]
-            candidates = filtered if filtered else scored[:5]
+            filtered = [(s, item) for s, item in scored[:10] if _phonetic((item.get("name") or "").lower()).startswith(q_first_token)]
+            candidates = filtered if filtered else scored[:10]
             _items = [item for _, item in candidates]
             _def = _resolve_default(_items)
             if _def: return _def

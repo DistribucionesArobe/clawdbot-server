@@ -548,7 +548,7 @@ def search_pricebook_best(conn, company_id: str, q: str, limit: int = 12):
     finally:
         cur.close()
 
-def search_pricebook_candidates(conn, company_id: str, q: str, limit: int = 5):
+def search_pricebook_candidates(conn, company_id: str, q: str, limit: int = 10):
     q = (q or "").strip()
     if not q:
         return []
@@ -1666,7 +1666,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
     import string as _string
     from spec_definitions import get_spec_steps, already_has_specs, build_spec_query
 
-    def _search_pricebook_candidates(conn, company_id: str, q: str, limit: int = 5):
+    def _search_pricebook_candidates(conn, company_id: str, q: str, limit: int = 10):
         q = (q or "").strip()
         if not q:
             return []
@@ -1840,11 +1840,12 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 raw = (current.get("raw") or "").strip()
                 cands = current.get("candidates") or []
 
-                # Sort by price (cheapest first) as tiebreaker, then limit to 3
+                # Sort by price (cheapest first) as tiebreaker, then limit to 9
+                # (WhatsApp allows max 10 rows per list; 9 candidates + 1 "Ninguno" = 10)
                 # IMPORTANT: save sorted+truncated list back to state so pick handler
                 # uses the same order as what was displayed to the user
                 cands.sort(key=lambda x: float(x.get("price") or 999999))
-                cands = cands[:3]
+                cands = cands[:9]
                 current["candidates"] = cands  # sync state with displayed order
 
                 # Persist AFTER candidates are sorted+truncated so pick handler
