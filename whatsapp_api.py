@@ -127,43 +127,82 @@ def extract_text_from_image(image_bytes: bytes) -> str | None:
 
 # ── WhatsApp Business Profile ───────────────────────────────────────────
 
+_META_APP_ID = "1461694011992339"
+
+
 def update_wa_profile_photo(wa_api_key: str, phone_number_id: str,
                             img_bytes: bytes, mime_type: str = "image/png") -> dict:
     """Upload an image and set it as the WhatsApp Business profile photo.
 
+    Uses the Resumable Upload API to get a file handle, then sets it
+    as profile_picture_handle on the WhatsApp Business Profile.
+
     Returns dict with keys: ok (bool), step, error (optional).
     """
     headers = {"Authorization": f"Bearer {wa_api_key}"}
+    file_size = len(img_bytes)
 
-    # Step 1: Upload image as media
+    # Step 1: Create a resumable upload session
     try:
-        upload_resp = requests.post(
-            f"{WA_API_BASE}/{phone_number_id}/media",
+        session_resp = requests.post(
+            f"{WA_API_BASE}/{_META_APP_ID}/uploads",
             headers=headers,
-            files={"file": ("profile.png", io.BytesIO(img_bytes), mime_type)},
-            data={"messaging_product": "whatsapp", "type": mime_type},
+            params={
+                "file_length": file_size,
+                "file_type": mime_type,
+                "access_token": wa_api_key,
+            },
             timeout=30,
         )
     except Exception as e:
-        log.error("WA PROFILE: media upload error: %s", repr(e))
-        return {"ok": False, "step": "media_upload", "error": str(e)}
+        log.error("WA PROFILE: upload session error: %s", repr(e))
+        return {"ok": False, "step": "create_session", "error": str(e)}
+
+    if session_resp.status_code != 200:
+        log.error("WA PROFILE: upload session failed %s: %s",
+                  session_resp.status_code, session_resp.text[:500])
+        return {"ok": False, "step": "create_session",
+                "error": session_resp.text[:500]}
+
+    upload_session_id = session_resp.json().get("id")
+    log.info("WA PROFILE: upload session created: %s", upload_session_id)
+
+    # Step 2: Upload the file data to the session
+    try:
+        upload_resp = requests.post(
+            f"{WA_API_BASE}/{upload_session_id}",
+            headers={
+                "Authorization": f"OAuth {wa_api_key}",
+                "file_offset": "0",
+                "Content-Type": mime_type,
+            },
+            data=img_bytes,
+            timeout=30,
+        )
+    except Exception as e:
+        log.error("WA PROFILE: file upload error: %s", repr(e))
+        return {"ok": False, "step": "upload_file", "error": str(e)}
 
     if upload_resp.status_code != 200:
-        log.error("WA PROFILE: media upload failed %s: %s",
+        log.error("WA PROFILE: file upload failed %s: %s",
                   upload_resp.status_code, upload_resp.text[:500])
-        return {"ok": False, "step": "media_upload",
+        return {"ok": False, "step": "upload_file",
                 "error": upload_resp.text[:500]}
 
-    media_id = upload_resp.json().get("id")
-    log.info("WA PROFILE: media uploaded, id=%s", media_id)
+    file_handle = upload_resp.json().get("h")
+    log.info("WA PROFILE: file handle obtained: %s", file_handle[:50] if file_handle else "None")
 
-    # Step 2: Set as profile picture
+    if not file_handle:
+        return {"ok": False, "step": "upload_file",
+                "error": "No file handle returned"}
+
+    # Step 3: Set as profile picture using the handle
     try:
         profile_resp = requests.post(
             f"{WA_API_BASE}/{phone_number_id}/whatsapp_business_profile",
             headers={**headers, "Content-Type": "application/json"},
             json={"messaging_product": "whatsapp",
-                  "profile_picture_handle": media_id},
+                  "profile_picture_handle": file_handle},
             timeout=30,
         )
     except Exception as e:

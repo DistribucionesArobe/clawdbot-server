@@ -5,12 +5,10 @@ Embeddings, synonyms, statistics, jerga management, and query logging.
 """
 
 import base64
-import io
 import logging
 import os
 from typing import Optional
 
-import requests as http_requests
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
@@ -18,6 +16,7 @@ from auth import get_user_from_session, require_company_id
 from db import get_conn
 from queries import clear_quote_state
 from semantic_search import rebuild_embeddings_for_company, auto_generate_context_groups
+from whatsapp_api import update_wa_profile_photo
 
 log = logging.getLogger("cotizaexpress.admin")
 
@@ -975,70 +974,41 @@ _ACEROMAX_LOGO_B64 = "iVBORw0KGgoAAAANSUhEUgAAAoAAAAKACAIAAACDr150AABKGElEQVR4nO
 
 @router.get("/admin/set-wa-profile-photo")
 async def set_wa_profile_photo(request: Request):
-    """One-time endpoint to set WhatsApp Business profile photo via Graph API."""
+    """One-time endpoint to set WhatsApp Business profile photo via Graph API.
+    Uses the embedded Aceromax logo as a fallback.
+    """
     user = get_user_from_session(request)
     company_id = require_company_id(user)
-    
+
     conn = get_conn()
     cur = conn.cursor()
     try:
-        cur.execute("SELECT wa_api_key, wa_phone_number_id FROM companies WHERE id=%s", (company_id,))
+        cur.execute(
+            "SELECT wa_api_key, wa_phone_number_id, logo_url FROM companies WHERE id=%s",
+            (company_id,),
+        )
         row = cur.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Company not found")
-        
-        wa_token, phone_number_id = row[0], row[1]
+
+        wa_token, phone_number_id, logo_url = row[0], row[1], row[2]
         if not wa_token or not phone_number_id:
-            raise HTTPException(status_code=400, detail="WhatsApp not configured for this company")
-        
-        # Decode the embedded logo
-        img_bytes = base64.b64decode(_ACEROMAX_LOGO_B64)
-        
-        api_base = "https://graph.facebook.com/v19.0"
-        headers = {"Authorization": f"Bearer {wa_token}"}
-        
-        # Step 1: Upload image as media
-        log.info("SET-WA-PROFILE: Uploading profile image for company=%s phone=%s", company_id, phone_number_id)
-        upload_resp = http_requests.post(
-            f"{api_base}/{phone_number_id}/media",
-            headers=headers,
-            files={"file": ("profile.png", io.BytesIO(img_bytes), "image/png")},
-            data={"messaging_product": "whatsapp", "type": "image/png"},
-            timeout=30
-        )
-        
-        if upload_resp.status_code != 200:
-            log.error("SET-WA-PROFILE: Media upload failed: %s %s", upload_resp.status_code, upload_resp.text[:500])
-            return {
-                "ok": False, 
-                "step": "media_upload",
-                "status": upload_resp.status_code, 
-                "error": upload_resp.text[:500]
-            }
-        
-        media_id = upload_resp.json().get("id")
-        log.info("SET-WA-PROFILE: Media uploaded, id=%s", media_id)
-        
-        # Step 2: Update business profile with the photo
-        profile_resp = http_requests.post(
-            f"{api_base}/{phone_number_id}/whatsapp_business_profile",
-            headers={**headers, "Content-Type": "application/json"},
-            json={
-                "messaging_product": "whatsapp",
-                "profile_picture_handle": media_id
-            },
-            timeout=30
-        )
-        
-        log.info("SET-WA-PROFILE: Profile update response: %s %s", profile_resp.status_code, profile_resp.text[:500])
-        
-        return {
-            "ok": profile_resp.status_code == 200,
-            "step": "profile_update",
-            "status": profile_resp.status_code,
-            "response": profile_resp.json() if profile_resp.status_code == 200 else profile_resp.text[:500]
-        }
-    
+            raise HTTPException(status_code=400, detail="WhatsApp not configured")
+
+        # Use stored logo if available, otherwise fall back to embedded Aceromax logo
+        if logo_url and logo_url.startswith("data:"):
+            # Parse data URL: data:image/png;base64,xxxxx
+            header, b64_data = logo_url.split(",", 1)
+            mime_type = header.split(":")[1].split(";")[0]
+            img_bytes = base64.b64decode(b64_data)
+        else:
+            img_bytes = base64.b64decode(_ACEROMAX_LOGO_B64)
+            mime_type = "image/png"
+
+        log.info("SET-WA-PROFILE: Uploading for company=%s phone=%s", company_id, phone_number_id)
+        result = update_wa_profile_photo(wa_token, phone_number_id, img_bytes, mime_type)
+        return result
+
     except HTTPException:
         raise
     except Exception as e:
