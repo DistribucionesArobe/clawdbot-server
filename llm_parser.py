@@ -348,7 +348,8 @@ JERGA_HINTS = """Jerga típica de ferretería mexicana:
 - "abrazadera" (sin especificar) → abrazadera para rejacero.
 - "galleta" / "plafon galleta" / "plafones registrables" → plafon registrable.
 - "PTR" = perfil tubular rectangular (raramente en catálogo; escalar).
-- "hoja" / "hojas" sueltas (sin material) = tablaroca.
+- "hoja" / "hojas" sueltas (sin material específico después) = tablaroca. PERO "hoja de securock" = securock, "hoja de durock" = durock. Siempre respeta el material que sigue después de "hoja/hojas de".
+- "hojas blancas" / "hojas blancas tablaroca" / "hoja blanca" = tablaroca ultralight (la lámina blanca estándar). NO confundir con securock.
 - "tabla WR" / "hoja WR" = tablaroca anti-moho.
 - "tramos de madera" / "tiras de madera" / "barrotes" / "listones de madera" → barrote de madera.
 
@@ -362,6 +363,7 @@ Cuando el cliente NO especifica variante, calibre, medida, etc., NO adivines al 
 - IMPORTANTE: Si un producto tiene la marca [DEFAULT] en el catálogo y el cliente NO especifica variante/calibre/tamaño, SIEMPRE elige el [DEFAULT]. Es el producto estándar configurado por el dueño de la tienda.
 - Si genuinamente no puedes determinar cuál variante es Y no hay un [DEFAULT] marcado, devuelve key=null y confidence baja para que el bot pregunte al cliente.
 - Si el cliente SÍ especifica (ej. "postes cal 20", "canal cal 22"), SIEMPRE respeta lo que pidió, aunque haya otro marcado como [DEFAULT].
+- NUNCA combines o sumes cantidades de productos diferentes. "1 hoja de securock" y "4 hojas tablaroca" son DOS líneas separadas (1x securock + 4x tablaroca), NO "5x tablaroca". Cada línea del mensaje del cliente es un producto independiente.
 """
 
 
