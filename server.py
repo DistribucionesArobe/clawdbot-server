@@ -2854,10 +2854,14 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                                         "vat_rate": result["item"].get("vat_rate"),
                                         "qty": _lqty,
                                     })
-                                elif result.get("candidates"):
-                                    pend = state.get("pending") or []
-                                    pend.append({"qty": _lqty, "raw": _lname, "candidates": result["candidates"]})
-                                    state["pending"] = pend
+                                else:
+                                    # Calculator items: add to cart with price=0 instead
+                                    # of showing ambiguous candidates one-by-one
+                                    state = cart_add_item(state, {
+                                        "sku": None, "name": _lname,
+                                        "unit": "pza", "price": 0,
+                                        "vat_rate": None, "qty": _lqty,
+                                    })
                         cur_rj2.close()
                     finally:
                         conn.close()
@@ -3084,10 +3088,13 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                                     "vat_rate": result["item"].get("vat_rate"),
                                     "qty": _lqty,
                                 })
-                            elif result.get("candidates"):
-                                pend = state.get("pending") or []
-                                pend.append({"qty": _lqty, "raw": _fallback_name, "candidates": result["candidates"]})
-                                state["pending"] = pend
+                            else:
+                                # Calculator items: add with price=0 instead of ambiguous candidates
+                                state = cart_add_item(state, {
+                                    "sku": None, "name": _fallback_name,
+                                    "unit": "pza", "price": 0,
+                                    "vat_rate": None, "qty": _lqty,
+                                })
                     cur_pt2.close()
                 finally:
                     conn.close()
@@ -3219,10 +3226,13 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                                         "vat_rate": result["item"].get("vat_rate"),
                                         "qty": _lqty,
                                     })
-                                elif result.get("candidates"):
-                                    pend = state.get("pending") or []
-                                    pend.append({"qty": _lqty, "raw": _fallback_name, "candidates": result["candidates"]})
-                                    state["pending"] = pend
+                                else:
+                                    # Calculator items: add with price=0 instead of ambiguous candidates
+                                    state = cart_add_item(state, {
+                                        "sku": None, "name": _fallback_name,
+                                        "unit": "pza", "price": 0,
+                                        "vat_rate": None, "qty": _lqty,
+                                    })
                         cur_im2.close()
                     finally:
                         conn.close()
