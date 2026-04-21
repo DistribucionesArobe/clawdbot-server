@@ -1017,3 +1017,51 @@ async def set_wa_profile_photo(request: Request):
     finally:
         cur.close()
         conn.close()
+
+
+@router.get("/admin/setup-demo")
+def setup_demo_company():
+    """One-time endpoint to configure the demo company with calculators + hours/location."""
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        # Find the demo company by name
+        cur.execute("""
+            SELECT id, name FROM companies
+            WHERE lower(name) LIKE '%demo%' OR lower(name) LIKE '%cotizabot%'
+            ORDER BY created_at ASC LIMIT 1
+        """)
+        row = cur.fetchone()
+        if not row:
+            # List all companies for debugging
+            cur.execute("SELECT id, name FROM companies ORDER BY created_at ASC LIMIT 10")
+            all_cos = cur.fetchall()
+            raise HTTPException(status_code=404, detail=f"Demo company not found. Companies: {all_cos}")
+
+        company_id = row[0]
+
+        # Enable all calculator modules
+        cur.execute("""
+            UPDATE companies SET
+                construccion_ligera_enabled = TRUE,
+                rejacero_enabled = TRUE,
+                pintura_enabled = TRUE,
+                impermeabilizante_enabled = TRUE,
+                hours_text = '🤖 24 horas, 7 días — Soy un bot, siempre estoy disponible',
+                address_text = 'Av. Ejemplo #123, Col. Centro, Monterrey, N.L.',
+                google_maps_url = 'https://maps.google.com',
+                updated_at = now()
+            WHERE id = %s
+            RETURNING id, name
+        """, (company_id,))
+        updated = cur.fetchone()
+        conn.commit()
+        return {
+            "ok": True,
+            "company_id": updated[0],
+            "company_name": updated[1],
+            "message": "Demo company configured: all calculators enabled, hours/location set",
+        }
+    finally:
+        cur.close()
+        conn.close()
