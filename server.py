@@ -1400,9 +1400,11 @@ from calculators import (
 )
 
 def _buscar_precio_exacto(conn, company_id: str, nombre: str):
+    """Search pricebook by exact name_norm, then fall back to fuzzy LIKE search."""
     nombre_norm = norm_name(nombre)
     cur = conn.cursor()
     try:
+        # 1) Exact match on name_norm
         cur.execute(
             """
             SELECT sku, name, unit, price, vat_rate
@@ -1417,6 +1419,39 @@ def _buscar_precio_exacto(conn, company_id: str, nombre: str):
             return {"sku": row[0], "name": row[1], "unit": row[2],
                     "price": float(row[3]) if row[3] else None,
                     "vat_rate": float(row[4]) if row[4] else None}
+
+        # 2) Fuzzy fallback: search by significant tokens (≥3 chars) with LIKE
+        tokens = [t for t in nombre_norm.split() if len(t) >= 3]
+        if not tokens:
+            return None
+        where_parts = [f"name_norm LIKE %s" for _ in tokens]
+        params = [company_id] + [f"%{t}%" for t in tokens]
+        cur.execute(
+            f"""
+            SELECT sku, name, unit, price, vat_rate
+            FROM pricebook_items
+            WHERE company_id = %s AND {' AND '.join(where_parts)}
+            ORDER BY length(name) ASC
+            LIMIT 5
+            """,
+            tuple(params),
+        )
+        rows = cur.fetchall()
+        if rows:
+            # Pick best match using fuzzy scoring
+            best = None
+            best_score = 0
+            for r in rows:
+                score = fuzz.token_set_ratio(nombre_norm, norm_name(r[1] or ""))
+                if score > best_score:
+                    best_score = score
+                    best = r
+            if best and best_score >= 60:
+                log.info(f"CALC PRICE FUZZY: '{nombre}' → '{best[1]}' (score={best_score})")
+                return {"sku": best[0], "name": best[1], "unit": best[2],
+                        "price": float(best[3]) if best[3] else None,
+                        "vat_rate": float(best[4]) if best[4] else None}
+
         return None
     finally:
         cur.close()
