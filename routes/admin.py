@@ -1025,22 +1025,42 @@ def setup_demo_company():
     conn = get_conn()
     cur = conn.cursor()
     try:
-        # Find the demo company by name
+        # First: find ALL companies that could be the demo, show their calc status
         cur.execute("""
-            SELECT id, name FROM companies
-            WHERE lower(name) LIKE '%demo%' OR lower(name) LIKE '%cotizabot%'
-            ORDER BY created_at ASC LIMIT 1
+            SELECT c.id, c.name, c.construccion_ligera_enabled, c.rejacero_enabled,
+                   c.pintura_enabled, c.impermeabilizante_enabled, c.hours_text,
+                   ch.meta_phone_number_id, ch.phone_display
+            FROM companies c
+            LEFT JOIN channels ch ON ch.company_id = c.id AND ch.is_active = true
+            ORDER BY c.created_at ASC
         """)
-        row = cur.fetchone()
-        if not row:
-            # List all companies for debugging
-            cur.execute("SELECT id, name FROM companies ORDER BY created_at ASC LIMIT 10")
-            all_cos = cur.fetchall()
-            raise HTTPException(status_code=404, detail=f"Demo company not found. Companies: {all_cos}")
+        all_rows = cur.fetchall()
+        debug_info = []
+        for r in all_rows:
+            debug_info.append({
+                "id": str(r[0]), "name": r[1],
+                "calc_cl": bool(r[2]), "calc_rj": bool(r[3]),
+                "calc_pt": bool(r[4]), "calc_im": bool(r[5]),
+                "hours": r[6] or None,
+                "phone_number_id": r[7] or None,
+                "phone_display": r[8] or None,
+            })
 
-        company_id = row[0]
+        # Find the demo company — prefer matching by name, fallback to first
+        target_id = None
+        for r in all_rows:
+            name_lower = (r[1] or "").lower()
+            if "demo" in name_lower or "cotizabot" in name_lower:
+                target_id = r[0]
+                break
 
-        # Enable all calculator modules
+        if not target_id and all_rows:
+            target_id = all_rows[0][0]
+
+        if not target_id:
+            raise HTTPException(status_code=404, detail=f"No companies found")
+
+        # Enable all calculator modules + hours/location
         cur.execute("""
             UPDATE companies SET
                 construccion_ligera_enabled = TRUE,
@@ -1053,14 +1073,45 @@ def setup_demo_company():
                 updated_at = now()
             WHERE id = %s
             RETURNING id, name
-        """, (company_id,))
+        """, (target_id,))
         updated = cur.fetchone()
         conn.commit()
         return {
             "ok": True,
-            "company_id": updated[0],
-            "company_name": updated[1],
+            "updated_company_id": str(updated[0]),
+            "updated_company_name": updated[1],
+            "all_companies": debug_info,
             "message": "Demo company configured: all calculators enabled, hours/location set",
+        }
+    finally:
+        cur.close()
+        conn.close()
+
+
+@router.get("/admin/setup-demo-all")
+def setup_demo_all_companies():
+    """Enable calculators + hours on ALL companies (useful when unsure which one is the demo)."""
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            UPDATE companies SET
+                construccion_ligera_enabled = TRUE,
+                rejacero_enabled = TRUE,
+                pintura_enabled = TRUE,
+                impermeabilizante_enabled = TRUE,
+                hours_text = COALESCE(NULLIF(hours_text, ''), '🤖 24 horas, 7 días — Soy un bot, siempre estoy disponible'),
+                address_text = COALESCE(NULLIF(address_text, ''), 'Av. Ejemplo #123, Col. Centro, Monterrey, N.L.'),
+                google_maps_url = COALESCE(NULLIF(google_maps_url, ''), 'https://maps.google.com'),
+                updated_at = now()
+            RETURNING id, name
+        """)
+        updated = cur.fetchall()
+        conn.commit()
+        return {
+            "ok": True,
+            "updated": [{"id": str(r[0]), "name": r[1]} for r in updated],
+            "count": len(updated),
         }
     finally:
         cur.close()
