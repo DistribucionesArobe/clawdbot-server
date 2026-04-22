@@ -202,6 +202,7 @@ def promo_crear(request: Request, body: PromoCodeCreate):
             (code, body.discount_type, body.discount_value, body.max_uses, body.one_per_customer),
         )
         row = cur.fetchone()
+        conn.commit()
         return {
             "ok": True,
             "promo": {
@@ -212,8 +213,12 @@ def promo_crear(request: Request, body: PromoCodeCreate):
             },
         }
     except IntegrityError:
+        if conn:
+            conn.rollback()
         raise HTTPException(status_code=409, detail=f"El código '{code}' ya existe")
     except Exception as e:
+        if conn:
+            conn.rollback()
         log.error("PROMO CREAR ERROR: %s", repr(e))
         raise HTTPException(status_code=500, detail=str(e))
     finally:
