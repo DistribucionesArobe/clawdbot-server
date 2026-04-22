@@ -382,37 +382,60 @@ def admin_stats(request: Request):
     _require_admin(request)
     conn = None
     cur = None
+    result = {
+        "total_empresas": 0,
+        "suscripciones_activas": 0,
+        "cotizaciones_totales": 0,
+        "promos_activos": 0,
+        "promos_total": 0,
+        "twilio_balance": None,
+        "twilio_connected": False,
+        "numeros_comprados": 0,
+    }
     try:
         conn = get_conn()
         cur = conn.cursor()
 
         # Total empresas (con al menos 1 producto)
-        cur.execute("SELECT COUNT(DISTINCT company_id) FROM pricebook_items")
-        total_empresas = cur.fetchone()[0]
+        try:
+            cur.execute("SELECT COUNT(DISTINCT company_id) FROM pricebook_items")
+            result["total_empresas"] = cur.fetchone()[0]
+        except Exception as e:
+            log.warning("admin_stats pricebook: %s", e)
+            conn.rollback()
 
         # Suscripciones activas (plan != 'free')
-        cur.execute("SELECT COUNT(*) FROM companies WHERE plan_code IS NOT NULL AND plan_code != 'free'")
-        suscripciones_activas = cur.fetchone()[0]
+        try:
+            cur.execute("SELECT COUNT(*) FROM companies WHERE plan_code IS NOT NULL AND plan_code != 'free'")
+            result["suscripciones_activas"] = cur.fetchone()[0]
+        except Exception as e:
+            log.warning("admin_stats companies: %s", e)
+            conn.rollback()
 
         # Cotizaciones totales (conversations)
-        cur.execute("SELECT COUNT(*) FROM conversations")
-        cotizaciones_totales = cur.fetchone()[0]
+        try:
+            cur.execute("SELECT COUNT(*) FROM conversations")
+            result["cotizaciones_totales"] = cur.fetchone()[0]
+        except Exception as e:
+            log.warning("admin_stats conversations: %s", e)
+            conn.rollback()
 
         # Promos
-        cur.execute("""
-            SELECT
-                COUNT(*) FILTER (WHERE active = TRUE AND (expires_at IS NULL OR expires_at > NOW())) as activos,
-                COUNT(*) as total
-            FROM promo_codes
-        """)
-        row = cur.fetchone()
-        promos_activos = row[0] or 0
-        promos_total = row[1] or 0
+        try:
+            cur.execute("""
+                SELECT
+                    COUNT(*) FILTER (WHERE active = TRUE AND (expires_at IS NULL OR expires_at > NOW())) as activos,
+                    COUNT(*) as total
+                FROM promo_codes
+            """)
+            row = cur.fetchone()
+            result["promos_activos"] = row[0] or 0
+            result["promos_total"] = row[1] or 0
+        except Exception as e:
+            log.warning("admin_stats promos: %s", e)
+            conn.rollback()
 
         # Twilio balance (try, don't fail if no twilio)
-        twilio_balance = None
-        twilio_connected = False
-        numeros_comprados = 0
         try:
             import twilio.rest
             twilio_sid = os.environ.get("TWILIO_ACCOUNT_SID", "")
@@ -420,23 +443,14 @@ def admin_stats(request: Request):
             if twilio_sid and twilio_token:
                 client = twilio.rest.Client(twilio_sid, twilio_token)
                 balance = client.api.v2010.balance.fetch()
-                twilio_balance = float(balance.balance)
-                twilio_connected = True
+                result["twilio_balance"] = float(balance.balance)
+                result["twilio_connected"] = True
                 numbers = client.incoming_phone_numbers.list()
-                numeros_comprados = len(numbers)
+                result["numeros_comprados"] = len(numbers)
         except Exception:
             pass
 
-        return {
-            "total_empresas": total_empresas,
-            "suscripciones_activas": suscripciones_activas,
-            "cotizaciones_totales": cotizaciones_totales,
-            "promos_activos": promos_activos,
-            "promos_total": promos_total,
-            "twilio_balance": twilio_balance,
-            "twilio_connected": twilio_connected,
-            "numeros_comprados": numeros_comprados,
-        }
+        return result
     except Exception as e:
         log.error("ADMIN STATS ERROR: %s", repr(e))
         raise HTTPException(status_code=500, detail=str(e))
@@ -457,31 +471,47 @@ def admin_companies(request: Request):
         conn = get_conn()
         cur = conn.cursor()
 
+        # First discover which columns actually exist in the companies table
         cur.execute("""
-            SELECT
-                c.id,
-                c.name,
-                c.plan_code,
-                c.stripe_customer_id,
-                c.trial_end,
-                c.created_at,
-                c.updated_at,
-                c.owner_phone,
-                c.telefono_atencion,
-                c.address_text,
-                c.hours_text,
-                c.onboarding_completed,
-                c.wa_phone_number_id,
-                c.construccion_ligera_enabled,
-                c.rejacero_enabled,
-                c.pintura_enabled,
-                c.impermeabilizante_enabled,
-                (SELECT COUNT(*) FROM pricebook_items p WHERE p.company_id = c.id) as num_products,
-                (SELECT COUNT(*) FROM conversations cv WHERE cv.company_id = c.id::text) as num_conversations,
-                (SELECT u.email FROM users u WHERE u.company_id = c.id LIMIT 1) as owner_email
-            FROM companies c
-            ORDER BY c.created_at DESC
+            SELECT column_name FROM information_schema.columns
+            WHERE table_name = 'companies'
         """)
+        existing_cols = {r[0] for r in cur.fetchall()}
+
+        # Build SELECT dynamically based on what exists
+        base_cols = ["id", "name"]
+        optional_cols = [
+            "plan_code", "stripe_customer_id", "trial_end", "created_at", "updated_at",
+            "owner_phone", "telefono_atencion", "address_text", "hours_text",
+            "onboarding_completed", "wa_phone_number_id",
+            "construccion_ligera_enabled", "rejacero_enabled",
+            "pintura_enabled", "impermeabilizante_enabled",
+        ]
+        select_cols = ["c." + col for col in base_cols]
+        for col in optional_cols:
+            if col in existing_cols:
+                select_cols.append(f"c.{col}")
+            else:
+                select_cols.append(f"NULL as {col}")
+
+        # Check if conversations has company_id column
+        cur.execute("""
+            SELECT column_name FROM information_schema.columns
+            WHERE table_name = 'conversations' AND column_name = 'company_id'
+        """)
+        has_conv_company = cur.fetchone() is not None
+
+        # Subqueries
+        select_cols.append("(SELECT COUNT(*) FROM pricebook_items p WHERE p.company_id = c.id) as num_products")
+        if has_conv_company:
+            select_cols.append("(SELECT COUNT(*) FROM conversations cv WHERE cv.company_id = c.id::text) as num_conversations")
+        else:
+            select_cols.append("0 as num_conversations")
+        select_cols.append("(SELECT u.email FROM users u WHERE u.company_id = c.id LIMIT 1) as owner_email")
+
+        order_col = "c.created_at" if "created_at" in existing_cols else "c.id"
+        query = f"SELECT {', '.join(select_cols)} FROM companies c ORDER BY {order_col} DESC"
+        cur.execute(query)
         rows = cur.fetchall()
         cols = [desc[0] for desc in cur.description]
         companies = []
@@ -490,9 +520,12 @@ def admin_companies(request: Request):
             # Convert datetimes to ISO strings
             for k in ("trial_end", "created_at", "updated_at"):
                 if company.get(k):
-                    company[k] = company[k].isoformat()
+                    try:
+                        company[k] = company[k].isoformat()
+                    except Exception:
+                        company[k] = str(company[k])
             # Convert UUID
-            company["id"] = str(company["id"])
+            company["id"] = str(company["id"]) if company.get("id") else ""
             companies.append(company)
 
         return {"companies": companies}
