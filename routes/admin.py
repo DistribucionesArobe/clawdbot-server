@@ -374,6 +374,138 @@ def admin_clear_quote_state(wa_from: str, request: Request):
     return {"ok": True, "cleared": wa_from}
 
 
+# ── Main Admin Stats (used by AdminDashboard frontend) ────────────────────
+
+@router.get("/api/admin/stats")
+def admin_stats(request: Request):
+    """Main admin stats for the AdminDashboard cards."""
+    _require_admin(request)
+    conn = None
+    cur = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+
+        # Total empresas (con al menos 1 producto)
+        cur.execute("SELECT COUNT(DISTINCT company_id) FROM pricebook_items")
+        total_empresas = cur.fetchone()[0]
+
+        # Suscripciones activas (plan != 'free')
+        cur.execute("SELECT COUNT(*) FROM companies WHERE plan_code IS NOT NULL AND plan_code != 'free'")
+        suscripciones_activas = cur.fetchone()[0]
+
+        # Cotizaciones totales (conversations)
+        cur.execute("SELECT COUNT(*) FROM conversations")
+        cotizaciones_totales = cur.fetchone()[0]
+
+        # Promos
+        cur.execute("""
+            SELECT
+                COUNT(*) FILTER (WHERE active = TRUE AND (expires_at IS NULL OR expires_at > NOW())) as activos,
+                COUNT(*) as total
+            FROM promo_codes
+        """)
+        row = cur.fetchone()
+        promos_activos = row[0] or 0
+        promos_total = row[1] or 0
+
+        # Twilio balance (try, don't fail if no twilio)
+        twilio_balance = None
+        twilio_connected = False
+        numeros_comprados = 0
+        try:
+            import twilio.rest
+            twilio_sid = os.environ.get("TWILIO_ACCOUNT_SID", "")
+            twilio_token = os.environ.get("TWILIO_AUTH_TOKEN", "")
+            if twilio_sid and twilio_token:
+                client = twilio.rest.Client(twilio_sid, twilio_token)
+                balance = client.api.v2010.balance.fetch()
+                twilio_balance = float(balance.balance)
+                twilio_connected = True
+                numbers = client.incoming_phone_numbers.list()
+                numeros_comprados = len(numbers)
+        except Exception:
+            pass
+
+        return {
+            "total_empresas": total_empresas,
+            "suscripciones_activas": suscripciones_activas,
+            "cotizaciones_totales": cotizaciones_totales,
+            "promos_activos": promos_activos,
+            "promos_total": promos_total,
+            "twilio_balance": twilio_balance,
+            "twilio_connected": twilio_connected,
+            "numeros_comprados": numeros_comprados,
+        }
+    except Exception as e:
+        log.error("ADMIN STATS ERROR: %s", repr(e))
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
+
+
+@router.get("/api/admin/companies")
+def admin_companies(request: Request):
+    """List all companies with full details for the admin panel."""
+    _require_admin(request)
+    conn = None
+    cur = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+
+        cur.execute("""
+            SELECT
+                c.id,
+                c.name,
+                c.plan_code,
+                c.stripe_customer_id,
+                c.trial_end,
+                c.created_at,
+                c.updated_at,
+                c.owner_phone,
+                c.telefono_atencion,
+                c.address_text,
+                c.hours_text,
+                c.onboarding_completed,
+                c.wa_phone_number_id,
+                c.construccion_ligera_enabled,
+                c.rejacero_enabled,
+                c.pintura_enabled,
+                c.impermeabilizante_enabled,
+                (SELECT COUNT(*) FROM pricebook_items p WHERE p.company_id = c.id) as num_products,
+                (SELECT COUNT(*) FROM conversations cv WHERE cv.company_id = c.id::text) as num_conversations,
+                (SELECT u.email FROM users u WHERE u.company_id = c.id LIMIT 1) as owner_email
+            FROM companies c
+            ORDER BY c.created_at DESC
+        """)
+        rows = cur.fetchall()
+        cols = [desc[0] for desc in cur.description]
+        companies = []
+        for row in rows:
+            company = dict(zip(cols, row))
+            # Convert datetimes to ISO strings
+            for k in ("trial_end", "created_at", "updated_at"):
+                if company.get(k):
+                    company[k] = company[k].isoformat()
+            # Convert UUID
+            company["id"] = str(company["id"])
+            companies.append(company)
+
+        return {"companies": companies}
+    except Exception as e:
+        log.error("ADMIN COMPANIES ERROR: %s", repr(e))
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
+
+
 # ── Statistics endpoints ───────────────────────────────────────────────────
 
 @router.get("/api/admin/stats/overview")
