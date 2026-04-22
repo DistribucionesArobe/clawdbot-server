@@ -4788,6 +4788,11 @@ def ner_extract_items(user_text: str):
                     "de mensajes con posibles errores ortográficos o lenguaje informal. "
                     "REGLA PRINCIPAL: Extrae el nombre del producto TAL COMO LO ESCRIBIÓ EL CLIENTE, "
                     "sin abreviar, sin simplificar, sin quitar palabras. "
+                    "CRÍTICO: NUNCA combines cantidades de productos diferentes. Cada producto es una línea separada. "
+                    "'1 hoja de securock + 4 hojas blancas tablaroca' = DOS productos: 1x securock Y 4x tablaroca. "
+                    "Securock, durock, tablaroca, tabla roca son productos DISTINTOS — nunca los mezcles. "
+                    "'hojas blancas' o 'hojas blancas tablaroca' = tablaroca ultralight/blanca. "
+                    "'hoja de securock' o 'hojas de securock' = securock (producto diferente). "
                     "CRÍTICO: Las medidas (4.10, 6.35, 3.05) y calibres (cal 20, cal 22, cal 26) "
                     "son PARTE DEL NOMBRE del producto. NUNCA los separes ni los omitas. "
                     "Interpreta cantidades en texto: 'una'=1, 'un'=1, 'dos'=2, 'media'=0.5. "
@@ -4797,6 +4802,8 @@ def ner_extract_items(user_text: str):
                     "'4 postes 4.10 cal 20' → {\"qty\": 4, \"product\": \"postes 4.10 cal 20\"}\n"
                     "'2 canal 4.10 cal 22' → {\"qty\": 2, \"product\": \"canal 4.10 cal 22\"}\n"
                     "'10 poste 6.35 calibre 26' → {\"qty\": 10, \"product\": \"poste 6.35 calibre 26\"}\n"
+                    "'1 hoja de securock + 4 hojas blancas tablaroca' → "
+                    '[{"qty": 1, "product": "securock"}, {"qty": 4, "product": "tablaroca"}]\n'
                     "'canal listón' → 'canal liston', "
                     "'angulo de amarre' → 'angulo de amarre', 'reborde jota' → 'reborde jota', "
                     "'pijas de tabla roca' → 'pijas tablaroca', 'alambre calibre 16' → 'alambre calibre 16'. "
@@ -4821,6 +4828,8 @@ def extract_qty_items_robust(text: str):
     # WhatsApp bullet lists inject \u2060 (word joiner) and \u200b (zero-width space)
     t = re.sub(r"[\u2060\u200b\u200c\u200d\ufeff\u00a0]", " ", t)
     t = re.sub(r"[•;]", "\n", t)
+    # Treat "+" as line separator: "1 hoja de securock + 4 hojas blancas tablaroca" → two lines
+    t = re.sub(r"\s*\+\s*", "\n", t)
     # Convert "* " bullet markers to newlines (WhatsApp inline bullets)
     # Match * followed by a digit (e.g. "* 5 hojas") or * at line start
     t = re.sub(r"(?:^|\s)\*\s+(?=\d)", "\n", t)
