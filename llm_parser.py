@@ -242,6 +242,7 @@ JERGA_EXPANSION = {
     "cancel": ["canal"],
     "cnal": ["canal"],
     "canel": ["canal"],
+    "cana": ["canal"],
     "canaleta": ["canal", "canaleta"],
     "amarre": ["canal", "amarre"],
     "carga": ["canaleta", "carga"],

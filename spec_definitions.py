@@ -90,6 +90,18 @@ SPEC_STEPS = {
     ],
 }
 
+# Common typos / abbreviations → canonical form (applied before key lookup)
+_TYPO_MAP = {
+    "cana liston": "canal liston",
+    "cana listón": "canal liston",
+    "canal listón": "canal liston",
+    "cana carga": "canal carga",
+    "cana de carga": "canal carga",
+    "canal de carga": "canal carga",
+    "variya": "varilla",
+    "barilla": "varilla",
+}
+
 # Products that should NOT trigger spec steps when they already have
 # enough detail (calibre, measurements, fractions, or rejacero context)
 _SKIP_SPEC_IF_HAS_DETAIL = {"poste", "canal", "canal liston", "canal carga", "angulo"}
@@ -104,6 +116,11 @@ _REJACERO_CONTEXT_WORDS = {"rejacero", "reja", "malla", "cerca", "cerco", "abraz
 def get_spec_steps(product_raw: str) -> list:
     """Retorna pasos de spec si el producto los requiere, [] si no."""
     n = (product_raw or "").lower()
+
+    # Apply typo corrections before matching
+    for typo, canonical in _TYPO_MAP.items():
+        if typo in n:
+            n = n.replace(typo, canonical)
 
     # Try longer keys first to avoid "canal" matching before "canal liston"
     sorted_keys = sorted(SPEC_STEPS.keys(), key=len, reverse=True)
@@ -141,7 +158,14 @@ def already_has_specs(product_raw: str, steps: list) -> bool:
 
 
 def build_spec_query(raw: str, resolved: dict) -> str:
-    parts = [raw.strip()]
+    # Fix typos in the raw query before building the search string
+    corrected = raw.strip()
+    _low = corrected.lower()
+    for typo, canonical in _TYPO_MAP.items():
+        if typo in _low:
+            corrected = re.sub(re.escape(typo), canonical, _low)
+            break
+    parts = [corrected]
     for v in resolved.values():
         clean = v.replace('"', '').replace("'", '').strip()
         # Solo agregar si no está ya en el raw
