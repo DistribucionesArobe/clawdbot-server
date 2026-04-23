@@ -117,6 +117,55 @@ def pago_estado(request: Request, session_id: str = Query(...)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/api/pagos/checkout-status/{session_id}")
+def pago_checkout_status(session_id: str):
+    """Frontend-facing endpoint for PagoExitoso page polling."""
+    if not _STRIPE_SECRET_KEY:
+        raise HTTPException(status_code=500, detail="STRIPE_SECRET_KEY no configurada")
+
+    _stripe.api_key = _STRIPE_SECRET_KEY
+    try:
+        session = _stripe.checkout.Session.retrieve(session_id)
+        paid = session.payment_status == "paid"
+        plan = session.metadata.get("plan") if session.metadata else None
+        company_id = (session.metadata or {}).get("company_id")
+        status = session.status  # "complete", "expired", "open"
+
+        plan_activado = False
+        if paid and company_id:
+            # Verify the plan was actually activated in DB
+            try:
+                conn = get_conn()
+                cur = conn.cursor()
+                cur.execute("SELECT plan_code FROM companies WHERE id=%s LIMIT 1", (company_id,))
+                row = cur.fetchone()
+                if row and row[0] and row[0] != "free":
+                    plan_activado = True
+                cur.close()
+                conn.close()
+            except Exception:
+                plan_activado = paid  # Assume OK if DB check fails but Stripe says paid
+
+        _plan_names = {
+            "cotizabot": "Plan Completo",
+            "pro": "Plan Pro",
+            "enterprise": "Plan Enterprise",
+        }
+        plan_name = _plan_names.get(plan, "Plan")
+
+        return {
+            "ok": True,
+            "payment_status": session.payment_status,
+            "status": status,
+            "plan": plan,
+            "plan_activado": plan_activado,
+            "mensaje": f"¡Pago exitoso! Tu {plan_name} está activo." if paid else None,
+        }
+    except Exception as e:
+        log.error("CHECKOUT STATUS ERROR: %s", repr(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/api/pagos/webhook")
 async def stripe_webhook(request: Request):
     payload = await request.body()

@@ -711,12 +711,14 @@ from routes.pagos import router as pagos_router
 from routes.company import router as company_router
 from routes.admin import router as admin_router
 from routes.empresa import router as empresa_router
+from routes.whatsapp import router as whatsapp_router
 
 app.include_router(pricebook_router)
 app.include_router(pagos_router)
 app.include_router(company_router)
 app.include_router(admin_router)
 app.include_router(empresa_router)
+app.include_router(whatsapp_router)
 
 # Run migrations at startup (idempotent)
 try:
@@ -1655,6 +1657,37 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         _bot_state = get_quote_state(company_id, wa_from) or {}
         if _bot_state.get("bot_active") is False:
             return ""
+
+    # ── Plan / trial check ─────────────────────────────────────────
+    # get_company_plan_code() already handles trial expiry (downgrades
+    # to "free" if trial_end < now).  If plan is "free", the company
+    # hasn't paid yet — send a friendly message instead of processing.
+    _current_plan = get_company_plan_code(company_id)
+    if _current_plan == "free":
+        # Check if they EVER had a trial (trial expired vs never subscribed)
+        try:
+            _pc = get_conn()
+            _pcur = _pc.cursor()
+            _pcur.execute("SELECT trial_end FROM companies WHERE id=%s LIMIT 1", (company_id,))
+            _prow = _pcur.fetchone()
+            _pcur.close()
+            _pc.close()
+            _had_trial = _prow and _prow[0] is not None
+        except Exception:
+            _had_trial = False
+
+        if _had_trial:
+            return (
+                "¡Hola! Tu periodo de prueba ha terminado. 😊\n\n"
+                "Para seguir recibiendo cotizaciones automáticas, "
+                "activa tu plan en:\n"
+                "👉 https://cotizaexpress.com/precios\n\n"
+                "¡Gracias por usar CotizaBot!"
+            )
+        # If they never had a trial and plan is free, they might be in
+        # initial setup — let them use the bot (onboarding flow gives
+        # some free usage).  Or this is the shared Twilio number.
+        # Don't block — fall through to normal processing.
 
     # ── Check for button clicks BEFORE buffer flush ─────────────────
     # The message buffer could prepend stale text like "salor" to the
