@@ -1795,32 +1795,43 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
 
     def _escalate_non_quote(company_id_esc: str, wa_from_esc: str, text_esc: str) -> str:
         """Escala un mensaje no-cotización al dueño y responde al cliente."""
+        company_name_esc = "la empresa"
+        _esc_phone = ""
         try:
             conn_esc = get_conn()
             cur_esc = conn_esc.cursor()
             cur_esc.execute(
-                "SELECT owner_phone, wa_api_key, wa_phone_number_id, name FROM companies WHERE id=%s",
+                "SELECT owner_phone, wa_api_key, wa_phone_number_id, name, telefono_atencion FROM companies WHERE id=%s",
                 (company_id_esc,),
             )
             row_esc = cur_esc.fetchone()
             cur_esc.close()
             conn_esc.close()
-            company_name_esc = "la empresa"
-            if row_esc and row_esc[0]:
-                state_esc = get_quote_state(company_id_esc, wa_from_esc) or {}
-                notify_owner_escalation(
-                    wa_api_key=row_esc[1], phone_number_id=row_esc[2], owner_phone=row_esc[0],
-                    client_phone=wa_from_esc,
-                    reason=f"Mensaje no relacionado a cotización: \"{(text_esc or '')[:100]}\"",
-                    state=state_esc,
-                )
+            if row_esc:
                 company_name_esc = row_esc[3] or "la empresa"
+                _esc_phone = (row_esc[4] or row_esc[0] or "").strip()
+                if row_esc[0]:
+                    try:
+                        state_esc = get_quote_state(company_id_esc, wa_from_esc) or {}
+                        notify_owner_escalation(
+                            wa_api_key=row_esc[1], phone_number_id=row_esc[2], owner_phone=row_esc[0],
+                            client_phone=wa_from_esc,
+                            reason=f"Mensaje no relacionado a cotización: \"{(text_esc or '')[:100]}\"",
+                            state=state_esc,
+                        )
+                    except Exception as ne:
+                        log.error(f"ESCALATE NOTIFY ERROR: {repr(ne)}")
         except Exception as e:
             log.error(f"ESCALATE NON-QUOTE ERROR: {repr(e)}")
-            company_name_esc = "la empresa"
+        if _esc_phone:
+            _esc_clean = _normalize_mx_phone(_esc_phone)
+            return (
+                f"Ese tema lo maneja directamente el equipo de *{company_name_esc}* 🙋\n\n"
+                f"Contáctalos directamente:\n📞 {_esc_phone}\n👉 https://wa.me/{_esc_clean}\n\n"
+                "Si quieres cotizar materiales, mándame tu lista con cantidades 📋"
+            )
         return (
             f"Ese tema lo maneja directamente el equipo de *{company_name_esc}* 🙋\n\n"
-            "Ya les avisé y te contactarán pronto.\n\n"
             "Si quieres cotizar materiales, mándame tu lista con cantidades 📋\n"
             "Ej: 10 cemento, 5 varilla 3/8"
         )
@@ -2432,8 +2443,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 )
             return (
                 f"Ese tema lo maneja directamente el equipo de *{company_name_esc}* 🙋\n\n"
-                "Ya les avisé y te contactarán pronto.\n\n"
-                "Si quieres cotizar materiales mientras tanto, mándame tu lista con cantidades 📋"
+                "Si quieres cotizar materiales, mándame tu lista con cantidades 📋"
             )
 
     # ── Detección de frustración proactiva ────────────────────────────────
