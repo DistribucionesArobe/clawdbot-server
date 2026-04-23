@@ -3676,6 +3676,13 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             state.pop("pending", None)  # Clear stale pending — new product list takes priority
             missing = []
             _pedido_raw = ", ".join(p for _, p, *_ in multi if p.strip() != "???")
+            # Detect if the list is rejacero-context (rejas, abrazaderas, bases para poste, etc.)
+            _pedido_lower = _pedido_raw.lower()
+            _is_rejacero_list = any(w in _pedido_lower for w in (
+                "reja", "rejacero", "malla", "abrazadera", "base para poste",
+                "bases para poste", "deacero", "ciclonica", "ciclónica",
+                "poste-malla", "sujecion poste", "sujeción poste",
+            ))
             for _mi in multi:
                 qty, prod_raw = _mi[0], _mi[1]
                 _mi_bundle = _mi[2] if len(_mi) > 2 else False
@@ -3702,8 +3709,19 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                     specs_pending.append({"raw": prod_raw, "qty": qty, "is_bundle": _mi_bundle, "steps": steps, "step_idx": 0, "resolved": {}})
                     state["pending_specs"] = specs_pending
                     continue
+                # If list is rejacero-context and product is "poste" without rejacero qualifier,
+                # add "rejacero" hint so smart_search finds the right type of poste
+                _search_query = prod_raw
+                if _is_rejacero_list:
+                    _pr_low = prod_raw.lower()
+                    if ("poste" in _pr_low or "postes" in _pr_low) and "rejacero" not in _pr_low:
+                        _search_query = prod_raw + " rejacero"
+                        log.info(f"REJACERO CONTEXT: '{prod_raw}' → '{_search_query}'")
+                    elif ("tornillo" in _pr_low or "pija" in _pr_low) and "rejacero" not in _pr_low and "base" not in _pr_low:
+                        _search_query = prod_raw + " rejacero"
+                        log.info(f"REJACERO CONTEXT: '{prod_raw}' → '{_search_query}'")
                 try:
-                    result = smart_search(conn, company_id, prod_raw, qty,
+                    result = smart_search(conn, company_id, _search_query, qty,
                                           cart_context=_pedido_raw)
                 except Exception as e:
                     log.error("SMART SEARCH ERROR:", repr(e))
