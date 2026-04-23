@@ -2597,8 +2597,14 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         current_step = steps[step_idx]
 
         t_low = user_text.strip().lower()
+        # Normalize common shorthand: "410" → "4.10", "635" → "6.35", "305" → "3.05"
+        _t_norm = t_low
+        if re.match(r"^\d{3}$", _t_norm):
+            _t_norm = _t_norm[0] + "." + _t_norm[1:]  # "410" → "4.10"
         chosen = next(
-            (opt for opt in current_step["options"] if t_low == opt.lower() or opt.lower() in t_low),
+            (opt for opt in current_step["options"]
+             if t_low == opt.lower() or opt.lower() in t_low
+             or _t_norm == opt.lower() or opt.lower() in _t_norm),
             None
         )
 

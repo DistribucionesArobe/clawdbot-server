@@ -27,15 +27,77 @@ SPEC_STEPS = {
             "options": ["3m", "6m"],
         },
     ],
+    "poste": [
+        {
+            "key": "medida",
+            "question": "¿Qué medida de poste necesitas?",
+            "options": ["3.05", "4.10", "6.35"],
+        },
+        {
+            "key": "calibre",
+            "question": "¿Y qué calibre?",
+            "options": ["Cal 22", "Cal 26"],
+        },
+    ],
+    "canal liston": [
+        {
+            "key": "medida",
+            "question": "¿Qué medida de canal listón necesitas?",
+            "options": ["3.05", "4.10", "6.35"],
+        },
+        {
+            "key": "calibre",
+            "question": "¿Y qué calibre?",
+            "options": ["Cal 22", "Cal 26"],
+        },
+    ],
+    "canal carga": [
+        {
+            "key": "medida",
+            "question": "¿Qué medida de canal de carga necesitas?",
+            "options": ["3.05", "4.10", "6.35"],
+        },
+        {
+            "key": "calibre",
+            "question": "¿Y qué calibre?",
+            "options": ["Cal 22", "Cal 26"],
+        },
+    ],
+    "canal": [
+        {
+            "key": "tipo",
+            "question": "¿Qué tipo de canal necesitas?",
+            "options": ["Canal listón", "Canal de carga"],
+        },
+        {
+            "key": "medida",
+            "question": "¿Qué medida?",
+            "options": ["3.05", "4.10", "6.35"],
+        },
+        {
+            "key": "calibre",
+            "question": "¿Y qué calibre?",
+            "options": ["Cal 22", "Cal 26"],
+        },
+    ],
+    "angulo": [
+        {
+            "key": "tipo",
+            "question": "¿Qué tipo de ángulo necesitas?",
+            "options": ["Ángulo de amarre", "Ángulo esquinero"],
+        },
+    ],
 }
 
 
 def get_spec_steps(product_raw: str) -> list:
     """Retorna pasos de spec si el producto los requiere, [] si no."""
     n = (product_raw or "").lower()
-    for key, steps in SPEC_STEPS.items():
+    # Try longer keys first to avoid "canal" matching before "canal liston"
+    sorted_keys = sorted(SPEC_STEPS.keys(), key=len, reverse=True)
+    for key in sorted_keys:
         if key in n:
-            return steps
+            return SPEC_STEPS[key]
     return []
 
 
@@ -45,7 +107,7 @@ def already_has_specs(product_raw: str, steps: list) -> bool:
         if not any(opt.lower().replace('"', '').replace("'", '') in n for opt in step["options"]):
             return False
     return True
-    
+
 
 def build_spec_query(raw: str, resolved: dict) -> str:
     parts = [raw.strip()]
