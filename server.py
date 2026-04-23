@@ -1191,7 +1191,7 @@ async def whatsapp_webhook(request: Request):
 # Parser shadow mode: corre LLM en paralelo y loguea para comparar
 # ============================================================
 _PARSER_SHADOW_ENABLED = os.environ.get("PARSER_SHADOW", "0") in ("1", "true", "True")
-_PARSER_LLM_FIRST = os.environ.get("PARSER_LLM_FIRST", "0") in ("1", "true", "True")
+_PARSER_LLM_FIRST = os.environ.get("PARSER_LLM_FIRST", "1") in ("1", "true", "True")
 
 def _load_catalog_for_shadow(company_id: str) -> list[dict]:
     try:
