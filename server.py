@@ -1776,7 +1776,9 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                         "Eres un clasificador de mensajes para un bot de cotización de materiales de construcción "
                         "(ferretería, acero, tablaroca, cemento, etc.) en México.\n\n"
                         "Clasifica si el mensaje del cliente es:\n"
-                        "- PRODUCT: quiere cotizar, preguntar por un producto, material, herramienta o precio\n"
+                        "- PRODUCT: quiere cotizar, preguntar por un producto, material, herramienta o precio, "
+                        "O PREGUNTAR SI MANEJAN/TIENEN/VENDEN un producto (ej: 'manejan angulo?', 'tienen cemento?', "
+                        "'venden tablaroca?', 'hay varilla?'). Cualquier mención de un material o producto = PRODUCT.\n"
                         "- OTHER: conversación casual, preguntas personales, temas administrativos, saludos extendidos, "
                         "quejas, pagos, facturas, entregas, o cualquier cosa que NO sea pedir/cotizar un producto\n\n"
                         "Responde SOLO con: PRODUCT o OTHER"
@@ -4075,8 +4077,28 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             finally:
                 conn.close()
 
-        # Producto individual sin cantidad → clasificar y asumir qty=1
-        intent = _classify_intent(user_text)
+        # ── Detect casual acknowledgment / thanks before escalating ──
+        _ack_phrases = {
+            "ok", "okey", "okay", "va", "vale", "sale", "listo", "entendido",
+            "ah ok", "ah okey", "ah ya", "ya", "ya vi", "ah bueno",
+            "gracias", "muchas gracias", "mil gracias", "grax", "thanks",
+            "perfecto", "perfecto gracias", "excelente", "de acuerdo",
+            "está bien", "esta bien", "muy bien",
+        }
+        _t_ack = re.sub(r"[¡!¿?,.\s]+", " ", tnorm).strip()
+        if _t_ack in _ack_phrases or (len(_t_ack) < 25 and any(_t_ack.startswith(p) for p in ("gracias", "muchas gracias", "ok gracias", "perfecto", "ah ok"))):
+            return "¡Con gusto! 😊 Si necesitas cotizar algo más, mándame tu lista con cantidades."
+
+        # ── Pre-check: "manejan X?", "tienen X?", "venden X?" → treat as product ──
+        _avail_match = re.match(
+            r"^(?:disculpe?\s*,?\s*)?(?:ustedes\s+)?(?:manejan|tienen|venden|hay|cuentan\s+con|trabajan)\s+(.+)",
+            tnorm, re.IGNORECASE
+        )
+        if _avail_match:
+            intent = "product"
+        else:
+            # Producto individual sin cantidad → clasificar y asumir qty=1
+            intent = _classify_intent(user_text)
         if intent == "product":
             conn = get_conn()
             try:
