@@ -2588,6 +2588,73 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         else:
             hint_txt = "\n\nEj:\n10 cemento\n5 varilla 3/8\n20 block 15x20"
         return f"📋 Mándame tu lista de materiales con cantidades:{hint_txt}\n\nO todo en una línea separado por comas."
+
+    # ── "What can you do?" / service inquiry → respond as helpful agent ──
+    _capabilities_patterns = re.search(
+        r"\b(?:que\s+(?:puedes|pueden|sabes|haces)|qué\s+(?:puedes|pueden|sabes|haces)|"
+        r"cuales\s+son\s+(?:tus|sus)\s+servicios|cuáles\s+son\s+(?:tus|sus)\s+servicios|"
+        r"que\s+servicios|qué\s+servicios|"
+        r"como\s+funciona|cómo\s+funciona|"
+        r"para\s+que\s+sirve|para\s+qué\s+sirve|"
+        r"que\s+ofreces|qué\s+ofreces|que\s+ofrecen|qué\s+ofrecen|"
+        r"en\s+que\s+(?:me\s+)?(?:puedes|pueden)\s+ayudar|"
+        r"en\s+qué\s+(?:me\s+)?(?:puedes|pueden)\s+ayudar|"
+        r"a\s+que\s+se\s+dedican|a\s+qué\s+se\s+dedican|"
+        r"info(?:rmacion)?(?:\s+de\s+(?:la\s+)?empresa)?|"
+        r"que\s+es\s+esto|qué\s+es\s+esto|"
+        r"como\s+te\s+uso|cómo\s+te\s+uso)\b",
+        tnorm, re.IGNORECASE
+    )
+    if _capabilities_patterns:
+        # Respond like the greeting handler — show the menu with services
+        try:
+            conn_cap = get_conn()
+            cur_cap = conn_cap.cursor()
+            cur_cap.execute("SELECT name, giro, descripcion, construccion_ligera_enabled, rejacero_enabled, pintura_enabled, impermeabilizante_enabled FROM companies WHERE id=%s LIMIT 1", (company_id,))
+            row_cap = cur_cap.fetchone()
+            cur_cap.close()
+            conn_cap.close()
+            _cap_name = row_cap[0] if row_cap else "tu ferretería"
+            _cap_giro = (row_cap[1] or "").strip() if row_cap else ""
+            _cap_desc = (row_cap[2] or "").strip() if row_cap else ""
+            _cap_cl = bool(row_cap[3]) if row_cap else False
+            _cap_rj = bool(row_cap[4]) if row_cap else False
+            _cap_pt = bool(row_cap[5]) if row_cap else False
+            _cap_im = bool(row_cap[6]) if row_cap else False
+        except Exception:
+            _cap_name = "tu ferretería"
+            _cap_giro = ""
+            _cap_desc = ""
+            _cap_cl = _cap_rj = _cap_pt = _cap_im = False
+
+        _cap_intro = f"*{_cap_name}*"
+        if _cap_giro:
+            _cap_intro += f" — {_cap_giro}"
+        if _cap_desc:
+            _cap_intro += f"\n{_cap_desc}"
+
+        _cap_services = (
+            f"Soy el asistente virtual de {_cap_intro}.\n\n"
+            "Te puedo ayudar con:\n"
+            "• *Cotizar materiales* — mándame tu lista y te doy precios al instante\n"
+            "• *Consultar disponibilidad* — pregúntame si manejamos algún producto\n"
+        )
+        _any_cap_calc = _cap_cl or _cap_rj or _cap_pt or _cap_im
+        if _any_cap_calc:
+            _cap_services += "• *Calcular cantidades* — muros, plafones, pintura, impermeabilizante\n"
+        _cap_services += "• *Horarios y ubicación*\n\n¿En qué te puedo ayudar?"
+
+        _cap_opts = ["🔨 Cotizar materiales"]
+        if _any_cap_calc:
+            _cap_opts.append("📐 Cotizar cálculo")
+        _cap_opts.extend(["🕐 Horarios y ubicación", "👤 Hablar con alguien"])
+        return {
+            "type": "list",
+            "body": _cap_services,
+            "options": _cap_opts,
+            "button_label": "Ver opciones",
+        }
+
     if _is_greeting_like(tnorm):
         try:
             conn_co = get_conn()
