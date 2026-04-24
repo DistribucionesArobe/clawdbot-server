@@ -4212,8 +4212,26 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             r"^(?:disculpe?\s*,?\s*)?(?:ustedes\s+)?(?:manejan|tienen|venden|hay|cuentan\s+con|trabajan)\s+(.+)",
             tnorm, re.IGNORECASE
         )
-        if _avail_match:
+        # ── Price inquiry: "cuanto vale X", "cuando vale X" (typo), "a como X" ──
+        _price_match = re.match(
+            r"^(?:cuando|cuanto|cuánto|quanto)\s+(?:vale|cuesta|sale|esta|está|es)\s+(?:el|la|los|las|un|una|unos|unas)?\s*(.+)",
+            tnorm, re.IGNORECASE
+        ) or re.match(
+            r"^(?:a\s+como|a\s+cómo|a\s+cuanto|a\s+cuánto)\s+(?:esta|está|sale|dan|tienen|manejan)?\s*(?:el|la|los|las|un|una)?\s*(.+)",
+            tnorm, re.IGNORECASE
+        ) or re.match(
+            r"^(?:que|qué)\s+precio\s+(?:tiene|tienen|maneja|manejan)?\s*(?:el|la|los|las|un|una)?\s*(.+)",
+            tnorm, re.IGNORECASE
+        ) or re.match(
+            r"^(?:precio|costo)\s+(?:de(?:l)?|de\s+la|de\s+los|de\s+las)?\s*(.+)",
+            tnorm, re.IGNORECASE
+        )
+        if _avail_match or _price_match:
             intent = "product"
+            # Extract the product name from the match for better search
+            _prod_from_question = (_avail_match or _price_match).group(1).strip().rstrip("?.,!¿")
+            if _prod_from_question and len(_prod_from_question) >= 2:
+                user_text = _prod_from_question  # Use clean product name for search
         else:
             # Producto individual sin cantidad → clasificar y asumir qty=1
             intent = _classify_intent(user_text)
