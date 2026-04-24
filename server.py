@@ -1790,8 +1790,9 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
 
     def _classify_intent(text: str) -> str:
         """
-        Clasifica si un mensaje es intención de cotizar productos o conversación general.
-        Retorna 'product' o 'other'. Usa GPT-4o-mini para clasificación rápida.
+        Clasifica si un mensaje es intención de cotizar productos, explorar catálogo,
+        o conversación general.
+        Retorna 'product', 'browse', o 'other'. Usa GPT-4o-mini para clasificación rápida.
         """
         t = (text or "").strip()
         if not t or len(t) < 3:
@@ -1809,12 +1810,17 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                         "Eres un clasificador de mensajes para un bot de cotización de materiales de construcción "
                         "(ferretería, acero, tablaroca, cemento, etc.) en México.\n\n"
                         "Clasifica si el mensaje del cliente es:\n"
-                        "- PRODUCT: quiere cotizar, preguntar por un producto, material, herramienta o precio, "
+                        "- PRODUCT: quiere cotizar, preguntar por un producto ESPECÍFICO, material, herramienta o precio, "
                         "O PREGUNTAR SI MANEJAN/TIENEN/VENDEN un producto (ej: 'manejan angulo?', 'tienen cemento?', "
-                        "'venden tablaroca?', 'hay varilla?'). Cualquier mención de un material o producto = PRODUCT.\n"
+                        "'venden tablaroca?', 'hay varilla?', 'cuando vale el canal?'). "
+                        "Cualquier mención de un material o producto específico = PRODUCT.\n"
+                        "- BROWSE: quiere explorar el catálogo, ver qué productos hay disponibles para una categoría "
+                        "o uso específico, pide ver opciones o productos sin mencionar un producto exacto "
+                        "(ej: 'que productos tienen para cortinas?', 'tienen catálogo?', 'que materiales manejan "
+                        "para plafones?', 'productos disponibles en stock para instalar X').\n"
                         "- OTHER: conversación casual, preguntas personales, temas administrativos, saludos extendidos, "
-                        "quejas, pagos, facturas, entregas, o cualquier cosa que NO sea pedir/cotizar un producto\n\n"
-                        "Responde SOLO con: PRODUCT o OTHER"
+                        "quejas, pagos, facturas, entregas, o cualquier cosa que NO sea pedir/explorar productos\n\n"
+                        "Responde SOLO con: PRODUCT, BROWSE o OTHER"
                     )},
                     {"role": "user", "content": t},
                 ],
@@ -1823,7 +1829,11 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             )
             result = (resp.choices[0].message.content or "").strip().upper()
             log.info(f"INTENT CLASSIFY: '{t[:50]}' → {result}")
-            return "product" if "PRODUCT" in result else "other"
+            if "PRODUCT" in result:
+                return "product"
+            if "BROWSE" in result:
+                return "browse"
+            return "other"
         except Exception as e:
             log.error(f"INTENT CLASSIFY ERROR: {repr(e)}")
             return "product"  # fallback seguro: asumir producto
@@ -2588,6 +2598,70 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         else:
             hint_txt = "\n\nEj:\n10 cemento\n5 varilla 3/8\n20 block 15x20"
         return f"📋 Mándame tu lista de materiales con cantidades:{hint_txt}\n\nO todo en una línea separado por comas."
+
+    # ── Catalog browsing: "que tienen para X", "productos para X", "catalogo" ──
+    _catalog_match = re.match(
+        r"^(?:(?:que|qué)\s+(?:productos?|materiales?|artículos?|articulos?)\s+(?:tienen|manejan|venden|hay)\s+(?:para|de|en)\s+(.+)|"
+        r"(?:tienen|manejan|venden)\s+(?:algo|productos?|materiales?)\s+(?:para|de)\s+(.+)|"
+        r"(?:productos?|materiales?)\s+(?:disponibles?|en\s+stock)\s+(?:para|de)\s+(.+)|"
+        r"(?:tienes?|tienen)\s+(?:catalogo|catálogo)(?:\s+(?:de|para)\s+(.+))?|"
+        r"(?:catalogo|catálogo)(?:\s+(?:de|para)\s+(.+))?|"
+        r"(?:me\s+)?(?:puedes?|pueden)\s+(?:mencionar(?:me)?|mostrar(?:me)?|decir(?:me)?|listar(?:me)?|dar(?:me)?)\s+(?:los\s+)?(?:productos?|materiales?)\s+(?:disponibles?\s+)?(?:(?:en\s+stock\s+)?(?:para|de|en|que\s+tienen))\s*(.+)?|"
+        r"(?:que|qué)\s+(?:tienen|manejan|venden)\s+(?:en\s+)?(?:stock|existencia|inventario)(?:\s+(?:para|de)\s+(.+))?)$",
+        tnorm, re.IGNORECASE
+    )
+    if _catalog_match:
+        # Extract the topic/category from whichever group matched
+        _cat_topic = next((g.strip().rstrip("?.,!¿") for g in _catalog_match.groups() if g), None)
+
+        if _cat_topic and len(_cat_topic) >= 2:
+            # Search pricebook for the topic
+            try:
+                conn_cat = get_conn()
+                _cat_results = _search_pricebook_candidates(conn_cat, company_id, _cat_topic, limit=15)
+                conn_cat.close()
+            except Exception:
+                _cat_results = []
+
+            if _cat_results:
+                _cat_lines = []
+                for i, it in enumerate(_cat_results[:10], 1):
+                    _p = float(it.get("price") or 0)
+                    _u = it.get("unit") or "pza"
+                    if _p > 0:
+                        _cat_lines.append(f"{i}. {it['name']} — ${_p:,.2f}/{_u}")
+                    else:
+                        _cat_lines.append(f"{i}. {it['name']}")
+                return (
+                    f"Estos son los productos que tenemos relacionados con *{_cat_topic}*:\n\n"
+                    + "\n".join(_cat_lines)
+                    + "\n\nPara cotizar, mándame la cantidad y el producto.\nEj: 10 " + (_cat_results[0].get("name") or "producto")
+                )
+            else:
+                return (
+                    f"No encontré productos relacionados con *{_cat_topic}* en nuestro catálogo.\n\n"
+                    "¿Podrías ser más específico? O mándame el nombre del producto directamente."
+                )
+        else:
+            # Generic "catálogo" without topic — show categories/guidance
+            try:
+                conn_cnt = get_conn()
+                cur_cnt = conn_cnt.cursor()
+                cur_cnt.execute("SELECT COUNT(*) FROM pricebook_items WHERE company_id=%s", (company_id,))
+                _total_prods = cur_cnt.fetchone()[0] or 0
+                cur_cnt.close()
+                conn_cnt.close()
+            except Exception:
+                _total_prods = 0
+
+            return (
+                f"Tenemos *{_total_prods}* productos en catálogo.\n\n"
+                "Dime qué buscas y te muestro lo que tenemos. Por ejemplo:\n"
+                "• \"productos para cortinas\"\n"
+                "• \"cemento\"\n"
+                "• \"varilla\"\n\n"
+                "O mándame tu lista con cantidades para cotizar al instante."
+            )
 
     # ── "What can you do?" / service inquiry → respond as helpful agent ──
     _capabilities_patterns = re.search(
@@ -4286,14 +4360,84 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                     return _build_reply_with_pending(state, company_id=company_id, wa_from=wa_from)
             finally:
                 conn.close()
+        elif intent == "browse":
+            # Catalog browsing — search for related products
+            _browse_query = user_text.strip()
+            # Try to extract a useful search term from the message
+            _browse_extract = re.sub(
+                r"(?:tienes?|tienen|manejan|venden|hay|puedes?|pueden|mencion\w*|mostrar\w*|decir\w*|"
+                r"catalogo|catálogo|productos?|materiales?|disponibles?|en\s+stock|para|de|del|la|el|"
+                r"los|las|un|una|que|qué|me|nos|algo)\s*",
+                " ", _browse_query, flags=re.IGNORECASE
+            ).strip().rstrip("?.,!¿")
+            _browse_term = _browse_extract if len(_browse_extract) >= 2 else _browse_query
+            try:
+                conn_br = get_conn()
+                _br_results = _search_pricebook_candidates(conn_br, company_id, _browse_term, limit=15)
+                conn_br.close()
+            except Exception:
+                _br_results = []
+            if _br_results:
+                _br_lines = []
+                for i, it in enumerate(_br_results[:10], 1):
+                    _p = float(it.get("price") or 0)
+                    _u = it.get("unit") or "pza"
+                    if _p > 0:
+                        _br_lines.append(f"{i}. {it['name']} — ${_p:,.2f}/{_u}")
+                    else:
+                        _br_lines.append(f"{i}. {it['name']}")
+                return (
+                    f"Estos son los productos que encontré relacionados con tu búsqueda:\n\n"
+                    + "\n".join(_br_lines)
+                    + "\n\nPara cotizar, mándame la cantidad y el producto.\nEj: 10 " + (_br_results[0].get("name") or "producto")
+                )
+            else:
+                return (
+                    "No encontré productos relacionados en nuestro catálogo.\n\n"
+                    "Dime más específicamente qué buscas, o mándame tu lista de materiales con cantidades."
+                )
         else:
-            # No es producto → escalar a humano
+            # No es producto ni browse → escalar a humano
             return _escalate_non_quote(company_id, wa_from, user_text)
 
     # Último fallback: clasificar con GPT
     intent = _classify_intent(user_text)
     if intent == "product":
         return "¿Me repites eso? No entendí bien tu pedido 🤔"
+    elif intent == "browse":
+        # Same browse logic as above
+        _browse_query = user_text.strip()
+        _browse_extract = re.sub(
+            r"(?:tienes?|tienen|manejan|venden|hay|puedes?|pueden|mencion\w*|mostrar\w*|decir\w*|"
+            r"catalogo|catálogo|productos?|materiales?|disponibles?|en\s+stock|para|de|del|la|el|"
+            r"los|las|un|una|que|qué|me|nos|algo)\s*",
+            " ", _browse_query, flags=re.IGNORECASE
+        ).strip().rstrip("?.,!¿")
+        _browse_term = _browse_extract if len(_browse_extract) >= 2 else _browse_query
+        try:
+            conn_br2 = get_conn()
+            _br_results2 = _search_pricebook_candidates(conn_br2, company_id, _browse_term, limit=15)
+            conn_br2.close()
+        except Exception:
+            _br_results2 = []
+        if _br_results2:
+            _br_lines2 = []
+            for i, it in enumerate(_br_results2[:10], 1):
+                _p = float(it.get("price") or 0)
+                _u = it.get("unit") or "pza"
+                if _p > 0:
+                    _br_lines2.append(f"{i}. {it['name']} — ${_p:,.2f}/{_u}")
+                else:
+                    _br_lines2.append(f"{i}. {it['name']}")
+            return (
+                f"Estos son los productos que encontré relacionados con tu búsqueda:\n\n"
+                + "\n".join(_br_lines2)
+                + "\n\nPara cotizar, mándame la cantidad y el producto.\nEj: 10 " + (_br_results2[0].get("name") or "producto")
+            )
+        return (
+            "No encontré productos relacionados en nuestro catálogo.\n\n"
+            "Dime más específicamente qué buscas, o mándame tu lista de materiales con cantidades."
+        )
     else:
         return _escalate_non_quote(company_id, wa_from, user_text)
 
