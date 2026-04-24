@@ -1894,8 +1894,11 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             return True
         # If the message contains product/order signals, it's NOT a pure greeting
         # e.g. "hola buenas tardes me podras cotizar 3 cajas de redimix"
+        # e.g. "hola vendemos productos para techo de lamina?"
         _order_signals = re.search(
-            r"\b(cotiz|precio|cuanto|cuánto|mand|necesito|ocupo|quiero|dame|lista|material|"
+            r"\b(cotiz|precio|cuanto|cuánto|cuando\s+vale|mand|necesito|ocupo|quiero|dame|lista|material|"
+            r"producto|productos|venden|vendemos|manejan|tienen para|catalogo|catálogo|"
+            r"techo|lamina|lámina|varilla|cemento|block|poste|canal|tablaroca|"
             r"\d+\s+[a-záéíóúñ]{3,})\b",
             t, re.IGNORECASE
         )
@@ -4268,6 +4271,64 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 return _build_reply_with_pending(state, company_id=company_id, wa_from=wa_from)
             finally:
                 conn.close()
+
+        # ── Follow-up question: "y el calibre 20?", "y en 3/8?", "pero en cal 22?" ──
+        # If user has a cart and asks about a variant of the last product
+        _followup_match = re.match(
+            r"^(?:y\s+|pero\s+)?(?:el|la|los|las|en|de|del)?\s*(?:de\s+|el\s+|la\s+)?\s*"
+            r"(cal(?:ibre)?\s*\d+|\d+\s*/\s*\d+(?:\s*\")?|"
+            r"\d+(?:\.\d+)(?:\s*x\s*\d+(?:\.\d+))?|"
+            r"\d+\s*(?:m(?:ts?|etros?)?|pulgadas?|\")?)\s*\??$",
+            tnorm, re.IGNORECASE
+        )
+        if not _followup_match:
+            # Also catch "y el calibre 20?" style
+            _followup_match = re.match(
+                r"^(?:y\s+|pero\s+)?(?:el\s+|la\s+|en\s+|de\s+)?"
+                r"(?:calibre|cal|diametro|diámetro|medida|largo|tamaño)\s+"
+                r"(\S+(?:\s+\S+)?)\s*\??$",
+                tnorm, re.IGNORECASE
+            )
+        if _followup_match and wa_from:
+            _fu_spec = _followup_match.group(1).strip().rstrip("?")
+            _fu_state = get_quote_state(company_id, wa_from) or {}
+            _fu_cart = _fu_state.get("cart") or []
+            if _fu_cart:
+                # Get last product added to cart as context
+                _fu_last = _fu_cart[-1]
+                _fu_last_name = (_fu_last.get("name") or "").strip()
+                if _fu_last_name:
+                    # Extract base product name (without specs like cal 26, 3.05, etc.)
+                    _fu_base = re.sub(
+                        r"\s+(?:cal(?:ibre)?\s*\d+|\d+\.\d+(?:\s*x\s*\d+\.\d+)?)\s*",
+                        " ", _fu_last_name, flags=re.IGNORECASE
+                    ).strip()
+                    # Build new query: base product + new spec
+                    _fu_query = f"{_fu_base} {_fu_spec}"
+                    log.info(f"FOLLOWUP: last='{_fu_last_name}' base='{_fu_base}' new_spec='{_fu_spec}' query='{_fu_query}'")
+                    try:
+                        conn_fu = get_conn()
+                        _fu_result = smart_search(conn_fu, company_id, _fu_query, 1, cart_context=_fu_last_name)
+                        conn_fu.close()
+                    except Exception as e:
+                        log.error(f"FOLLOWUP SEARCH ERROR: {repr(e)}")
+                        _fu_result = {"status": "not_found", "item": None, "candidates": []}
+                    if _fu_result["status"] == "found":
+                        _fu_state = cart_add_item(_fu_state, {
+                            "sku": _fu_result["item"].get("sku"),
+                            "name": _fu_result["item"].get("name"),
+                            "unit": _fu_result["item"].get("unit") or "unidad",
+                            "price": float(_fu_result["item"].get("price") or 0.0),
+                            "vat_rate": _fu_result["item"].get("vat_rate"),
+                            "qty": 1,
+                        })
+                        _fu_state.pop("pending", None)
+                        upsert_quote_state(company_id, wa_from, _fu_state)
+                        return _build_reply_with_pending(_fu_state, company_id=company_id, wa_from=wa_from)
+                    elif _fu_result.get("candidates"):
+                        _fu_state["pending"] = [{"qty": 1, "raw": _fu_query, "candidates": _fu_result["candidates"]}]
+                        upsert_quote_state(company_id, wa_from, _fu_state)
+                        return _build_reply_with_pending(_fu_state, company_id=company_id, wa_from=wa_from)
 
         # ── Detect casual acknowledgment / thanks before escalating ──
         _ack_phrases = {
