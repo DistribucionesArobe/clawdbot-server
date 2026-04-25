@@ -199,6 +199,23 @@ def company_settings_update(request: Request, body: CompanySettingsBody):
                 cur.execute("UPDATE companies SET tenant_context=%s WHERE id=%s", (_base_ctx or None, company_id))
 
         conn.commit()
+
+        # Regenerate LLM context if brand/giro-relevant fields changed
+        if body.marcas_propias is not None or body.marcas_competencia is not None:
+            try:
+                from llm_context_generator import generate_and_store_llm_context
+                import threading
+                threading.Thread(
+                    target=generate_and_store_llm_context,
+                    args=(company_id,),
+                    daemon=True,
+                ).start()
+            except Exception as lce:
+                import logging
+                logging.getLogger("cotizaexpress.company").error(
+                    "LLM CONTEXT REGEN ERROR: %s", repr(lce)
+                )
+
         return {"ok": True}
     finally:
         if cur: cur.close()

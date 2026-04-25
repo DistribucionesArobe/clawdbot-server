@@ -164,6 +164,19 @@ def empresa_perfil_update(request: Request, body: EmpresaPerfilBody):
         if not row:
             raise HTTPException(status_code=404, detail="Company no encontrada")
         conn.commit()
+
+        # Regenerate LLM context in background (uses giro + catalog + marcas)
+        try:
+            from llm_context_generator import generate_and_store_llm_context
+            import threading
+            threading.Thread(
+                target=generate_and_store_llm_context,
+                args=(company_id,),
+                daemon=True,
+            ).start()
+        except Exception as lce:
+            log.error("LLM CONTEXT REGEN ERROR: %s", repr(lce))
+
         return {"ok": True, "tenant_context": tenant_context}
     except HTTPException:
         raise

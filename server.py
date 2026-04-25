@@ -720,6 +720,67 @@ app.include_router(admin_router)
 app.include_router(empresa_router)
 app.include_router(whatsapp_router)
 
+
+# ── Contact form endpoint ─────────────────────────────────────────────────────
+
+class ContactoBody(BaseModel):
+    nombre: str = ""
+    email: str = ""
+    telefono: str = ""
+    mensaje: str = ""
+
+@app.post("/api/contacto")
+def api_contacto(body: ContactoBody):
+    """Receive contact form submission, store in DB, notify owner via WhatsApp."""
+    conn = None
+    cur = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        # Ensure table exists
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS contact_leads (
+                id SERIAL PRIMARY KEY,
+                nombre TEXT,
+                email TEXT,
+                telefono TEXT,
+                mensaje TEXT,
+                created_at TIMESTAMPTZ DEFAULT now()
+            )
+        """)
+        cur.execute(
+            "INSERT INTO contact_leads (nombre, email, telefono, mensaje) VALUES (%s, %s, %s, %s) RETURNING id",
+            (body.nombre.strip(), body.email.strip(), body.telefono.strip(), body.mensaje.strip()),
+        )
+        lead_id = cur.fetchone()[0]
+        conn.commit()
+
+        # Notify owner via WhatsApp (best effort)
+        _owner_wa = os.environ.get("OWNER_WHATSAPP", "528130850381")
+        try:
+            from whatsapp_api import send_whatsapp_message_twilio
+            notif = (
+                f"📩 Nuevo lead de contacto (#{ lead_id})\n\n"
+                f"Nombre: {body.nombre}\n"
+                f"Email: {body.email}\n"
+                f"Tel: {body.telefono}\n"
+                f"Mensaje: {body.mensaje[:200]}"
+            )
+            send_whatsapp_message_twilio(f"whatsapp:+{_owner_wa}", notif)
+        except Exception as we:
+            log.warning("CONTACTO WA NOTIFY ERROR: %s", repr(we))
+
+        return {"ok": True, "id": lead_id}
+    except Exception as e:
+        log.error("CONTACTO ERROR: %s", repr(e))
+        if conn:
+            conn.rollback()
+        return {"ok": False, "error": str(e)}
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
+
+
 # Run migrations at startup (idempotent)
 try:
     _mig_conn = get_conn()
@@ -1227,7 +1288,7 @@ def _try_llm_parse(company_id: str, user_text: str) -> dict | None:
             return None
         import time as _t
         t0 = _t.time()
-        result = llm_parse_order(user_text, catalog)
+        result = llm_parse_order(user_text, catalog, company_id=company_id)
         ms = int((_t.time() - t0) * 1000)
         log.info(f"LLM PARSE: {ms}ms, items={len(result.get('items', []))}, "
               f"non_order={result.get('non_order')}, error={result.get('error')}")
@@ -1259,7 +1320,7 @@ def log_parser_shadow(company_id, client_phone, user_text, regex_items):
                 return
             import time as _t
             t0 = _t.time()
-            result = llm_parse_order(user_text, catalog)
+            result = llm_parse_order(user_text, catalog, company_id=company_id)
             latency_ms = int((_t.time() - t0) * 1000)
             regex_json = [{"qty": mi[0], "prod": mi[1]} for mi in (regex_items or []) if mi]
             llm_json = result.get("items") or []

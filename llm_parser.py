@@ -217,8 +217,14 @@ JERGA_EXPANSION = {
     "ultralight": ["ultralight", "tablaroca"],
     "duroc": ["durock"],
     "durrock": ["durock"],
+    "permabase": ["durock"],
+    "perma": ["durock"],
+    "permabse": ["durock"],
     "biscoat": ["basecoat"],
     "basekoat": ["basecoat"],
+    "bescool": ["basecoat"],
+    "bescol": ["basecoat"],
+    "bescot": ["basecoat"],
     "compuesto": ["basecoat", "redimix"],
     "pasta": ["basecoat", "redimix"],
     "redemix": ["redimix"],
@@ -287,8 +293,8 @@ _ALWAYS_INCLUDE_KEYWORDS = {
 def prefilter_catalog(catalog: list[dict], text: str, max_items: int = 80) -> list[dict]:
     """
     Rankea catálogo por overlap de tokens (con expansión de jerga) y devuelve
-    los top max_items. Si hay pocos matches, complementa con productos comunes
-    para dar contexto al LLM.
+    los top max_items. FALLBACK — se usa solo si el prefilter semántico no está
+    disponible (sin company_id, sin embeddings en DB, o error).
 
     Esto reduce drásticamente los tokens del prompt — para Aceromax (~230 items)
     bajamos a ~50-80, lo que típicamente recorta 60-70% la latencia.
@@ -326,6 +332,172 @@ def prefilter_catalog(catalog: list[dict], text: str, max_items: int = 80) -> li
     return [it for _sc, it in scored[:max_items]]
 
 
+def _split_message_into_queries(text: str) -> list[str]:
+    """
+    Divide un mensaje multi-producto en líneas individuales para buscar
+    cada producto por separado en embeddings.
+    '31 perma base\\n7 rollos de maya' → ['perma base', 'maya']
+    """
+    import logging
+    _log = logging.getLogger("cotizaexpress.llm_parser")
+
+    # Noise words to strip from each line
+    _NOISE = {
+        "de", "del", "la", "las", "los", "el", "un", "una", "unos", "unas",
+        "para", "con", "por", "en", "y", "o", "x", "mt", "mts", "metro",
+        "metros", "pza", "pzas", "pieza", "piezas", "rollo", "rollos",
+        "caja", "cajas", "bolsa", "bolsas", "bulto", "bultos", "kg", "kgs",
+        "lt", "lts", "pqt", "saco", "sacos", "cubeta", "cubetas", "bote",
+        "botes", "costal", "costales", "paquete", "paquetes", "atado",
+        "atados", "hoja", "hojas", "tira", "tiras",
+    }
+
+    # Split on newlines, commas, bullets
+    lines = re.split(r"[\n,•·\-*]+", text)
+    queries = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        # Strip leading quantity (e.g. "31 ", "7 ", "1800 ")
+        line = re.sub(r"^\d+[\.\,]?\d*\s*", "", line).strip()
+        if not line:
+            continue
+        # Strip noise/packaging words
+        tokens = line.lower().split()
+        clean_tokens = [t for t in tokens if t not in _NOISE and not re.fullmatch(r"\d+", t)]
+        clean = " ".join(clean_tokens).strip()
+        if clean and len(clean) >= 2:
+            queries.append(clean)
+
+    _log.debug("PREFILTER SEMANTIC: split '%s' → %s", text[:80], queries)
+    return queries
+
+
+def prefilter_catalog_semantic(
+    company_id: str,
+    text: str,
+    catalog: list[dict],
+    max_items: int = 80,
+    sim_threshold: float = 0.30,
+    per_query_limit: int = 15,
+) -> list[dict]:
+    """
+    Prefilter semántico: usa embeddings (pgvector) para encontrar los productos
+    más relevantes del catálogo para el mensaje del cliente.
+
+    Ventajas sobre token-based:
+    - No requiere jerga map manual — 'bescool' queda cerca de 'basecoat'
+    - Escala a cualquier giro sin configuración
+    - Captura sinónimos y marcas competidoras automáticamente
+
+    Estrategia:
+    1. Divide el mensaje en líneas (un producto por línea)
+    2. Embeddea cada línea
+    3. Busca top-N productos más similares por línea en pgvector
+    4. Unifica resultados, ordena por max similarity
+    5. Si hay menos productos de lo esperado, complementa con el prefilter token-based
+    """
+    import logging
+    _log = logging.getLogger("cotizaexpress.llm_parser")
+
+    queries = _split_message_into_queries(text)
+    if not queries:
+        _log.info("PREFILTER SEMANTIC: no queries extracted, falling back to token-based")
+        return prefilter_catalog(catalog, text, max_items)
+
+    try:
+        from semantic_search import get_embeddings_batch, build_query_text
+        from db import get_conn
+
+        # Build query texts with same normalization as semantic_search
+        query_texts = [build_query_text(q) for q in queries]
+        # Filter empty
+        query_texts = [q for q in query_texts if q.strip()]
+        if not query_texts:
+            return prefilter_catalog(catalog, text, max_items)
+
+        # Batch embed all queries in one API call
+        t0 = time.time()
+        vectors = get_embeddings_batch(query_texts)
+        embed_ms = int((time.time() - t0) * 1000)
+        _log.info("PREFILTER SEMANTIC: embedded %d queries in %dms", len(query_texts), embed_ms)
+
+        # Query pgvector for each embedding
+        conn = get_conn()
+        cur = conn.cursor()
+        # product_name → max_similarity
+        product_scores: dict[str, float] = {}
+        product_data: dict[str, dict] = {}
+
+        for vec in vectors:
+            vector_str = "[" + ",".join(str(x) for x in vec) + "]"
+            cur.execute(
+                """
+                SELECT name, sku, unit, price, vat_rate, is_default, bundle_size,
+                       1 - (embedding <=> %s::vector) AS similarity
+                FROM pricebook_items
+                WHERE company_id = %s AND embedding IS NOT NULL
+                ORDER BY embedding <=> %s::vector
+                LIMIT %s
+                """,
+                (vector_str, company_id, vector_str, per_query_limit),
+            )
+            for row in cur.fetchall():
+                name, sku, unit, price, vat_rate, is_default, bundle_size, sim = row
+                sim = float(sim)
+                if sim < sim_threshold:
+                    continue
+                nk = norm_key(name or "")
+                if nk not in product_scores or sim > product_scores[nk]:
+                    product_scores[nk] = sim
+                    product_data[nk] = {
+                        "name": name,
+                        "sku": sku,
+                        "unit": unit,
+                        "price": float(price) if price is not None else None,
+                        "vat_rate": float(vat_rate) if vat_rate is not None else None,
+                        "is_default": bool(is_default) if is_default is not None else False,
+                        "bundle_size": bundle_size,
+                    }
+
+        cur.close()
+        conn.close()
+
+        # Sort by similarity descending
+        sorted_products = sorted(product_scores.items(), key=lambda x: x[1], reverse=True)
+
+        # Build result list
+        result = [product_data[nk] for nk, _sim in sorted_products[:max_items]]
+
+        _log.info(
+            "PREFILTER SEMANTIC: found %d products (threshold=%.2f), top: %s",
+            len(result),
+            sim_threshold,
+            [(nk, f"{s:.3f}") for nk, s in sorted_products[:5]],
+        )
+
+        # If we found very few products, supplement with token-based prefilter
+        # to ensure the LLM has enough context
+        if len(result) < 20 and len(catalog) > max_items:
+            _log.info("PREFILTER SEMANTIC: only %d products, supplementing with token-based", len(result))
+            existing_keys = {norm_key(it.get("name") or "") for it in result}
+            token_filtered = prefilter_catalog(catalog, text, max_items)
+            for item in token_filtered:
+                nk = norm_key(item.get("name") or "")
+                if nk not in existing_keys:
+                    result.append(item)
+                    existing_keys.add(nk)
+                if len(result) >= max_items:
+                    break
+
+        return result[:max_items]
+
+    except Exception as e:
+        _log.error("PREFILTER SEMANTIC FAILED: %s — falling back to token-based", repr(e))
+        return prefilter_catalog(catalog, text, max_items)
+
+
 # ---------------------------------------------------------------------------
 # Jerga global opcional (ferretería MX)
 # ---------------------------------------------------------------------------
@@ -335,11 +507,11 @@ JERGA_HINTS = """Jerga típica de ferretería mexicana:
 - "lightrey" / "light rey" → tablaroca ultralight.
 - "tablaroca WR" / "tablaroca RH" / "tablaroca anti moho" / "azul celeste" / "panel rey MR" → tablaroca anti-moho.
 - "securock" / "securok" → securock (material distinto a tablaroca).
-- "durock" / "duroc" / "durrock" → durock.
-- "basecoat" / "base coat" / "basekoat" / "biscoat" / "pasta tablaroca" / "pasta para juntas" / "pasta durock" / "compuesto para juntas" → basecoat.
+- "durock" / "duroc" / "durrock" / "permabase" / "perma base" / "permabse" → durock. NOTA: Permabase es la marca competidora (National Gypsum), pero la tienda maneja Durock (USG) como equivalente. Siempre matchea a durock.
+- "basecoat" / "base coat" / "basekoat" / "biscoat" / "bescool" / "bescol" / "bescot" / "pasta tablaroca" / "pasta para juntas" / "pasta durock" / "compuesto para juntas" → basecoat.
 - "redimix" / "redemix" / "ready mix" / "compuesto std plus" / "compuesto estandar plus" → redimix.
 - "perfacinta" / "perfacita" / "prefacinta" / "perfacintas" / "cinta papel" / "cinta de papel usg" / "cinta union" / "cinta de union" → perfacinta usg 75m x 5cm (es el ÚNICO producto de perfacinta — siempre matchea a esa key).
-- "cinta fibra" / "cinta de malla" / "cinta maya" / "malla para tablaroca" / "malla tablaroca" / "malla durock" → cinta fibra de vidrio.
+- "cinta fibra" / "cinta de malla" / "cinta maya" / "maya" / "mayas" / "rollos de maya" / "malla para tablaroca" / "malla tablaroca" / "malla durock" → cinta fibra de vidrio. IMPORTANTE: "maya" (con Y) es un error de ortografía de "malla", NUNCA es "plafón".
 - "pilas" / "pila" / "pijas" = pijas (tornillos). "pija fremer" / "pija flamer" / "pija frame" / "framer" → pija framer. "pija para durock" / "pilas para durock". "pija para tablaroca" / "tornillo para tablaroca" / "pija 6x1" → pija 6 x 1. "pija 10x1 1/2" / "pija 10x1.5" / "fijasora" / "punta de broca" → pija 10 x 1 1/2.
 - "taquete ancla" / "taquete anclo" / "ancla de expansion" → taquete expansion. "taquete un cuarto" / "taquetes 1/4" / "taquetes de un cuarto" → taquete de plástico 1/4".
 - "cancel" / "cnal" / "canel" / "canaleta" → canal. "canal de amarre" / "canal amarre" / "canales de amarre" = SIEMPRE es un canal (track de tablaroca), NUNCA es "ángulo de amarre". Elige el canal marcado [DEFAULT] si no especifica medida. "canaleta de carga" / "cargadora" / "canaleta CA" → canaleta de carga.
@@ -412,6 +584,54 @@ Si el mensaje NO es una orden, devuelve:
 {{"items": [], "non_order": true}}"""
 
 
+SYSTEM_PROMPT_DYNAMIC = """{system_intro}
+
+Recibes mensajes de clientes por WhatsApp y los conviertes en una lista estructurada.
+
+{jerga}
+
+CATÁLOGO DISPONIBLE (formato: "- <key> || <nombre> | <unidad> | <precio>"):
+{catalog}
+
+REGLAS:
+1. Identifica cada producto que el cliente quiere cotizar. El mensaje puede tener 1 o muchos productos separados por comas, guiones, asteriscos, viñetas, saltos de línea, "y", o listas enumeradas.
+2. Para cada producto, elige el <key> del catálogo que mejor corresponde. NUNCA inventes una key que no esté listada arriba.
+3. Si el cliente escribe jerga, typos o nombres cortos, usa tu conocimiento de la industria y la sección de jerga arriba para identificar el producto correcto.
+4. Si NO hay match claro en el catálogo, devuelve key=null y confidence baja (<0.6), con el texto original en matched_text y name. PERO si hay una sola opción posible del tipo de producto (ej. solo existe una perfacinta, un solo basecoat), SÍ devuelve esa key con confidence alta.
+5. Cantidad por defecto: 1. Interpreta "2 de cada", "5 paquetes", "10 mts", cantidades al final del producto ("Tornillo 300"), números con decimal como cantidades (175 o 175.00 panel = 175 unidades, NO precio).
+6. Si una línea dice "1 ???" o similar (basura), IGNÓRALA por completo.
+7. Si el mensaje es un botón de UI, un saludo puro ("hola", "buenos días"), una pregunta de horarios, un número de teléfono, o un "salir" / "cancelar", devuelve items=[] y non_order=true.
+8. Si un spec aparece al final y aplica a varios productos arriba (ej: "Canal 4 y 6.35 cal 26" → cal 26 aplica a ambos), propágalo.
+9. Si aparece un forward con saludo de otro proveedor antes de la lista, ignora el saludo y parsea SOLO la lista de productos.
+10. Nombres de proyecto al inicio ("Mat. Privanzas", "Del closet") no son productos, son contexto.
+11. PRODUCTOS DEFAULT: Algunos productos tienen la marca [DEFAULT] en el catálogo. Cuando el cliente pide un producto genérico SIN especificar tamaño, calibre, medida, presentación o variante, SIEMPRE elige el producto marcado [DEFAULT] de ese tipo.
+
+RESOLUCIÓN DE AMBIGÜEDADES — USA TU CONOCIMIENTO DE LA INDUSTRIA:
+Cuando el cliente NO especifica variante, calibre, medida, etc., NO adivines al azar. Usa tu conocimiento técnico para inferir la opción correcta, tal como lo haría un vendedor experimentado. Analiza el CONTEXTO del pedido completo.
+IMPORTANTE: Si un producto tiene la marca [DEFAULT] y el cliente NO especifica variante, SIEMPRE elige el [DEFAULT].
+Si genuinamente no puedes determinar cuál variante es Y no hay un [DEFAULT] marcado, devuelve key=null y confidence baja.
+NUNCA combines o sumes cantidades de productos diferentes. Cada línea del mensaje es un producto independiente.
+
+OUTPUT: JSON válido, sin markdown, exactamente esta estructura:
+{{{{
+  "items": [
+    {{{{
+      "matched_text": "fragmento original del mensaje",
+      "key": "<key del catálogo o null>",
+      "name": "nombre del catálogo si hay key, o nombre libre si key=null",
+      "qty": entero o decimal,
+      "unit": "pza|mt|kg|lt|pqt|caja|rollo|bulto|bolsa|null",
+      "confidence": 0.0 a 1.0,
+      "notes": "explicación breve si confidence<0.8 o key=null"
+    }}}}
+  ],
+  "non_order": false
+}}}}
+
+Si el mensaje NO es una orden, devuelve:
+{{{{"items": [], "non_order": true}}}}"""
+
+
 USER_TEMPLATE = "Mensaje del cliente:\n```\n{text}\n```"
 
 
@@ -423,6 +643,7 @@ def llm_parse_order(
     text: str,
     catalog: list[dict],
     *,
+    company_id: str | None = None,
     model: str = "gpt-4o-mini",
     temperature: float = 0.0,
     timeout: float = 30.0,
@@ -468,11 +689,35 @@ def llm_parse_order(
             "precleaned_text": "",
         }
 
-    filtered = prefilter_catalog(catalog, cleaned, max_items=80)
+    # Semantic prefilter (embedding-based) when company_id available, else token-based
+    if company_id:
+        filtered = prefilter_catalog_semantic(company_id, cleaned, catalog, max_items=80)
+    else:
+        filtered = prefilter_catalog(catalog, cleaned, max_items=80)
     catalog_block = format_catalog_for_prompt(filtered)
-    jerga_block = JERGA_HINTS if include_jerga_hints else ""
 
-    system = SYSTEM_PROMPT.format(jerga=jerga_block, catalog=catalog_block)
+    # Dynamic LLM context per company (if available), else hardcoded fallback
+    _dynamic_ctx = None
+    if company_id:
+        try:
+            from llm_context_generator import get_company_llm_context
+            _dynamic_ctx = get_company_llm_context(company_id)
+        except Exception as _e:
+            import logging as _lg
+            _lg.getLogger("cotizaexpress.llm_parser").debug(
+                "Dynamic LLM context unavailable: %s", repr(_e)
+            )
+
+    if _dynamic_ctx and _dynamic_ctx.get("jerga_hints"):
+        jerga_block = _dynamic_ctx["jerga_hints"]
+        # Use dynamic system intro + the standard rules
+        system_intro = _dynamic_ctx.get("system_intro", "")
+        system = SYSTEM_PROMPT_DYNAMIC.format(
+            system_intro=system_intro, jerga=jerga_block, catalog=catalog_block
+        )
+    else:
+        jerga_block = JERGA_HINTS if include_jerga_hints else ""
+        system = SYSTEM_PROMPT.format(jerga=jerga_block, catalog=catalog_block)
     user = USER_TEMPLATE.format(text=cleaned)
 
     start = time.time()
@@ -661,8 +906,9 @@ _SYNONYM_TYPE_GROUPS = [
     {"poste", "postes", "pste", "psts"},
     {"redimix", "redemix", "ready"},
     {"perfacinta", "perfacita", "prefacinta", "cinta"},
-    {"basecoat", "pasta", "compuesto", "biscoat"},
-    {"durock", "duroc", "durrock"},
+    {"malla", "mallas", "maya", "mayas"},
+    {"basecoat", "pasta", "compuesto", "biscoat", "bescool", "bescol"},
+    {"durock", "duroc", "durrock", "permabase", "permabse", "perma"},
     {"securock", "securok"},
     {"abrazadera", "abrazaderas"},
     {"reborde", "revorde", "jota"},

@@ -93,7 +93,7 @@ def _auto_plural_singular(name: str) -> list:
 
 
 def _rebuild_embeddings_bg(company_id: str):
-    """Background task to rebuild embeddings + context groups."""
+    """Background task to rebuild embeddings + context groups + LLM context."""
     try:
         log.info("BG EMBEDDINGS START: company=%s", company_id)
         conn = get_conn()
@@ -107,6 +107,14 @@ def _rebuild_embeddings_bg(company_id: str):
                 log.error("BG CONTEXT GROUPS ERROR: %s", repr(cge))
         finally:
             conn.close()
+
+        # Regenerate LLM context (jerga hints + system prompt) based on new catalog
+        try:
+            from llm_context_generator import generate_and_store_llm_context
+            generate_and_store_llm_context(company_id)
+        except Exception as lce:
+            log.error("BG LLM CONTEXT ERROR: %s", repr(lce))
+
     except Exception as e:
         log.error("BG EMBEDDINGS ERROR: %s", repr(e))
 
@@ -145,6 +153,7 @@ def rebuild_synonyms(request: Request):
 
 
 @router.get("/api/web/pricebook/template")
+@router.get("/api/carga-productos/template")  # alias for CargaProductos.js
 def download_template(request: Request):
     _ = get_user_from_session(request)
     wb = Workbook()
@@ -284,6 +293,7 @@ async def carga_productos_rapida(request: Request, background_tasks: BackgroundT
 
 
 @router.post("/api/pricebook/upload")
+@router.post("/api/carga-productos/upload-excel")  # alias for CargaProductos.js
 def pricebook_upload(
     request: Request,
     authorization: str = Header(default=""),
