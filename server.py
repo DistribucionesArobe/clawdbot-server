@@ -770,6 +770,38 @@ def api_contacto(body: ContactoBody):
         except Exception as we:
             log.warning("CONTACTO WA NOTIFY ERROR: %s", repr(we))
 
+        # Notify owner via email (best effort)
+        _smtp_host = os.environ.get("SMTP_HOST", "mail.privateemail.com")
+        _smtp_port = int(os.environ.get("SMTP_PORT", "465"))
+        _smtp_user = os.environ.get("SMTP_USER", "")
+        _smtp_pass = os.environ.get("SMTP_PASS", "")
+        if _smtp_user and _smtp_pass:
+            try:
+                import smtplib
+                from email.mime.text import MIMEText
+                from email.mime.multipart import MIMEMultipart
+
+                msg = MIMEMultipart()
+                msg["From"] = _smtp_user
+                msg["To"] = _smtp_user  # send to self
+                msg["Subject"] = f"Nuevo lead CotizaBot #{lead_id} - {body.nombre}"
+                email_body = (
+                    f"Nuevo contacto desde cotizaexpress.com\n\n"
+                    f"Nombre: {body.nombre}\n"
+                    f"Email: {body.email}\n"
+                    f"Teléfono: {body.telefono}\n\n"
+                    f"Mensaje:\n{body.mensaje}\n\n"
+                    f"---\nLead #{lead_id}"
+                )
+                msg.attach(MIMEText(email_body, "plain", "utf-8"))
+
+                with smtplib.SMTP_SSL(_smtp_host, _smtp_port) as smtp:
+                    smtp.login(_smtp_user, _smtp_pass)
+                    smtp.send_message(msg)
+                log.info("CONTACTO EMAIL SENT to %s", _smtp_user)
+            except Exception as me:
+                log.warning("CONTACTO EMAIL ERROR: %s", repr(me))
+
         return {"ok": True, "id": lead_id}
     except Exception as e:
         log.error("CONTACTO ERROR: %s", repr(e))
