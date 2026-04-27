@@ -144,26 +144,44 @@ def _get_system_intro(giro: str, descripcion: str = "", company_name: str = "") 
 # Jerga generation via LLM
 # ---------------------------------------------------------------------------
 
-_JERGA_GENERATION_PROMPT = """Analiza este catálogo de productos de un negocio mexicano ({giro}) y genera una guía de jerga/slang que los clientes usan por WhatsApp.
+_JERGA_GENERATION_PROMPT = """Analiza este catálogo de productos de un negocio mexicano ({giro}) y genera una guía de jerga/slang que los clientes REALMENTE usan por WhatsApp.
 
 CATÁLOGO (nombre | unidad | precio):
 {catalog_sample}
 
 {brand_context}
 
-INSTRUCCIONES:
-1. Para cada producto o grupo de productos, lista las formas informales, abreviaciones, errores ortográficos comunes y marcas competidoras que un cliente mexicano usaría por WhatsApp.
-2. Incluye errores fonéticos comunes del español mexicano (b↔v, s↔z↔c, omisión de acentos, etc.).
-3. Si hay marcas de competencia listadas, indica a qué producto del catálogo equivalen.
-4. Agrupa por categoría de producto.
-5. Incluye reglas de desambiguación (qué hacer cuando el cliente no especifica tamaño, calibre, etc.).
-6. Marca con [DEFAULT] los productos genéricos cuando el cliente no especifica variante.
+INSTRUCCIONES CRÍTICAS:
 
-FORMATO de respuesta — texto plano, estilo:
-- "nombre informal" / "typo" / "slang" → nombre exacto del catálogo.
+1. JERGA DE CALLE — los clientes NO usan nombres oficiales. Usan apodos, abreviaciones, marcas de competencia, y escriben con errores. Ejemplos REALES del giro de materiales:
+   - "permabase" / "perma base" / "permabse" / "perma" = es el nombre de la marca COMPETIDORA (Panel Rey) del producto tipo panel de cemento. Si la tienda vende Durock o Securock, mapear a ese.
+   - "bescool" / "bescol" / "bescot" / "veskul" = basecoat (pasta base para juntas)
+   - "maya" / "malla" = cinta de fibra de vidrio para juntas, NUNCA es plafón
+   - "muro" / "muros" / "pared" = el cliente quiere paneles de tablaroca/yeso, no un producto llamado "muro"
+   - "tabla" / "tablero" = tablaroca
+   - "pija" / "pijas" = tornillo para tablaroca
+   - "perfacinta" / "perfacin" = cinta de papel para juntas
+
+2. MARCAS DE COMPETENCIA — esto es lo MÁS IMPORTANTE. Cuando el cliente pide un producto por nombre de marca competidora, mapear al equivalente del catálogo:
+   - Si la tienda maneja USG y el cliente pide algo de "Panel Rey", buscar el equivalente USG en el catálogo.
+   - Ejemplo: "quiero muro de panel rey de 12mm" → buscar tablaroca/panel de yeso de 12mm del catálogo.
+   - Ejemplo: "dame permabase" → buscar el panel de cemento (Durock, Securock, etc.) del catálogo.
+
+3. ERRORES ORTOGRÁFICOS REALES de WhatsApp — los clientes escriben rápido y mal:
+   - b↔v ("bescool" vs "vescul"), s↔z↔c, omisión de acentos
+   - Palabras pegadas ("panelrey"), espacios extras ("perma base")
+   - Abreviaciones ("tab 12mm" = tablaroca 12mm, "pta" = puerta)
+
+4. DESAMBIGUACIÓN — qué hacer cuando el cliente no especifica variante (tamaño, calibre, espesor).
+
+5. REGLAS DE CONTEXTO — cuando una palabra tiene múltiples significados en el catálogo, dar la regla clara.
+
+FORMATO:
+### [Categoría]
+- "jerga callejera" / "typo" / "marca competidora" → nombre exacto del catálogo.
 - REGLA: cuando el cliente pide X sin especificar, elegir Y.
 
-NO incluyas JSON, solo texto plano con guiones. Sé conciso pero exhaustivo con los typos más comunes."""
+NO incluyas JSON. Sé EXHAUSTIVO con la jerga callejera y marcas de competencia — eso es lo que más falla."""
 
 
 def _generate_jerga_hints(
@@ -214,7 +232,7 @@ def _generate_jerga_hints(
             temperature=0.3,
             timeout=60,
             messages=[
-                {"role": "system", "content": "Eres un experto en ferretería y materiales de construcción en México. Conoces toda la jerga, slang, marcas y errores ortográficos comunes de los clientes."},
+                {"role": "system", "content": "Eres un ferretero mexicano veterano con 30 años de experiencia atendiendo clientes por mostrador y WhatsApp. Conoces TODA la jerga callejera, apodos de productos, marcas de competencia, y los errores ortográficos más comunes que los albañiles, contratistas y clientes escriben rápido en WhatsApp. Tu objetivo es mapear la forma en que los clientes REALMENTE piden productos (con todo y errores) a los nombres exactos del catálogo."},
                 {"role": "user", "content": prompt},
             ],
         )
