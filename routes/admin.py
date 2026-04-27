@@ -163,6 +163,8 @@ def generate_llm_context_endpoint(company_id: str = "30208e3c-70c6-4203-97d9-172
             "giro": result.get("giro", ""),
             "product_count": result.get("product_count", 0),
             "jerga_length": len(result.get("jerga_hints", "")),
+            "jerga_hints": result.get("jerga_hints", ""),
+            "system_intro": result.get("system_intro", ""),
             "generated_at": result.get("generated_at", ""),
         }
     except Exception as e:
