@@ -152,6 +152,23 @@ def generate_context_groups_endpoint(company_id: str = "30208e3c-70c6-4203-97d9-
         conn.close()
 
 
+@router.post("/api/admin/generate-llm-context")
+def generate_llm_context_endpoint(company_id: str = "30208e3c-70c6-4203-97d9-172fad7d3c75"):
+    """Generate dynamic LLM context (system prompt + jerga hints) for a company."""
+    try:
+        from llm_context_generator import generate_and_store_llm_context
+        result = generate_and_store_llm_context(company_id)
+        return {
+            "ok": bool(result),
+            "giro": result.get("giro", ""),
+            "product_count": result.get("product_count", 0),
+            "jerga_length": len(result.get("jerga_hints", "")),
+            "generated_at": result.get("generated_at", ""),
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 # ── Synonyms endpoints ─────────────────────────────────────────────────────
 
 @router.post("/api/admin/rebuild-synonyms-public")
