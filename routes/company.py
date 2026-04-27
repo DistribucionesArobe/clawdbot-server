@@ -47,6 +47,8 @@ class CompanySettingsBody(BaseModel):
     telefono_atencion: Optional[str] = None
     marcas_propias: Optional[str] = None
     marcas_competencia: Optional[str] = None
+    giro: Optional[str] = None
+    giro_otro: Optional[str] = None
 
     @validator('discount_threshold', 'discount_percent', pre=True)
     def coerce_empty_to_none(cls, v):
@@ -112,6 +114,10 @@ def company_settings_update(request: Request, body: CompanySettingsBody):
     _add_str(body.marcas_propias, "marcas_propias")
     _add_str(body.marcas_competencia, "marcas_competencia")
 
+    # Giro (business type)
+    _add_str(body.giro, "giro")
+    _add_str(body.giro_otro, "giro_otro")
+
     # Module toggles
     _add_bool(body.construccion_ligera_enabled, "construccion_ligera_enabled")
     _add_bool(body.rejacero_enabled, "rejacero_enabled")
@@ -152,8 +158,8 @@ def company_settings_update(request: Request, body: CompanySettingsBody):
                 END IF;
             END $$;
         """)
-        # Brand context columns
-        for _bcol in ("marcas_propias", "marcas_competencia"):
+        # Brand context & giro columns
+        for _bcol in ("marcas_propias", "marcas_competencia", "giro", "giro_otro"):
             cur.execute(f"""
                 DO $$ BEGIN
                     IF NOT EXISTS (SELECT 1 FROM information_schema.columns
@@ -201,7 +207,7 @@ def company_settings_update(request: Request, body: CompanySettingsBody):
         conn.commit()
 
         # Regenerate LLM context if brand/giro-relevant fields changed
-        if body.marcas_propias is not None or body.marcas_competencia is not None:
+        if body.marcas_propias is not None or body.marcas_competencia is not None or body.giro is not None:
             try:
                 from llm_context_generator import generate_and_store_llm_context
                 import threading
@@ -241,6 +247,8 @@ def company_settings_get(request: Request):
             ("telefono_atencion", "VARCHAR(30)"),
             ("marcas_propias", "TEXT"),
             ("marcas_competencia", "TEXT"),
+            ("giro", "TEXT"),
+            ("giro_otro", "TEXT"),
         ]:
             cur.execute(f"""
                 DO $$ BEGIN
@@ -258,7 +266,8 @@ def company_settings_get(request: Request):
                    mercadopago_url, bank_name, bank_account_name, bank_clabe, bank_account_number,
                    owner_phone, email, rfc, brand_color, logo_url,
                    discount_threshold, discount_percent, welcome_products_hint, welcome_message,
-                   telefono_atencion, marcas_propias, marcas_competencia
+                   telefono_atencion, marcas_propias, marcas_competencia,
+                   giro, giro_otro
             FROM companies WHERE id=%s LIMIT 1
             """,
             (company_id,),
@@ -280,6 +289,8 @@ def company_settings_get(request: Request):
                 "telefono_atencion": row[17] or None,
                 "marcas_propias": row[18] or None,
                 "marcas_competencia": row[19] or None,
+                "giro": row[20] or None,
+                "giro_otro": row[21] or None,
             },
         }
     finally:
