@@ -124,10 +124,11 @@ def whatsapp_configuracion_get(request: Request):
         # Check if they have an active Meta channel
         has_meta_channel = False
         meta_phone_display = None
+        meta_phone_number_id = None
         try:
             cur.execute(
                 """
-                SELECT address FROM channels
+                SELECT address, meta_phone_number_id FROM channels
                 WHERE company_id=%s AND is_active=TRUE AND provider='meta'
                 LIMIT 1
                 """,
@@ -137,6 +138,7 @@ def whatsapp_configuracion_get(request: Request):
             if ch_row:
                 has_meta_channel = True
                 meta_phone_display = ch_row[0]
+                meta_phone_number_id = ch_row[1]
         except Exception:
             pass
 
@@ -167,6 +169,9 @@ def whatsapp_configuracion_get(request: Request):
             "ok": True,
             "configurado": configurado,
             "numero_cotizabot": _COTIZABOT_NUMBER,
+            # Top-level fields for frontend compatibility
+            "wa_phone_number_id": meta_phone_number_id,
+            "phone_number_display": meta_phone_display,
             "whatsapp": whatsapp_data,
             "empresa": {
                 "nombre": name,
