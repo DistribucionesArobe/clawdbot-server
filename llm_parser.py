@@ -714,7 +714,10 @@ def llm_parse_order(
             )
 
     if _dynamic_ctx and _dynamic_ctx.get("jerga_hints"):
-        jerga_block = _dynamic_ctx["jerga_hints"]
+        # MERGE: hardcoded base jerga + dynamic catalog-specific jerga
+        # The hardcoded hints have proven street-level terms (permabase, bescool, maya, muro)
+        # The dynamic hints add catalog-specific disambiguation rules
+        jerga_block = JERGA_HINTS + "\n\n--- Reglas adicionales por catálogo ---\n\n" + _dynamic_ctx["jerga_hints"]
         # Use dynamic system intro + the standard rules
         system_intro = _dynamic_ctx.get("system_intro", "")
         system = SYSTEM_PROMPT_DYNAMIC.format(
