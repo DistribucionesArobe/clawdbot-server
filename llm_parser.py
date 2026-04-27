@@ -209,6 +209,11 @@ JERGA_EXPANSION = {
     "tablarock": ["tablaroca", "panel", "yeso"],
     "tabla": ["tablaroca", "panel", "yeso"],
     "panel": ["tablaroca", "panel", "yeso"],
+    "rey": ["tablaroca", "panel"],
+    "muro": ["tablaroca", "panel", "durock"],
+    "muros": ["tablaroca", "panel", "durock"],
+    "pared": ["tablaroca", "panel"],
+    "paredes": ["tablaroca", "panel"],
     "hoja": ["tablaroca", "panel"],
     "hojas": ["tablaroca", "panel"],
     "lamina": ["tablaroca", "lamina"],
@@ -503,7 +508,7 @@ def prefilter_catalog_semantic(
 # ---------------------------------------------------------------------------
 
 JERGA_HINTS = """Jerga típica de ferretería mexicana:
-- "tablaroca" = panel de yeso. "panel rey" / "panel de yeso" / "hojas de yeso" / "lamina de yeso" / "tablarock" / "tabla roca" / "tblrc" → tablaroca.
+- "tablaroca" = panel de yeso. "panel rey" / "panel de yeso" / "hojas de yeso" / "lamina de yeso" / "tablarock" / "tabla roca" / "tblrc" → tablaroca. "muro" / "muros" / "pared" / "paredes" + material = el cliente quiere las hojas/paneles para construir, NO es un producto llamado "muro". "Quiero muro de panel rey 12mm" = quiero tablaroca 12mm.
 - "lightrey" / "light rey" → tablaroca ultralight.
 - "tablaroca WR" / "tablaroca RH" / "tablaroca anti moho" / "azul celeste" / "panel rey MR" → tablaroca anti-moho.
 - "securock" / "securok" → securock (material distinto a tablaroca).
@@ -898,7 +903,7 @@ def _post_correct_items(items: list[dict], original_text: str) -> list[dict]:
 _SYNONYM_TYPE_GROUPS = [
     {"pija", "pijas", "tornillo", "tornillos", "pilas", "fijasora"},
     {"taquete", "taquetes", "ancla", "anclas"},
-    {"tablaroca", "panel", "hoja", "hojas", "tabla", "lamina"},
+    {"tablaroca", "panel", "hoja", "hojas", "tabla", "lamina", "muro", "muros", "pared"},
     {"barrote", "barrotes", "tira", "tiras", "liston", "listones", "tramos"},
     {"plafon", "plafones", "galleta", "galletas"},
     {"reja", "rejas", "rejacero"},
