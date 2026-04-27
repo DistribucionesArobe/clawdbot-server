@@ -169,6 +169,19 @@ def generate_llm_context_endpoint(company_id: str = "30208e3c-70c6-4203-97d9-172
         return {"ok": False, "error": str(e)}
 
 
+@router.get("/api/admin/llm-context")
+def read_llm_context_endpoint(company_id: str = "30208e3c-70c6-4203-97d9-172fad7d3c75"):
+    """Read stored LLM context for a company (debug)."""
+    try:
+        from llm_context_generator import get_company_llm_context
+        ctx = get_company_llm_context(company_id)
+        if not ctx:
+            return {"ok": False, "error": "No context generated yet"}
+        return {"ok": True, "context": ctx}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 # ── Synonyms endpoints ─────────────────────────────────────────────────────
 
 @router.post("/api/admin/rebuild-synonyms-public")
