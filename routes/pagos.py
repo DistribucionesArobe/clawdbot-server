@@ -248,22 +248,22 @@ def promo_crear(request: Request, body: PromoCodeCreate):
         _stripe.api_key = _STRIPE_SECRET_KEY
         try:
             # Create Stripe coupon based on discount type
+            # NOTE: currency is only for amount_off, NOT percent_off
             coupon_params = {
                 "name": f"Promo {code}",
-                "currency": "mxn",
             }
             if body.discount_type == "trial_days":
                 # For trial days: 100% off for the trial duration
-                coupon_params["percent_off"] = 100
+                coupon_params["percent_off"] = 100.0
                 coupon_params["duration"] = "repeating"
                 coupon_params["duration_in_months"] = max(1, int(body.discount_value / 30))
             elif body.discount_type == "percentage":
-                pct = min(body.discount_value, 100)
+                pct = min(float(body.discount_value), 100.0)
                 coupon_params["percent_off"] = pct
                 # 100% off = forever free (family/VIP codes)
                 coupon_params["duration"] = "forever" if pct >= 100 else "once"
             else:
-                coupon_params["percent_off"] = min(body.discount_value, 100)
+                coupon_params["percent_off"] = min(float(body.discount_value), 100.0)
                 coupon_params["duration"] = "once"
 
             coupon = _stripe.Coupon.create(**coupon_params)
@@ -285,8 +285,10 @@ def promo_crear(request: Request, body: PromoCodeCreate):
             log.info("STRIPE PROMO CREATED: code=%s coupon=%s promo=%s", code, stripe_coupon_id, stripe_promo_id)
         except Exception as e:
             log.error("STRIPE PROMO CREATE ERROR: %s", repr(e))
-            # Don't fail — still save in DB, just warn
-            stripe_promo_id = None
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error creando código en Stripe: {str(e)}. El código NO se creó."
+            )
 
     # 2. Save in local DB
     conn = None; cur = None
