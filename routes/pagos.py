@@ -119,6 +119,20 @@ def pago_estado(request: Request, session_id: str = Query(...)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/api/pagos/stripe-check")
+def stripe_check():
+    """Temporary diagnostic: verify Stripe key works."""
+    if not _STRIPE_SECRET_KEY:
+        return {"ok": False, "error": "STRIPE_SECRET_KEY not set", "key_prefix": ""}
+    _stripe.api_key = _STRIPE_SECRET_KEY
+    try:
+        # Just list 1 product to verify the key works
+        products = _stripe.Product.list(limit=1)
+        return {"ok": True, "stripe_version": _stripe.VERSION, "key_prefix": _STRIPE_SECRET_KEY[:8] + "..."}
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {str(e)}", "key_prefix": _STRIPE_SECRET_KEY[:8] + "..."}
+
+
 @router.get("/api/pagos/checkout-status/{session_id}")
 def pago_checkout_status(session_id: str):
     """Frontend-facing endpoint for PagoExitoso page polling."""
@@ -181,12 +195,12 @@ def pago_checkout_status(session_id: str):
             "plan_activado": plan_activado,
             "mensaje": f"¡Pago exitoso! Tu {plan_name} está activo." if paid else None,
         }
-    except _stripe.error.InvalidRequestError as e:
-        log.error("CHECKOUT STATUS STRIPE INVALID: %s", repr(e))
-        raise HTTPException(status_code=404, detail=f"Sesión de Stripe no encontrada: {str(e)}")
     except Exception as e:
-        log.error("CHECKOUT STATUS ERROR: %s (type: %s)", repr(e), type(e).__name__)
-        raise HTTPException(status_code=500, detail=str(e))
+        err_type = type(e).__name__
+        err_msg = str(e)
+        log.error("CHECKOUT STATUS ERROR: %s: %s", err_type, err_msg)
+        # Return the full error detail so we can debug from the frontend
+        raise HTTPException(status_code=500, detail=f"{err_type}: {err_msg}")
 
 
 @router.post("/api/pagos/webhook")
