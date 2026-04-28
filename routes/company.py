@@ -62,6 +62,7 @@ class CompanySettingsBody(BaseModel):
 
 # ── Routes ──────────────────────────────────────────────────────────────────
 
+
 @router.post("/api/company/settings")
 def company_settings_update(request: Request, body: CompanySettingsBody):
     company_id = require_company_id(request)
@@ -278,6 +279,7 @@ def company_settings_get(request: Request):
             raise HTTPException(status_code=404, detail="Company no encontrada")
         return {
             "ok": True,
+            "company_id": company_id,
             "settings": {
                 "hours_text": row[0], "address_text": row[1], "google_maps_url": row[2],
                 "mercadopago_url": row[3], "bank_name": row[4], "bank_account_name": row[5],
