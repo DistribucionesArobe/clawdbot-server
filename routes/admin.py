@@ -394,6 +394,39 @@ def get_version():
     return {"version": "1.0.0"}
 
 
+# ── Plan management ─────────────────────────────────────────────────────────
+
+class AdminSetPlanBody(BaseModel):
+    plan_code: str = "free"
+
+
+@router.put("/api/admin/company/{company_id}/plan")
+def admin_set_plan(company_id: str, request: Request, body: AdminSetPlanBody):
+    """Manually set a company's plan_code (admin only)."""
+    _require_admin(request)
+
+    if body.plan_code not in ("free", "cotizabot", "pro"):
+        raise HTTPException(status_code=400, detail="plan_code debe ser free, cotizabot o pro")
+
+    conn = None
+    cur = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE companies SET plan_code=%s, updated_at=now() WHERE id=%s RETURNING id, name",
+            (body.plan_code, company_id),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Company no encontrada")
+        conn.commit()
+        return {"ok": True, "company_id": row[0], "name": row[1], "plan_code": body.plan_code}
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
+
+
 # ── Quote state endpoints ──────────────────────────────────────────────────
 
 @router.delete("/api/admin/quote-state/{wa_from}")
