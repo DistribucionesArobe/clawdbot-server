@@ -270,17 +270,25 @@ def promo_crear(request: Request, body: PromoCodeCreate):
             stripe_coupon_id = coupon.id
 
             # Create Stripe promotion code (the actual code string)
-            promo_params = {
-                "coupon": coupon.id,
-                "code": code,
-                "active": True,
-            }
+            # Try v15+ API first (promotion={type,coupon}), fall back to legacy (coupon=)
+            promo_base = {"code": code, "active": True}
             if body.max_uses is not None:
-                promo_params["max_redemptions"] = body.max_uses
+                promo_base["max_redemptions"] = body.max_uses
             if body.one_per_customer:
-                promo_params["restrictions"] = {"first_time_transaction": True}
+                promo_base["restrictions"] = {"first_time_transaction": True}
 
-            stripe_promo = _stripe.PromotionCode.create(**promo_params)
+            try:
+                # stripe v15+
+                stripe_promo = _stripe.PromotionCode.create(
+                    promotion={"type": "coupon", "coupon": coupon.id},
+                    **promo_base,
+                )
+            except (TypeError, _stripe.InvalidRequestError):
+                # stripe < v15 (legacy param)
+                stripe_promo = _stripe.PromotionCode.create(
+                    coupon=coupon.id,
+                    **promo_base,
+                )
             stripe_promo_id = stripe_promo.id
             log.info("STRIPE PROMO CREATED: code=%s coupon=%s promo=%s", code, stripe_coupon_id, stripe_promo_id)
         except Exception as e:
