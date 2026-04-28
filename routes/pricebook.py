@@ -525,7 +525,14 @@ def pricebook_items(
                 "bundle_size": r[10],
                 "is_default": bool(r[11]) if len(r) > 11 else False,
             })
-        return {"ok": True, "items": items}
+        # Get total count (independent of limit)
+        cur.execute(
+            "SELECT COUNT(*) FROM pricebook_items WHERE company_id=%s",
+            (company_id,),
+        )
+        total = cur.fetchone()[0] or 0
+
+        return {"ok": True, "items": items, "total": total}
     except HTTPException:
         raise
     except Exception as e:
