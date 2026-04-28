@@ -258,10 +258,11 @@ def promo_crear(request: Request, body: PromoCodeCreate):
                 coupon_params["duration"] = "repeating"
                 coupon_params["duration_in_months"] = max(1, int(body.discount_value / 30))
             elif body.discount_type == "percentage":
-                coupon_params["percent_off"] = min(body.discount_value, 100)
-                coupon_params["duration"] = "once"
+                pct = min(body.discount_value, 100)
+                coupon_params["percent_off"] = pct
+                # 100% off = forever free (family/VIP codes)
+                coupon_params["duration"] = "forever" if pct >= 100 else "once"
             else:
-                # Default: treat as percentage
                 coupon_params["percent_off"] = min(body.discount_value, 100)
                 coupon_params["duration"] = "once"
 
