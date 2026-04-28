@@ -235,11 +235,59 @@ async def stripe_webhook(request: Request):
 
 @router.post("/api/pagos/promo/crear")
 def promo_crear(request: Request, body: PromoCodeCreate):
-    """Admin: crear un código promo."""
+    """Admin: crear un código promo (DB + Stripe sync)."""
     _require_admin(request)
     code = (body.code or "").strip().upper()
     if not code or len(code) < 3:
         raise HTTPException(status_code=400, detail="Código debe tener al menos 3 caracteres")
+
+    # 1. Create in Stripe first
+    stripe_promo_id = None
+    stripe_coupon_id = None
+    if _STRIPE_SECRET_KEY:
+        _stripe.api_key = _STRIPE_SECRET_KEY
+        try:
+            # Create Stripe coupon based on discount type
+            coupon_params = {
+                "name": f"Promo {code}",
+                "currency": "mxn",
+            }
+            if body.discount_type == "trial_days":
+                # For trial days: 100% off for the trial duration
+                coupon_params["percent_off"] = 100
+                coupon_params["duration"] = "repeating"
+                coupon_params["duration_in_months"] = max(1, int(body.discount_value / 30))
+            elif body.discount_type == "percentage":
+                coupon_params["percent_off"] = min(body.discount_value, 100)
+                coupon_params["duration"] = "once"
+            else:
+                # Default: treat as percentage
+                coupon_params["percent_off"] = min(body.discount_value, 100)
+                coupon_params["duration"] = "once"
+
+            coupon = _stripe.Coupon.create(**coupon_params)
+            stripe_coupon_id = coupon.id
+
+            # Create Stripe promotion code (the actual code string)
+            promo_params = {
+                "coupon": coupon.id,
+                "code": code,
+                "active": True,
+            }
+            if body.max_uses is not None:
+                promo_params["max_redemptions"] = body.max_uses
+            if body.one_per_customer:
+                promo_params["restrictions"] = {"first_time_transaction": True}
+
+            stripe_promo = _stripe.PromotionCode.create(**promo_params)
+            stripe_promo_id = stripe_promo.id
+            log.info("STRIPE PROMO CREATED: code=%s coupon=%s promo=%s", code, stripe_coupon_id, stripe_promo_id)
+        except Exception as e:
+            log.error("STRIPE PROMO CREATE ERROR: %s", repr(e))
+            # Don't fail — still save in DB, just warn
+            stripe_promo_id = None
+
+    # 2. Save in local DB
     conn = None; cur = None
     try:
         conn = get_conn(); cur = conn.cursor()
@@ -260,6 +308,8 @@ def promo_crear(request: Request, body: PromoCodeCreate):
                 "discount_value": float(row[3]), "max_uses": row[4],
                 "times_used": row[5], "one_per_customer": row[6],
                 "active": row[7], "created_at": row[8].isoformat() if row[8] else None,
+                "stripe_promo_id": stripe_promo_id,
+                "stripe_synced": stripe_promo_id is not None,
             },
         }
     except IntegrityError:
@@ -313,19 +363,34 @@ def promo_listar(request: Request):
 
 @router.patch("/api/pagos/promo/{promo_id}/toggle")
 def promo_toggle(promo_id: str, request: Request, body: PromoCodeToggle):
-    """Admin: activar/desactivar un código promo."""
+    """Admin: activar/desactivar un código promo (DB + Stripe sync)."""
     _require_admin(request)
     conn = None; cur = None
     try:
         conn = get_conn(); cur = conn.cursor()
         cur.execute(
-            "UPDATE promo_codes SET active=%s WHERE id=%s RETURNING id, active",
+            "UPDATE promo_codes SET active=%s WHERE id=%s RETURNING id, code, active",
             (body.active, promo_id),
         )
         row = cur.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Código no encontrado")
-        return {"ok": True, "id": str(row[0]), "active": row[1]}
+        conn.commit()
+
+        # Sync with Stripe — find and update the promotion code
+        promo_code_str = row[1]
+        if _STRIPE_SECRET_KEY:
+            _stripe.api_key = _STRIPE_SECRET_KEY
+            try:
+                # Search for the promotion code in Stripe
+                stripe_promos = _stripe.PromotionCode.list(code=promo_code_str, limit=1)
+                if stripe_promos.data:
+                    _stripe.PromotionCode.modify(stripe_promos.data[0].id, active=body.active)
+                    log.info("STRIPE PROMO TOGGLED: code=%s active=%s", promo_code_str, body.active)
+            except Exception as e:
+                log.error("STRIPE PROMO TOGGLE ERROR: %s", repr(e))
+
+        return {"ok": True, "id": str(row[0]), "active": row[2]}
     except HTTPException:
         raise
     except Exception as e:
