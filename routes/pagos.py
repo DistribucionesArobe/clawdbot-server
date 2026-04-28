@@ -94,6 +94,7 @@ def crear_checkout(request: Request, body: CheckoutBody):
             cancel_url=body.cancel_url,
             metadata={"company_id": company_id, "plan": plan},
             currency="mxn",
+            allow_promotion_codes=True,
         )
         return {"ok": True, "checkout_url": session.url, "session_id": session.id}
     except Exception as e:
