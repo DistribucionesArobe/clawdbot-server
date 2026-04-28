@@ -683,13 +683,31 @@ def cart_render_quote(state: dict, company_id: str = "", client_phone: str = "")
         except Exception as e:
             log.error("CART RENDER SAVE QUOTE ERROR:", repr(e))
 
+    # Only show "pagar" if the company has payment data configured
+    pagar_txt = ""
+    if company_id:
+        try:
+            _conn_p = get_conn()
+            _cur_p = _conn_p.cursor()
+            _cur_p.execute(
+                "SELECT bank_clabe, bank_account_number, mercadopago_url FROM companies WHERE id=%s",
+                (company_id,),
+            )
+            _pay_row = _cur_p.fetchone()
+            _cur_p.close()
+            _conn_p.close()
+            if _pay_row and ((_pay_row[0] or "").strip() or (_pay_row[1] or "").strip() or (_pay_row[2] or "").strip()):
+                pagar_txt = "\n\n💳 Escribe *pagar* y te mandamos datos bancarios o link para pago con tarjeta."
+        except Exception:
+            pass
+
     return (
         "Cotización:\n"
         + "\n".join(lines)
         + descuento_txt
         + f"\n\n*Total: ${total_final:,.0f}* (IVA incluido)"
         + folio_txt
-        + "\n\n💳 Escribe *pagar* y te mandamos datos bancarios o link para pago con tarjeta."
+        + pagar_txt
     )
 
 # api_key_prefix and hash_api_key imported from auth.py
@@ -2353,10 +2371,8 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
     if any(pt == tnorm or pt in tnorm for pt in pagar_triggers):
         _plan = get_company_plan_code(company_id)
         if _plan not in ("cotizabot", "pro", "enterprise", "owner"):
-            return (
-                "Para procesar tu pago, contáctanos directamente:\n\n"
-                "📞 Llama o escribe *asesor* y un representante te atenderá. 🙏"
-            )
+            # No plan — redirect to human agent
+            return "Escribe *asesor* para que te atiendan con los datos de pago 🙏"
         try:
             conn = get_conn()
             cur = conn.cursor()
@@ -2398,7 +2414,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 + "\n\n📎 Cuando realices tu pago, *manda el comprobante* por aquí y avisamos a la empresa."
             )
         else:
-            return "Para recibir los datos de pago, escribe *asesor* y un representante te los enviará. 🙏"
+            return "Escribe *asesor* para que te atiendan con los datos de pago 🙏"
 
     reset_triggers = {
         "salir", "cancelar", "cancel", "reset", "reiniciar",
@@ -2635,9 +2651,8 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         if _atencion_phone:
             _phone_clean = _normalize_mx_phone(_atencion_phone)
             return (
-                f"Para atención personalizada manda mensaje a:\n"
-                f"👉 https://wa.me/{_phone_clean}\n\n"
-                f"El equipo de *{_company_name_esc}* te atenderá lo más rápido posible 🙏"
+                f"Te atiende un asesor de *{_company_name_esc}* directo 🙏\n\n"
+                f"👉 https://wa.me/{_phone_clean}"
             )
         return (
             "Un asesor te contactará pronto 🙏\n\n"
