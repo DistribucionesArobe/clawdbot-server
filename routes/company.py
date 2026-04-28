@@ -267,7 +267,7 @@ def company_settings_get(request: Request):
                    owner_phone, email, rfc, brand_color, logo_url,
                    discount_threshold, discount_percent, welcome_products_hint, welcome_message,
                    telefono_atencion, marcas_propias, marcas_competencia,
-                   giro, giro_otro
+                   giro, giro_otro, plan_code
             FROM companies WHERE id=%s LIMIT 1
             """,
             (company_id,),
@@ -291,6 +291,7 @@ def company_settings_get(request: Request):
                 "marcas_competencia": row[19] or None,
                 "giro": row[20] or None,
                 "giro_otro": row[21] or None,
+                "plan_code": row[22] or "free",
             },
         }
     finally:
