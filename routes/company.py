@@ -249,6 +249,7 @@ def company_settings_get(request: Request):
             ("marcas_competencia", "TEXT"),
             ("giro", "TEXT"),
             ("giro_otro", "TEXT"),
+            ("plan_code", "VARCHAR(30) DEFAULT 'free'"),
         ]:
             cur.execute(f"""
                 DO $$ BEGIN
