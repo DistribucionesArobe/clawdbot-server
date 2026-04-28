@@ -110,7 +110,8 @@ def pago_estado(request: Request, session_id: str = Query(...)):
     _stripe.api_key = _STRIPE_SECRET_KEY
     try:
         session = _stripe.checkout.Session.retrieve(session_id)
-        paid = session.payment_status == "paid"
+        # "paid" for normal payments, "no_payment_required" for 100% off promo codes
+        paid = session.payment_status in ("paid", "no_payment_required")
         plan = session.metadata.get("plan") if session.metadata else None
         return {"ok": True, "paid": paid, "plan": plan, "status": session.payment_status}
     except Exception as e:
@@ -127,7 +128,8 @@ def pago_checkout_status(session_id: str):
     _stripe.api_key = _STRIPE_SECRET_KEY
     try:
         session = _stripe.checkout.Session.retrieve(session_id)
-        paid = session.payment_status == "paid"
+        # "paid" for normal payments, "no_payment_required" for 100% off promo codes
+        paid = session.payment_status in ("paid", "no_payment_required")
         plan = session.metadata.get("plan") if session.metadata else None
         company_id = (session.metadata or {}).get("company_id")
         status = session.status  # "complete", "expired", "open"
@@ -205,6 +207,7 @@ async def stripe_webhook(request: Request):
                     (plan, stripe_customer_id, company_id),
                 )
                 row = cur.fetchone()
+                conn.commit()
                 cur.close()
                 conn.close()
                 log.info("STRIPE PLAN ACTIVADO: company=%s plan=%s", company_id, plan)
@@ -222,6 +225,7 @@ async def stripe_webhook(request: Request):
                     "UPDATE companies SET plan_code='free', updated_at=now() WHERE stripe_customer_id=%s",
                     (stripe_customer_id,),
                 )
+                conn.commit()
                 cur.close()
                 conn.close()
                 log.info("STRIPE SUSCRIPCION CANCELADA: customer=%s", stripe_customer_id)
