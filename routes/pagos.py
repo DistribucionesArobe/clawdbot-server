@@ -123,11 +123,15 @@ def pago_estado(request: Request, session_id: str = Query(...)):
 def pago_checkout_status(session_id: str):
     """Frontend-facing endpoint for PagoExitoso page polling."""
     if not _STRIPE_SECRET_KEY:
+        log.error("CHECKOUT STATUS: STRIPE_SECRET_KEY no configurada")
         raise HTTPException(status_code=500, detail="STRIPE_SECRET_KEY no configurada")
 
     _stripe.api_key = _STRIPE_SECRET_KEY
     try:
+        log.info("CHECKOUT STATUS: Retrieving session %s...", session_id[:30])
         session = _stripe.checkout.Session.retrieve(session_id)
+        log.info("CHECKOUT STATUS: payment_status=%s status=%s", session.payment_status, session.status)
+
         # "paid" for normal payments, "no_payment_required" for 100% off promo codes
         paid = session.payment_status in ("paid", "no_payment_required")
         plan = session.metadata.get("plan") if session.metadata else None
@@ -137,6 +141,8 @@ def pago_checkout_status(session_id: str):
         plan_activado = False
         if paid and company_id:
             # Verify the plan was actually activated in DB
+            conn = None
+            cur = None
             try:
                 conn = get_conn()
                 cur = conn.cursor()
@@ -144,10 +150,21 @@ def pago_checkout_status(session_id: str):
                 row = cur.fetchone()
                 if row and row[0] and row[0] != "free":
                     plan_activado = True
-                cur.close()
-                conn.close()
-            except Exception:
+                else:
+                    # Plan not yet activated by webhook — activate it now as fallback
+                    log.warning("CHECKOUT STATUS: Plan not activated yet for %s, activating now", company_id)
+                    cur.execute(
+                        "UPDATE companies SET plan_code=%s, updated_at=now() WHERE id=%s",
+                        (plan, company_id),
+                    )
+                    conn.commit()
+                    plan_activado = True
+            except Exception as db_err:
+                log.error("CHECKOUT STATUS DB ERROR: %s", repr(db_err))
                 plan_activado = paid  # Assume OK if DB check fails but Stripe says paid
+            finally:
+                if cur: cur.close()
+                if conn: conn.close()
 
         _plan_names = {
             "cotizabot": "Plan Completo",
@@ -164,8 +181,11 @@ def pago_checkout_status(session_id: str):
             "plan_activado": plan_activado,
             "mensaje": f"¡Pago exitoso! Tu {plan_name} está activo." if paid else None,
         }
+    except _stripe.error.InvalidRequestError as e:
+        log.error("CHECKOUT STATUS STRIPE INVALID: %s", repr(e))
+        raise HTTPException(status_code=404, detail=f"Sesión de Stripe no encontrada: {str(e)}")
     except Exception as e:
-        log.error("CHECKOUT STATUS ERROR: %s", repr(e))
+        log.error("CHECKOUT STATUS ERROR: %s (type: %s)", repr(e), type(e).__name__)
         raise HTTPException(status_code=500, detail=str(e))
 
 
