@@ -91,7 +91,28 @@ def run_promo_codes_migration(conn):
         cur.close()
 
 
+def fix_plan_code_promo_bug(conn):
+    """One-time fix: companies that paid via GRATIS92 promo but plan_code wasn't committed."""
+    cur = conn.cursor()
+    try:
+        # Fix company 5ed41151 which used GRATIS92 but plan_code stayed 'free' due to missing commit()
+        cur.execute("""
+            UPDATE companies
+            SET plan_code = 'cotizabot', updated_at = now()
+            WHERE id = '5ed41151-926f-4c1f-9099-78f829f72ab7'
+              AND (plan_code IS NULL OR plan_code = 'free')
+        """)
+        if cur.rowcount > 0:
+            log.info("FIX_PLAN_CODE: Updated company 5ed41151 to cotizabot")
+        conn.commit()
+    except Exception as e:
+        log.error("FIX_PLAN_CODE ERROR: %s", repr(e))
+    finally:
+        cur.close()
+
+
 def run_all(conn):
     """Run all migrations."""
     run_pricebook_migrations(conn)
     run_promo_codes_migration(conn)
+    fix_plan_code_promo_bug(conn)
