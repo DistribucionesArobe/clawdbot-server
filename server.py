@@ -2027,6 +2027,24 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             return True
         return False
 
+    def _is_quote_intent(tnorm: str) -> bool:
+        """Detect messages that express intent to quote but without specific products.
+        E.g. 'quiero cotizar un material', 'me puedes dar precios', 'necesito una cotización'."""
+        t = (tnorm or "").strip()
+        if not t:
+            return False
+        return bool(re.search(
+            r"\b(quiero\s+cotiz|necesito\s+cotiz|ocupo\s+cotiz|"
+            r"me\s+cotiz|me\s+puedes?\s+cotiz|podr[aá]s?\s+cotiz|"
+            r"quiero\s+pedir|necesito\s+pedir|"
+            r"quiero\s+un\s+precio|necesito\s+precios?|dame\s+precios?|"
+            r"cotizar\s+un\s+material|cotizar\s+materiale?s?|cotizar\s+producto|"
+            r"necesito\s+material|quiero\s+material|ocupo\s+material|"
+            r"tienen\s+catalogo|tienen\s+catálogo|"
+            r"que\s+manejan|que\s+venden|que\s+productos)\b",
+            t, re.IGNORECASE
+        ))
+
     def _build_reply_with_pending(state: dict, company_id: str = "", wa_from: str = ""):
         pending = state.get("pending") or []
 
@@ -3696,12 +3714,23 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         _llm_result = _try_llm_parse(company_id, user_text)
 
     # ── LLM detectó que NO es una orden → escalar a humano directo ──
-    # Skip for hours/location questions and greetings — they have dedicated handlers
+    # Skip for hours/location questions, greetings, and quote-intent messages
     if _llm_result and _llm_result.get("non_order"):
         if looks_like_hours_question(user_text):
             log.warning(f"LLM NON_ORDER but is hours question — skipping escalation. text='{user_text[:60]}'")
         elif _is_greeting_like(tnorm):
             log.warning(f"LLM NON_ORDER but is greeting — skipping escalation. text='{user_text[:60]}'")
+        elif _is_quote_intent(tnorm):
+            log.info(f"LLM NON_ORDER but is quote intent — asking for product list. text='{user_text[:60]}'")
+            return (
+                "¡Hola! Con gusto te ayudo a cotizar 😊\n\n"
+                "Mándame tu lista de productos con cantidades y te preparo la cotización.\n\n"
+                "Ejemplo:\n"
+                "• 10 bultos de cemento\n"
+                "• 5 varillas 3/8\n"
+                "• 20 blocks\n\n"
+                "¿Qué necesitas cotizar?"
+            )
         else:
             log.info(f"LLM NON_ORDER: escalating to human. text='{user_text[:60]}'")
             return _escalate_non_quote(company_id, wa_from, user_text)
