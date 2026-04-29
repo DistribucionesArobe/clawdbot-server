@@ -184,8 +184,8 @@ def pago_checkout_status(session_id: str):
                 if conn: conn.close()
 
         _plan_names = {
-            "cotizabot": "Plan Completo",
-            "pro": "Plan Pro",
+            "cotizabot": "CotizaBot",
+            "pro": "CotizaBot Pro",
             "enterprise": "Plan Enterprise",
         }
         plan_name = _plan_names.get(plan, "Plan")
