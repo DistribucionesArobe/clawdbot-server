@@ -2001,7 +2001,9 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                  "buen dia", "buen día", "buenos dias", "buenos días",
                  "buenas tardes", "buenas noches",
                  "que onda", "qué onda", "que tal", "qué tal", "que paso", "qué paso",
-                 "como estas", "cómo estás", "como andas", "cómo andas"}:
+                 "como estas", "cómo estás", "como andas", "cómo andas",
+                 "demo", "probar", "prueba", "quiero probar", "info", "información",
+                 "informacion", "hi", "hello"}:
             return True
         # If the message contains product/order signals, it's NOT a pure greeting
         # e.g. "hola buenas tardes me podras cotizar 3 cajas de redimix"
@@ -2046,6 +2048,15 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             r"|entrega|env[ií]o\s+(?:no\s+)?lleg|rastreo|gu[ií]a|paqueter[ií]a"  # shipping issues
             r"|cancelar\s+(?:mi\s+)?(?:pedido|orden|suscripci)"          # cancellations
             r")\b",
+            t, re.IGNORECASE
+        ))
+
+    def _is_bot_echo(tnorm: str) -> bool:
+        """Detect messages that are echoes/bounces from the bot itself or another bot."""
+        t = (tnorm or "").strip()
+        return bool(re.search(
+            r"(ups|opci[oó]n\s+v[aá]lida|reenviar\s+el\s+mensaje|"
+            r"esa\s+no\s+es\s+una\s+opci|elegir\s+una\s+de\s+las)",
             t, re.IGNORECASE
         ))
 
@@ -3748,6 +3759,9 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             log.warning(f"LLM NON_ORDER but is hours question — skipping escalation. text='{user_text[:60]}'")
         elif _is_greeting_like(tnorm):
             log.warning(f"LLM NON_ORDER but is greeting — skipping escalation. text='{user_text[:60]}'")
+        elif _is_bot_echo(tnorm):
+            log.info(f"LLM NON_ORDER but is bot echo — ignoring. text='{user_text[:60]}'")
+            return "¿En qué te puedo ayudar? Mándame tu lista de productos con cantidades 📋"
         elif _is_clearly_off_topic(tnorm):
             log.info(f"LLM NON_ORDER + clearly off-topic: escalating. text='{user_text[:60]}'")
             return _escalate_non_quote(company_id, wa_from, user_text)
