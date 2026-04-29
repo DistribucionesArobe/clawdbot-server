@@ -112,8 +112,8 @@ def pago_estado(request: Request, session_id: str = Query(...)):
         session = _stripe.checkout.Session.retrieve(session_id)
         # "paid" for normal payments, "no_payment_required" for 100% off promo codes
         paid = session.payment_status in ("paid", "no_payment_required")
-        meta = dict(session.metadata) if session.metadata else {}
-        plan = meta.get("plan")
+        md = session.metadata
+        plan = (md.get("plan") if hasattr(md, "get") else getattr(md, "plan", None)) if md else None
         return {"ok": True, "paid": paid, "plan": plan, "status": session.payment_status}
     except Exception as e:
         log.error("STRIPE ESTADO ERROR: %s", repr(e))
@@ -149,10 +149,10 @@ def pago_checkout_status(session_id: str):
 
         # "paid" for normal payments, "no_payment_required" for 100% off promo codes
         paid = session.payment_status in ("paid", "no_payment_required")
-        # stripe v15: metadata is a StripeObject, convert to dict for .get()
-        meta = dict(session.metadata) if session.metadata else {}
-        plan = meta.get("plan")
-        company_id = meta.get("company_id")
+        # stripe v15: metadata may be StripeObject — use getattr as fallback
+        md = session.metadata
+        plan = (md.get("plan") if hasattr(md, "get") else getattr(md, "plan", None)) if md else None
+        company_id = (md.get("company_id") if hasattr(md, "get") else getattr(md, "company_id", None)) if md else None
         status = session.status  # "complete", "expired", "open"
 
         plan_activado = False
@@ -226,11 +226,15 @@ async def stripe_webhook(request: Request):
 
     if event_type == "checkout.session.completed":
         session = event["data"]["object"]
-        # stripe v15: objects may be StripeObject instead of dict
-        meta = dict(session.get("metadata", {})) if hasattr(session, "get") else dict(getattr(session, "metadata", {}) or {})
-        company_id = meta.get("company_id")
-        plan       = meta.get("plan")
-        stripe_customer_id = session.get("customer") if hasattr(session, "get") else getattr(session, "customer", None)
+        # stripe v15: objects may be StripeObject instead of dict — handle both
+        if hasattr(session, "get"):
+            md = session.get("metadata") or {}
+            stripe_customer_id = session.get("customer")
+        else:
+            md = getattr(session, "metadata", None) or {}
+            stripe_customer_id = getattr(session, "customer", None)
+        company_id = md.get("company_id") if hasattr(md, "get") else getattr(md, "company_id", None)
+        plan       = md.get("plan") if hasattr(md, "get") else getattr(md, "plan", None)
 
         if company_id and plan:
             try:
