@@ -2028,20 +2028,38 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         return False
 
     def _is_quote_intent(tnorm: str) -> bool:
-        """Detect messages that express intent to quote but without specific products.
-        E.g. 'quiero cotizar un material', 'me puedes dar precios', 'necesito una cotización'."""
+        """Detect ANY message that relates to quoting, pricing, or product inquiries.
+        This is intentionally broad — it's better to ask for a product list than to
+        wrongly escalate a potential customer to human support.
+        Handles common typos (preico/precio, blockl/block, matrial/material, etc.)."""
         t = (tnorm or "").strip()
         if not t:
             return False
+        # Broad signals: anything about pricing, quoting, products, materials, catalog
         return bool(re.search(
-            r"\b(quiero\s+cotiz|necesito\s+cotiz|ocupo\s+cotiz|"
-            r"me\s+cotiz|me\s+puedes?\s+cotiz|podr[aá]s?\s+cotiz|"
-            r"quiero\s+pedir|necesito\s+pedir|"
-            r"quiero\s+un\s+precio|necesito\s+precios?|dame\s+precios?|"
-            r"cotizar\s+un\s+material|cotizar\s+materiale?s?|cotizar\s+producto|"
-            r"necesito\s+material|quiero\s+material|ocupo\s+material|"
-            r"tienen\s+catalogo|tienen\s+catálogo|"
-            r"que\s+manejan|que\s+venden|que\s+productos)\b",
+            r"(cotiz|cotis|kotiz"           # cotizar, cotizame, cotización (+ typos)
+            r"|preci|preio|presio"           # precio, precios (+ typos preico, presio)
+            r"|cuanto\s+(?:cuesta|vale|sale|es)"  # cuanto cuesta/vale/sale
+            r"|cu[aá]nto\s+(?:cuesta|vale|sale|es)"
+            r"|cuestan|valen|salen"          # cuestan, valen
+            r"|cot[ií]za"                    # cotízame
+            r"|material|matrial|materale"    # material/es (+ typos)
+            r"|producto|prodcuto"            # producto/s (+ typos)
+            r"|que\s+(?:precio|preico|manejan|venden|tienen|product)"
+            r"|tienen\s+(?:catalogo|catálogo|para)"
+            r"|manejan\s"                    # que manejan
+            r"|necesito\s+(?:comprar|pedir|conseguir|unos?|una?)"
+            r"|quiero\s+(?:comprar|pedir|conseguir|unos?|una?)"
+            r"|ocupo\s+(?:comprar|pedir|conseguir|unos?|una?)"
+            r"|dame\s|deme\s|damen\s"        # dame X
+            r"|venden\s|vende\s"             # venden X?
+            r"|hay\s+(?:en\s+)?(?:existencia|stock|disponible)"
+            r"|list(?:a|o)\s+de\s+preci"     # lista de precios
+            r"|block|bloque|bulto|saco|costal|rollo|metro|kilo|tonelada"  # units/products
+            r"|cemento|varilla|tubo|cable|clavo|tornillo"  # common product words
+            r"|lamina|lámina|perfil|panel|tabla"
+            r"|arena|grava|mezcla|mortero|yeso|impermeab"
+            r")",
             t, re.IGNORECASE
         ))
 
@@ -3721,16 +3739,10 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         elif _is_greeting_like(tnorm):
             log.warning(f"LLM NON_ORDER but is greeting — skipping escalation. text='{user_text[:60]}'")
         elif _is_quote_intent(tnorm):
-            log.info(f"LLM NON_ORDER but is quote intent — asking for product list. text='{user_text[:60]}'")
-            return (
-                "¡Hola! Con gusto te ayudo a cotizar 😊\n\n"
-                "Mándame tu lista de productos con cantidades y te preparo la cotización.\n\n"
-                "Ejemplo:\n"
-                "• 10 bultos de cemento\n"
-                "• 5 varillas 3/8\n"
-                "• 20 blocks\n\n"
-                "¿Qué necesitas cotizar?"
-            )
+            log.info(f"LLM NON_ORDER but is quote intent — overriding to process as product. text='{user_text[:60]}'")
+            # Don't escalate — fall through to regex/smart_search pipeline below
+            # which is more tolerant of typos and vague product mentions
+            _llm_result = None  # clear LLM result so it falls through to regex path
         else:
             log.info(f"LLM NON_ORDER: escalating to human. text='{user_text[:60]}'")
             return _escalate_non_quote(company_id, wa_from, user_text)
