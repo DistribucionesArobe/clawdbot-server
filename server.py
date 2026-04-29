@@ -2027,39 +2027,25 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             return True
         return False
 
-    def _is_quote_intent(tnorm: str) -> bool:
-        """Detect ANY message that relates to quoting, pricing, or product inquiries.
-        This is intentionally broad — it's better to ask for a product list than to
-        wrongly escalate a potential customer to human support.
-        Handles common typos (preico/precio, blockl/block, matrial/material, etc.)."""
+    def _is_clearly_off_topic(tnorm: str) -> bool:
+        """Only return True for messages that are CLEARLY unrelated to products/quoting.
+        E.g. complaints, invoicing, payment issues, personal chat, job inquiries.
+        This is intentionally narrow — when in doubt, we try to process as product
+        rather than escalating and losing a potential customer."""
         t = (tnorm or "").strip()
         if not t:
             return False
-        # Broad signals: anything about pricing, quoting, products, materials, catalog
+        # Only escalate for clearly non-product topics
         return bool(re.search(
-            r"(cotiz|cotis|kotiz"           # cotizar, cotizame, cotización (+ typos)
-            r"|preci|preio|presio"           # precio, precios (+ typos preico, presio)
-            r"|cuanto\s+(?:cuesta|vale|sale|es)"  # cuanto cuesta/vale/sale
-            r"|cu[aá]nto\s+(?:cuesta|vale|sale|es)"
-            r"|cuestan|valen|salen"          # cuestan, valen
-            r"|cot[ií]za"                    # cotízame
-            r"|material|matrial|materale"    # material/es (+ typos)
-            r"|producto|prodcuto"            # producto/s (+ typos)
-            r"|que\s+(?:precio|preico|manejan|venden|tienen|product)"
-            r"|tienen\s+(?:catalogo|catálogo|para)"
-            r"|manejan\s"                    # que manejan
-            r"|necesito\s+(?:comprar|pedir|conseguir|unos?|una?)"
-            r"|quiero\s+(?:comprar|pedir|conseguir|unos?|una?)"
-            r"|ocupo\s+(?:comprar|pedir|conseguir|unos?|una?)"
-            r"|dame\s|deme\s|damen\s"        # dame X
-            r"|venden\s|vende\s"             # venden X?
-            r"|hay\s+(?:en\s+)?(?:existencia|stock|disponible)"
-            r"|list(?:a|o)\s+de\s+preci"     # lista de precios
-            r"|block|bloque|bulto|saco|costal|rollo|metro|kilo|tonelada"  # units/products
-            r"|cemento|varilla|tubo|cable|clavo|tornillo"  # common product words
-            r"|lamina|lámina|perfil|panel|tabla"
-            r"|arena|grava|mezcla|mortero|yeso|impermeab"
-            r")",
+            r"\b(factura|facturar|facturaci[oó]n|rfc|raz[oó]n\s+social"  # invoicing
+            r"|reclamaci[oó]n|queja|devoluci[oó]n|garant[ií]a|reembolso"  # complaints/returns
+            r"|pago\s+(?:no\s+)?(?:lleg|pas|refle)|no\s+me\s+(?:lleg|cobr)"  # payment issues
+            r"|trabajo|empleo|vacante|contrat|curr[ií]cul"               # job inquiries
+            r"|qui[eé]n\s+(?:eres|es\s+el\s+due[nñ]o)|eres\s+(?:humano|robot|persona)"  # identity questions
+            r"|proveedor|(?:quiero|puedo)\s+(?:ser|vender(?:les|te))"    # supplier inquiries
+            r"|entrega|env[ií]o\s+(?:no\s+)?lleg|rastreo|gu[ií]a|paqueter[ií]a"  # shipping issues
+            r"|cancelar\s+(?:mi\s+)?(?:pedido|orden|suscripci)"          # cancellations
+            r")\b",
             t, re.IGNORECASE
         ))
 
@@ -3731,21 +3717,20 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
     if _PARSER_LLM_FIRST and not _is_button_click:
         _llm_result = _try_llm_parse(company_id, user_text)
 
-    # ── LLM detectó que NO es una orden → escalar a humano directo ──
-    # Skip for hours/location questions, greetings, and quote-intent messages
+    # ── LLM detectó que NO es una orden → solo escalar si es CLARAMENTE off-topic ──
+    # Default: try to process as product. Only escalate for invoicing, complaints, etc.
     if _llm_result and _llm_result.get("non_order"):
         if looks_like_hours_question(user_text):
             log.warning(f"LLM NON_ORDER but is hours question — skipping escalation. text='{user_text[:60]}'")
         elif _is_greeting_like(tnorm):
             log.warning(f"LLM NON_ORDER but is greeting — skipping escalation. text='{user_text[:60]}'")
-        elif _is_quote_intent(tnorm):
-            log.info(f"LLM NON_ORDER but is quote intent — overriding to process as product. text='{user_text[:60]}'")
-            # Don't escalate — fall through to regex/smart_search pipeline below
-            # which is more tolerant of typos and vague product mentions
-            _llm_result = None  # clear LLM result so it falls through to regex path
-        else:
-            log.info(f"LLM NON_ORDER: escalating to human. text='{user_text[:60]}'")
+        elif _is_clearly_off_topic(tnorm):
+            log.info(f"LLM NON_ORDER + clearly off-topic: escalating. text='{user_text[:60]}'")
             return _escalate_non_quote(company_id, wa_from, user_text)
+        else:
+            # NOT clearly off-topic → don't escalate, let regex/smart_search try
+            log.info(f"LLM NON_ORDER but NOT off-topic — falling through to regex. text='{user_text[:60]}'")
+            _llm_result = None  # clear so it falls through to regex/smart_search path
 
     if _llm_result and _llm_result.get("items") and not _llm_result.get("non_order"):
         # ── LLM PATH: procesa items directamente sin regex ni smart_search ──
@@ -4613,7 +4598,14 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
     # Último fallback: clasificar con GPT
     intent = _classify_intent(user_text)
     if intent == "product":
-        return "¿Me repites eso? No entendí bien tu pedido 🤔"
+        return (
+            "¡Claro! Con gusto te cotizo 😊\n\n"
+            "Mándame los productos con cantidades, por ejemplo:\n"
+            "• 10 bultos de cemento\n"
+            "• 5 varillas 3/8\n"
+            "• 20 blocks\n\n"
+            "¿Qué necesitas?"
+        )
     elif intent == "browse":
         # Same browse logic as above
         _browse_query = user_text.strip()
