@@ -102,6 +102,63 @@ def crear_checkout(request: Request, body: CheckoutBody):
         raise HTTPException(status_code=500, detail=f"Error creando checkout: {str(e)}")
 
 
+@router.post("/api/pagos/cancelar")
+def cancelar_suscripcion(request: Request):
+    """Cancel the active Stripe subscription for the current company."""
+    company_id = require_company_id(request)
+    if not _STRIPE_SECRET_KEY:
+        raise HTTPException(status_code=500, detail="STRIPE_SECRET_KEY no configurada")
+
+    _stripe.api_key = _STRIPE_SECRET_KEY
+    conn = None
+    cur = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT stripe_customer_id, plan_code FROM companies WHERE id=%s LIMIT 1", (company_id,))
+        row = cur.fetchone()
+        if not row or not row[0]:
+            raise HTTPException(status_code=400, detail="No se encontró suscripción activa")
+
+        stripe_customer_id, current_plan = row[0], row[1]
+
+        if not current_plan or current_plan == "free":
+            raise HTTPException(status_code=400, detail="No tienes un plan activo para cancelar")
+
+        # Find and cancel active subscriptions for this customer
+        subscriptions = _stripe.Subscription.list(customer=stripe_customer_id, status="active", limit=10)
+        cancelled_count = 0
+        for sub in subscriptions.data:
+            _stripe.Subscription.cancel(sub.id)
+            cancelled_count += 1
+            log.info("CANCEL: Cancelled subscription %s for company %s", sub.id, company_id)
+
+        # Also cancel trialing subscriptions (from promo codes)
+        trialing = _stripe.Subscription.list(customer=stripe_customer_id, status="trialing", limit=10)
+        for sub in trialing.data:
+            _stripe.Subscription.cancel(sub.id)
+            cancelled_count += 1
+            log.info("CANCEL: Cancelled trialing subscription %s for company %s", sub.id, company_id)
+
+        # Update DB
+        cur.execute(
+            "UPDATE companies SET plan_code='free', updated_at=now() WHERE id=%s",
+            (company_id,),
+        )
+        conn.commit()
+        log.info("CANCEL: Company %s plan set to free (cancelled %d subscriptions)", company_id, cancelled_count)
+
+        return {"ok": True, "message": "Suscripción cancelada exitosamente", "cancelled": cancelled_count}
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("CANCEL ERROR: %s", repr(e))
+        raise HTTPException(status_code=500, detail=f"Error cancelando: {str(e)}")
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
+
+
 @router.get("/api/pagos/estado")
 def pago_estado(request: Request, session_id: str = Query(...)):
     if not _STRIPE_SECRET_KEY:
