@@ -1346,3 +1346,110 @@ def setup_demo_all_companies():
     finally:
         cur.close()
         conn.close()
+
+
+# ── Quality Report ────────────────────────────────────────────────────────
+
+@router.get("/admin/quality-report")
+def quality_report(request: Request, days: int = 1):
+    """Daily quality report: escalations, not-found items, and conversation stats."""
+    _require_admin(request)
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        # 1. Escalations (bot said "Ese tema lo maneja")
+        cur.execute("""
+            SELECT cm.client_phone, cm.created_at, c.name as empresa,
+                   (SELECT cm2.message FROM conversation_messages cm2
+                    WHERE cm2.company_id = cm.company_id
+                      AND cm2.client_phone = cm.client_phone
+                      AND cm2.role = 'user'
+                      AND cm2.created_at < cm.created_at
+                    ORDER BY cm2.created_at DESC LIMIT 1) as user_msg
+            FROM conversation_messages cm
+            JOIN companies c ON c.id = cm.company_id
+            WHERE cm.role = 'bot'
+              AND cm.message LIKE '%%Ese tema lo maneja%%'
+              AND cm.created_at > now() - interval '%s days'
+            ORDER BY cm.created_at DESC
+            LIMIT 50
+        """ % int(days))
+        escalations = []
+        for r in cur.fetchall():
+            escalations.append({
+                "phone": r[0][-4:] if r[0] else "????",
+                "time": r[1].isoformat() if r[1] else None,
+                "empresa": r[2],
+                "user_said": (r[3] or "")[:200],
+            })
+
+        # 2. Not-found items (bot said "no encontrado")
+        cur.execute("""
+            SELECT cm.client_phone, cm.created_at, c.name as empresa,
+                   cm.message,
+                   (SELECT cm2.message FROM conversation_messages cm2
+                    WHERE cm2.company_id = cm.company_id
+                      AND cm2.client_phone = cm.client_phone
+                      AND cm2.role = 'user'
+                      AND cm2.created_at < cm.created_at
+                    ORDER BY cm2.created_at DESC LIMIT 1) as user_msg
+            FROM conversation_messages cm
+            JOIN companies c ON c.id = cm.company_id
+            WHERE cm.role = 'bot'
+              AND cm.message LIKE '%%no encontrado%%'
+              AND cm.created_at > now() - interval '%s days'
+            ORDER BY cm.created_at DESC
+            LIMIT 50
+        """ % int(days))
+        not_found = []
+        for r in cur.fetchall():
+            not_found.append({
+                "phone": r[0][-4:] if r[0] else "????",
+                "time": r[1].isoformat() if r[1] else None,
+                "empresa": r[2],
+                "bot_said": (r[3] or "")[:200],
+                "user_said": (r[4] or "")[:200],
+            })
+
+        # 3. Overall stats
+        cur.execute("""
+            SELECT
+              COUNT(*) FILTER (WHERE role = 'user') as total_user_msgs,
+              COUNT(*) FILTER (WHERE role = 'bot') as total_bot_msgs,
+              COUNT(DISTINCT client_phone) FILTER (WHERE role = 'user') as unique_users,
+              COUNT(DISTINCT company_id) as active_companies
+            FROM conversation_messages
+            WHERE created_at > now() - interval '%s days'
+        """ % int(days))
+        stats_row = cur.fetchone()
+
+        # 4. LLM parser shadow log — non_order=true cases
+        cur.execute("""
+            SELECT user_text, created_at
+            FROM parser_shadow_log
+            WHERE llm_non_order = true
+              AND created_at > now() - interval '%s days'
+            ORDER BY created_at DESC
+            LIMIT 30
+        """ % int(days))
+        llm_non_orders = [{"text": (r[0] or "")[:150], "time": r[1].isoformat() if r[1] else None}
+                          for r in cur.fetchall()]
+
+        return {
+            "ok": True,
+            "period_days": days,
+            "stats": {
+                "total_user_msgs": stats_row[0] if stats_row else 0,
+                "total_bot_msgs": stats_row[1] if stats_row else 0,
+                "unique_users": stats_row[2] if stats_row else 0,
+                "active_companies": stats_row[3] if stats_row else 0,
+            },
+            "escalations": escalations,
+            "escalation_count": len(escalations),
+            "not_found_items": not_found,
+            "not_found_count": len(not_found),
+            "llm_non_orders": llm_non_orders,
+        }
+    finally:
+        cur.close()
+        conn.close()
