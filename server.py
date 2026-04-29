@@ -2060,34 +2060,6 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             t, re.IGNORECASE
         ))
 
-    def _has_specific_product(tnorm: str) -> bool:
-        """Detect if the message mentions a specific product (not just generic words like 'material').
-        Used to decide: fall through to regex (has product) vs ask for list (generic intent)."""
-        t = (tnorm or "").strip()
-        if not t:
-            return False
-        # Remove generic/filler words to see if anything specific remains
-        _generic = re.sub(
-            r"\b(hola|buenas?|tardes?|dias?|noches?|buen|buenos|me|nos|le|se|"
-            r"pueden?|puedes?|podr[aá]s?|podr[ií]an?|quisiera|quisieramos|quer[ií]a|"
-            r"cotiz\w*|material(?:es)?|producto(?:s)?|algo|todo|nada|"
-            r"un|una|unos|unas|el|la|los|las|su|sus|mi|mis|tu|tus|"
-            r"de|del|para|por|con|sin|que|qué|como|cómo|donde|"
-            r"este|esta|estos|estas|ese|eso|esos|esas|aquel|"
-            r"necesito|quiero|ocupo|ando|buscando|busco|buscar|"
-            r"cuanto|cu[aá]nto|cuesta|vale|sale|precio|precios?|"
-            r"dame|deme|favor|manden?|pedir|comprar|conseguir|"
-            r"tienen|manejan|venden|hay|ser[ií]a|fuera|saber|conocer|ver)\b",
-            " ", t, flags=re.IGNORECASE
-        ).strip()
-        _generic = re.sub(r"\s+", " ", _generic).strip().rstrip("?.,!¿¡")
-        # If after removing generic words there's a meaningful word left (3+ chars), it's specific
-        _remaining_words = [w for w in _generic.split() if len(w) >= 3]
-        if _remaining_words:
-            log.debug(f"HAS_SPECIFIC_PRODUCT: remaining words after generic removal: {_remaining_words}")
-            return True
-        return False
-
     def _build_reply_with_pending(state: dict, company_id: str = "", wa_from: str = ""):
         pending = state.get("pending") or []
 
@@ -3769,20 +3741,18 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         elif _is_clearly_off_topic(tnorm):
             log.info(f"LLM NON_ORDER + clearly off-topic: escalating. text='{user_text[:60]}'")
             return _escalate_non_quote(company_id, wa_from, user_text)
-        elif _has_specific_product(tnorm):
-            # Has a specific product mention (e.g. "que precio tiene el block") → let regex try
-            log.info(f"LLM NON_ORDER but has specific product — falling through to regex. text='{user_text[:60]}'")
-            _llm_result = None
         else:
-            # Generic intent without specific product (e.g. "me pueden cotizar un material")
-            log.info(f"LLM NON_ORDER, generic intent — asking for product list. text='{user_text[:60]}'")
+            # Everything else: ask for product list. Simple and robust.
+            # Real product requests (5 focos, precio varilla) should be parsed by LLM
+            # as items, not non_order. If they land here, fix the LLM prompt instead.
+            log.info(f"LLM NON_ORDER, not off-topic — asking for product list. text='{user_text[:60]}'")
             return (
-                "¡Claro! Con gusto te cotizo 😊\n\n"
-                "Mándame los productos con cantidades, por ejemplo:\n"
+                "¡Claro! Con gusto te ayudo 😊\n\n"
+                "Mándame tu lista de productos con cantidades y te preparo la cotización.\n\n"
+                "Ejemplo:\n"
                 "• 10 bultos de cemento\n"
                 "• 5 varillas 3/8\n"
-                "• 20 blocks\n\n"
-                "¿Qué necesitas?"
+                "• 20 blocks"
             )
 
     if _llm_result and _llm_result.get("items") and not _llm_result.get("non_order"):
