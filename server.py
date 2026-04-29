@@ -2068,12 +2068,16 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             return False
         # Remove generic/filler words to see if anything specific remains
         _generic = re.sub(
-            r"\b(hola|buenas?|tardes?|dias?|noches?|me|pueden?|puedes?|podr[aá]s?|"
-            r"cotiz\w*|material(?:es)?|producto(?:s)?|un|una|unos|unas|el|la|los|las|"
-            r"de|del|para|por|con|que|qué|este|esta|estos|estas|ese|eso|"
+            r"\b(hola|buenas?|tardes?|dias?|noches?|buen|buenos|me|nos|le|se|"
+            r"pueden?|puedes?|podr[aá]s?|podr[ií]an?|quisiera|quisieramos|quer[ií]a|"
+            r"cotiz\w*|material(?:es)?|producto(?:s)?|algo|todo|nada|"
+            r"un|una|unos|unas|el|la|los|las|su|sus|mi|mis|tu|tus|"
+            r"de|del|para|por|con|sin|que|qué|como|cómo|donde|"
+            r"este|esta|estos|estas|ese|eso|esos|esas|aquel|"
             r"necesito|quiero|ocupo|ando|buscando|busco|buscar|"
             r"cuanto|cu[aá]nto|cuesta|vale|sale|precio|precios?|"
-            r"dame|deme|favor|manden?|pedir|comprar|conseguir|tienen|manejan|venden|hay)\b",
+            r"dame|deme|favor|manden?|pedir|comprar|conseguir|"
+            r"tienen|manejan|venden|hay|ser[ií]a|fuera|saber|conocer|ver)\b",
             " ", t, flags=re.IGNORECASE
         ).strip()
         _generic = re.sub(r"\s+", " ", _generic).strip().rstrip("?.,!¿¡")
