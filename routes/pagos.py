@@ -112,7 +112,8 @@ def pago_estado(request: Request, session_id: str = Query(...)):
         session = _stripe.checkout.Session.retrieve(session_id)
         # "paid" for normal payments, "no_payment_required" for 100% off promo codes
         paid = session.payment_status in ("paid", "no_payment_required")
-        plan = session.metadata.get("plan") if session.metadata else None
+        meta = dict(session.metadata) if session.metadata else {}
+        plan = meta.get("plan")
         return {"ok": True, "paid": paid, "plan": plan, "status": session.payment_status}
     except Exception as e:
         log.error("STRIPE ESTADO ERROR: %s", repr(e))
@@ -148,8 +149,10 @@ def pago_checkout_status(session_id: str):
 
         # "paid" for normal payments, "no_payment_required" for 100% off promo codes
         paid = session.payment_status in ("paid", "no_payment_required")
-        plan = session.metadata.get("plan") if session.metadata else None
-        company_id = (session.metadata or {}).get("company_id")
+        # stripe v15: metadata is a StripeObject, convert to dict for .get()
+        meta = dict(session.metadata) if session.metadata else {}
+        plan = meta.get("plan")
+        company_id = meta.get("company_id")
         status = session.status  # "complete", "expired", "open"
 
         plan_activado = False
@@ -218,14 +221,16 @@ async def stripe_webhook(request: Request):
         log.error("STRIPE WEBHOOK SIGNATURE ERROR: %s", repr(e))
         raise HTTPException(status_code=400, detail="Invalid signature")
 
-    event_type = event.get("type")
+    event_type = event.get("type") if hasattr(event, "get") else getattr(event, "type", None)
     log.info("STRIPE EVENT: %s", event_type)
 
     if event_type == "checkout.session.completed":
         session = event["data"]["object"]
-        company_id = (session.get("metadata") or {}).get("company_id")
-        plan       = (session.get("metadata") or {}).get("plan")
-        stripe_customer_id = session.get("customer")
+        # stripe v15: objects may be StripeObject instead of dict
+        meta = dict(session.get("metadata", {})) if hasattr(session, "get") else dict(getattr(session, "metadata", {}) or {})
+        company_id = meta.get("company_id")
+        plan       = meta.get("plan")
+        stripe_customer_id = session.get("customer") if hasattr(session, "get") else getattr(session, "customer", None)
 
         if company_id and plan:
             try:
