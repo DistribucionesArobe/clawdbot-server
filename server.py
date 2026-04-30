@@ -2060,6 +2060,19 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             t, re.IGNORECASE
         ))
 
+    def _strip_leading_qty(raw: str, qty: int) -> str:
+        """Strip leading quantity from raw text to avoid '5x 5 focos' duplication."""
+        r = (raw or "").strip()
+        # Remove leading number that matches the qty (e.g. "5 focos" → "focos")
+        m = re.match(r"^(\d+)\s+(.+)$", r)
+        if m:
+            try:
+                if int(m.group(1)) == qty:
+                    return m.group(2).strip()
+            except ValueError:
+                pass
+        return r
+
     def _build_reply_with_pending(state: dict, company_id: str = "", wa_from: str = ""):
         pending = state.get("pending") or []
 
@@ -2119,7 +2132,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 # Not-found items
                 for p in sin_opciones:
                     nq = int(p.get("qty") or 0)
-                    nr = (p.get("raw") or "").strip()
+                    nr = _strip_leading_qty((p.get("raw") or "").strip(), nq)
                     resumen_lines.append(f"❌ {nq}x {nr} — no encontrado")
                 resumen_txt = "\n".join(resumen_lines) if resumen_lines else ""
 
@@ -2141,7 +2154,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                     lines.append(f"✅ Cotizamos *{cart_count} producto(s)* automáticamente.\n")
                 for p in sin_opciones:
                     qty = int(p.get("qty") or 0)
-                    raw = (p.get("raw") or "").strip()
+                    raw = _strip_leading_qty((p.get("raw") or "").strip(), qty)
                     lines.append(f"❌ *{qty}x {raw}* — no encontrado, escríbelo diferente")
                 not_found_msg = "\n".join(lines)
                 # If cart has items, show quote + action buttons

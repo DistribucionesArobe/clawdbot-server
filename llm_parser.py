@@ -564,10 +564,12 @@ REGLAS:
 5. Cantidad por defecto: 1. Interpreta "2 de cada", "5 paquetes", "10 mts", cantidades al final del producto ("Tornillo 300"), números con decimal como cantidades (175 o 175.00 panel = 175 unidades, NO precio).
 6. Si una línea dice "1 ???" o similar (basura), IGNÓRALA por completo.
 7. Si el mensaje es un botón de UI, un saludo puro ("hola", "buenos días"), una pregunta de horarios, un número de teléfono, o un "salir" / "cancelar", devuelve items=[] y non_order=true.
-8. Si un spec aparece al final y aplica a varios productos arriba (ej: "Canal 4 y 6.35 cal 26" → cal 26 aplica a ambos), propágalo.
-9. Si aparece un forward con saludo de otro proveedor antes de la lista (ej: "Buenos días, seguimos a tus órdenes en Gram-Bel"), ignora el saludo y parsea SOLO la lista de productos.
-10. Nombres de proyecto al inicio ("Mat. Privanzas", "Del closet") no son productos, son contexto.
-11. PRODUCTOS DEFAULT: Algunos productos tienen la marca [DEFAULT] en el catálogo. Cuando el cliente pide un producto genérico SIN especificar tamaño, calibre, medida, presentación o variante (ej. "poste", "canal", "tablaroca", "redimix"), SIEMPRE elige el producto marcado [DEFAULT] de ese tipo. El [DEFAULT] representa el producto estándar/más vendido que el dueño de la tienda ha marcado como favorito. Solo ignora el [DEFAULT] si el cliente explícitamente pide otra variante (ej. "poste cal 20", "canal 4.10", "tablaroca anti fuego").
+8. REGLA CRÍTICA: Si el mensaje contiene un número + nombre de producto (ej. "3 martillos", "5 focos", "10 cables", "2 lámparas"), SIEMPRE es una orden. Devuelve items con key=null si no está en catálogo. NUNCA devuelvas non_order=true cuando hay un patrón de "cantidad + producto", aunque el producto NO esté en el catálogo. El bot necesita saber qué pidió el cliente para buscarlo.
+9. Si un spec aparece al final y aplica a varios productos arriba (ej: "Canal 4 y 6.35 cal 26" → cal 26 aplica a ambos), propágalo.
+10. Si aparece un forward con saludo de otro proveedor antes de la lista (ej: "Buenos días, seguimos a tus órdenes en Gram-Bel"), ignora el saludo y parsea SOLO la lista de productos.
+11. Nombres de proyecto al inicio ("Mat. Privanzas", "Del closet") no son productos, son contexto.
+12. PRODUCTOS DEFAULT: Algunos productos tienen la marca [DEFAULT] en el catálogo. Cuando el cliente pide un producto genérico SIN especificar tamaño, calibre, medida, presentación o variante (ej. "poste", "canal", "tablaroca", "redimix"), SIEMPRE elige el producto marcado [DEFAULT] de ese tipo. El [DEFAULT] representa el producto estándar/más vendido que el dueño de la tienda ha marcado como favorito. Solo ignora el [DEFAULT] si el cliente explícitamente pide otra variante (ej. "poste cal 20", "canal 4.10", "tablaroca anti fuego").
+13. En matched_text, devuelve SOLO el nombre del producto SIN la cantidad. Ejemplo: si el cliente dice "5 focos", matched_text="focos" (NO "5 focos"). La cantidad va en el campo qty.
 
 OUTPUT: JSON válido, sin markdown, exactamente esta estructura:
 {{
@@ -606,10 +608,12 @@ REGLAS:
 5. Cantidad por defecto: 1. Interpreta "2 de cada", "5 paquetes", "10 mts", cantidades al final del producto ("Tornillo 300"), números con decimal como cantidades (175 o 175.00 panel = 175 unidades, NO precio).
 6. Si una línea dice "1 ???" o similar (basura), IGNÓRALA por completo.
 7. Si el mensaje es un botón de UI, un saludo puro ("hola", "buenos días"), una pregunta de horarios, un número de teléfono, o un "salir" / "cancelar", devuelve items=[] y non_order=true.
-8. Si un spec aparece al final y aplica a varios productos arriba (ej: "Canal 4 y 6.35 cal 26" → cal 26 aplica a ambos), propágalo.
-9. Si aparece un forward con saludo de otro proveedor antes de la lista, ignora el saludo y parsea SOLO la lista de productos.
-10. Nombres de proyecto al inicio ("Mat. Privanzas", "Del closet") no son productos, son contexto.
-11. PRODUCTOS DEFAULT: Algunos productos tienen la marca [DEFAULT] en el catálogo. Cuando el cliente pide un producto genérico SIN especificar tamaño, calibre, medida, presentación o variante, SIEMPRE elige el producto marcado [DEFAULT] de ese tipo.
+8. REGLA CRÍTICA: Si el mensaje contiene un número + nombre de producto (ej. "3 martillos", "5 focos", "10 cables"), SIEMPRE es una orden. Devuelve items con key=null si no está en catálogo. NUNCA devuelvas non_order=true cuando hay un patrón de "cantidad + producto".
+9. Si un spec aparece al final y aplica a varios productos arriba (ej: "Canal 4 y 6.35 cal 26" → cal 26 aplica a ambos), propágalo.
+10. Si aparece un forward con saludo de otro proveedor antes de la lista, ignora el saludo y parsea SOLO la lista de productos.
+11. Nombres de proyecto al inicio ("Mat. Privanzas", "Del closet") no son productos, son contexto.
+12. PRODUCTOS DEFAULT: Algunos productos tienen la marca [DEFAULT] en el catálogo. Cuando el cliente pide un producto genérico SIN especificar tamaño, calibre, medida, presentación o variante, SIEMPRE elige el producto marcado [DEFAULT] de ese tipo.
+13. En matched_text, devuelve SOLO el nombre del producto SIN la cantidad. La cantidad va en qty.
 
 RESOLUCIÓN DE AMBIGÜEDADES — USA TU CONOCIMIENTO DE LA INDUSTRIA:
 Cuando el cliente NO especifica variante, calibre, medida, etc., NO adivines al azar. Usa tu conocimiento técnico para inferir la opción correcta, tal como lo haría un vendedor experimentado. Analiza el CONTEXTO del pedido completo.
