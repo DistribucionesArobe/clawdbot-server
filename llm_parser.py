@@ -648,12 +648,36 @@ USER_TEMPLATE = "Mensaje del cliente:\n```\n{text}\n```"
 # Parser principal
 # ---------------------------------------------------------------------------
 
+def _estimate_product_lines(text: str) -> int:
+    """
+    Estimate how many product lines a message contains.
+    Used to decide whether to use gpt-4o (large orders) vs gpt-4o-mini (small).
+    """
+    if not text:
+        return 0
+    # Split on newlines, commas, bullets, "y" surrounded by spaces
+    parts = re.split(r"[\n•·\-*]+|,\s*|\s+y\s+", text)
+    # Count lines that look like they have a product (contain a number or 3+ char word)
+    count = 0
+    for p in parts:
+        p = p.strip()
+        if not p or len(p) < 3:
+            continue
+        # Has a quantity or product-like word
+        if re.search(r"\d", p) or re.search(r"[a-záéíóúñ]{3,}", p, re.IGNORECASE):
+            count += 1
+    return count
+
+
+_LARGE_ORDER_THRESHOLD = 6  # 6+ product lines → use gpt-4o
+
+
 def llm_parse_order(
     text: str,
     catalog: list[dict],
     *,
     company_id: str | None = None,
-    model: str = "gpt-4o-mini",
+    model: str | None = None,
     temperature: float = 0.0,
     timeout: float = 30.0,
     min_confidence: float = 0.7,
@@ -698,6 +722,18 @@ def llm_parse_order(
             "precleaned_text": "",
         }
 
+    # Auto-select model based on order complexity
+    import logging as _lg
+    _log_model = _lg.getLogger("cotizaexpress.llm_parser")
+    if model is None:
+        _n_lines = _estimate_product_lines(cleaned)
+        if _n_lines >= _LARGE_ORDER_THRESHOLD:
+            model = "gpt-4o"
+            _log_model.info("LARGE ORDER (%d lines) → using gpt-4o for accuracy", _n_lines)
+        else:
+            model = "gpt-4o-mini"
+            _log_model.debug("Small order (%d lines) → using gpt-4o-mini", _n_lines)
+
     # Semantic prefilter (embedding-based) when company_id available, else token-based
     if company_id:
         filtered = prefilter_catalog_semantic(company_id, cleaned, catalog, max_items=80)
@@ -732,12 +768,15 @@ def llm_parse_order(
         system = SYSTEM_PROMPT.format(jerga=jerga_block, catalog=catalog_block)
     user = USER_TEMPLATE.format(text=cleaned)
 
+    # gpt-4o is slower, give it more time
+    _effective_timeout = 60.0 if model == "gpt-4o" else timeout
+
     start = time.time()
     try:
         resp = _get_client().with_options(max_retries=0).chat.completions.create(
             model=model,
             temperature=temperature,
-            timeout=timeout,
+            timeout=_effective_timeout,
             response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": system},
