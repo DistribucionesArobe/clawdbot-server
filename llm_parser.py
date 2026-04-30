@@ -203,9 +203,13 @@ def format_catalog_for_prompt(catalog: list[dict]) -> str:
     return "\n".join(lines)
 
 
-# Mapa de jerga → keywords del catálogo. Si el mensaje contiene la jerga,
-# expandimos las búsqueda con estos términos para que el prefilter los rankee alto.
-JERGA_EXPANSION = {
+# ═══════════════════════════════════════════════════════════════════════════
+# LEGACY — archived 2026-04-29. Kept for rollback if needed.
+# Was: hardcoded jerga expansion for Aceromax-style ferreterías.
+# Replaced by: trusting gpt-4o's industry knowledge + semantic prefilter.
+# To restore: rename JERGA_EXPANSION_LEGACY → JERGA_EXPANSION
+# ═══════════════════════════════════════════════════════════════════════════
+JERGA_EXPANSION_LEGACY = {
     "tablarock": ["tablaroca", "panel", "yeso"],
     "tabla": ["tablaroca", "panel", "yeso"],
     "panel": ["tablaroca", "panel", "yeso"],
@@ -286,6 +290,10 @@ JERGA_EXPANSION = {
     "antimoho": ["tablaroca", "anti", "moho"],
     "securok": ["securock"],
 }
+
+# Active jerga expansion — empty now, semantic prefilter handles this.
+# Token-based prefilter still works as fallback (matches on product name tokens).
+JERGA_EXPANSION = {}
 
 # Productos que SIEMPRE se incluyen como contexto, pase lo que pase
 # (los más comunes — dan al LLM un anclaje aunque no haya match exacto)
@@ -507,7 +515,11 @@ def prefilter_catalog_semantic(
 # Jerga global opcional (ferretería MX)
 # ---------------------------------------------------------------------------
 
-JERGA_HINTS = """Jerga típica de ferretería mexicana:
+# ═══════════════════════════════════════════════════════════════════════════
+# LEGACY JERGA_HINTS — archived 2026-04-29. Kept for rollback.
+# To restore: rename JERGA_HINTS_LEGACY → JERGA_HINTS
+# ═══════════════════════════════════════════════════════════════════════════
+JERGA_HINTS_LEGACY = """Jerga típica de ferretería mexicana:
 - "tablaroca" = panel de yeso. "panel rey" / "panel de yeso" / "hojas de yeso" / "lamina de yeso" / "tablarock" / "tabla roca" / "tblrc" → tablaroca. "muro" / "muros" / "pared" / "paredes" + material = el cliente quiere las hojas/paneles para construir, NO es un producto llamado "muro". "Quiero muro de panel rey 12mm" = quiero tablaroca 12mm.
 - "lightrey" / "light rey" → tablaroca ultralight.
 - "tablaroca WR" / "tablaroca RH" / "tablaroca anti moho" / "azul celeste" / "panel rey MR" / "tablaroca verde" / "bill verde" / "bil verde" / "tablaroca bil verde" → tablaroca anti-moho.
@@ -547,12 +559,29 @@ Cuando el cliente NO especifica variante, calibre, medida, etc., NO adivines al 
   * Si el cliente pide el mismo tipo de producto pero con diferente variante/color/tipo, son líneas SEPARADAS.
 """
 
+# ═══════════════════════════════════════════════════════════════════════════
+# NEW simplified hints — trust gpt-4o's industry knowledge
+# ═══════════════════════════════════════════════════════════════════════════
+JERGA_HINTS = """INSTRUCCIONES DE INTERPRETACIÓN:
+
+Eres experto en materiales de construcción, ferretería e industria mexicana. USA TU PROPIO CONOCIMIENTO para interpretar jerga, typos, marcas, apodos y abreviaturas que usan los clientes. No necesitas una lista de sinónimos — tú ya sabes qué es un "flamer" (framer), "bescool" (basecoat), "maya" (malla), "cancel" (canal), etc.
+
+REGLAS ESTRUCTURALES:
+1. NUNCA combines cantidades de productos diferentes. Cada línea del mensaje = un ítem separado. "122 tablaroca estándar" + "6 tablaroca verde" = DOS ítems, NUNCA "128 tablaroca".
+2. SIEMPRE respeta la medida/tamaño que el cliente especifica. Si dice "canal 4.16", busca el canal 4.16 o el más cercano. NO pongas otra medida.
+3. Si la medida que pide NO existe en el catálogo, elige el producto marcado [DEFAULT] de ese tipo, o el más cercano disponible. Indica en notes la discrepancia.
+4. Si un producto tiene marca [DEFAULT] y el cliente NO especifica variante, SIEMPRE elige el [DEFAULT].
+5. Si el cliente SÍ especifica variante/calibre/medida, respeta lo que pidió aunque exista un [DEFAULT].
+6. Analiza el CONTEXTO del pedido completo para inferir calibres y variantes (tablaroca → cal 26, durock → cal 20).
+7. Si NO puedes determinar cuál variante y no hay [DEFAULT], devuelve key=null para que el bot pregunte.
+"""
+
 
 # ---------------------------------------------------------------------------
 # Prompt
 # ---------------------------------------------------------------------------
 
-SYSTEM_PROMPT = """Eres un parser de órdenes para un distribuidor mexicano de materiales de construcción. Su fuerte es construcción ligera (drywall) con marcas como USG, Saint-Gobain y Panel Rey, pero también vende: rejacero y cercas (malla ciclónica, alambre de púas, poste ganadero), láminas (galvanizada, acero inoxidable, aluminio, policarbonato), pintura (esmalte, vinílica), puertas multipanel, plafones, impermeabilizante, herramienta menor, y accesorios varios. Los clientes típicos son contratistas, instaladores y ferreterías. Recibes mensajes de clientes por WhatsApp y los conviertes en una lista estructurada.
+SYSTEM_PROMPT = """Eres un parser de órdenes para un negocio mexicano. Recibes mensajes de clientes por WhatsApp y los conviertes en una lista estructurada de productos.
 
 {jerga}
 
@@ -560,38 +589,37 @@ CATÁLOGO DISPONIBLE (formato: "- <key> || <nombre> | <unidad> | <precio>"):
 {catalog}
 
 REGLAS:
-1. Identifica cada producto que el cliente quiere cotizar. El mensaje puede tener 1 o muchos productos separados por comas, guiones, asteriscos, viñetas, saltos de línea, "y", o listas enumeradas.
-2. Para cada producto, elige el <key> del catálogo que mejor corresponde. NUNCA inventes una key que no esté listada arriba.
-3. Si el cliente escribe jerga, typos o nombres cortos, usa tu conocimiento de ferretería mexicana y la sección de jerga arriba para identificar el producto correcto.
-4. Si NO hay match claro en el catálogo, devuelve key=null y confidence baja (<0.6), con el texto original en matched_text y name. PERO si hay una sola opción posible del tipo de producto (ej. solo existe una perfacinta, un solo basecoat), SÍ devuelve esa key con confidence alta.
-5. Cantidad por defecto: 1. Interpreta "2 de cada", "5 paquetes", "10 mts", cantidades al final del producto ("Tornillo 300"), números con decimal como cantidades (175 o 175.00 panel = 175 unidades, NO precio).
-6. Si una línea dice "1 ???" o similar (basura), IGNÓRALA por completo.
-7. Si el mensaje es un botón de UI, un saludo puro ("hola", "buenos días"), una pregunta de horarios, un número de teléfono, o un "salir" / "cancelar", devuelve items=[] y non_order=true.
-8. REGLA CRÍTICA: Si el mensaje contiene un número + nombre de producto (ej. "3 martillos", "5 focos", "10 cables", "2 lámparas"), SIEMPRE es una orden. Devuelve items con key=null si no está en catálogo. NUNCA devuelvas non_order=true cuando hay un patrón de "cantidad + producto", aunque el producto NO esté en el catálogo. El bot necesita saber qué pidió el cliente para buscarlo.
-9. Si un spec aparece al final y aplica a varios productos arriba (ej: "Canal 4 y 6.35 cal 26" → cal 26 aplica a ambos), propágalo.
-10. Si aparece un forward con saludo de otro proveedor antes de la lista (ej: "Buenos días, seguimos a tus órdenes en Gram-Bel"), ignora el saludo y parsea SOLO la lista de productos.
-11. Nombres de proyecto al inicio ("Mat. Privanzas", "Del closet") no son productos, son contexto.
-12. PRODUCTOS DEFAULT: Algunos productos tienen la marca [DEFAULT] en el catálogo. Cuando el cliente pide un producto genérico SIN especificar tamaño, calibre, medida, presentación o variante (ej. "poste", "canal", "tablaroca", "redimix"), SIEMPRE elige el producto marcado [DEFAULT] de ese tipo. El [DEFAULT] representa el producto estándar/más vendido que el dueño de la tienda ha marcado como favorito. Solo ignora el [DEFAULT] si el cliente explícitamente pide otra variante (ej. "poste cal 20", "canal 4.10", "tablaroca anti fuego").
-13. En matched_text, devuelve SOLO el nombre del producto SIN la cantidad. Ejemplo: si el cliente dice "5 focos", matched_text="focos" (NO "5 focos"). La cantidad va en el campo qty.
+1. Identifica cada producto que el cliente quiere. El mensaje puede tener 1 o muchos productos separados por comas, guiones, viñetas, saltos de línea, "y", o listas.
+2. Para cada producto, elige el <key> del catálogo que mejor corresponde. NUNCA inventes una key que no exista arriba.
+3. Usa tu conocimiento de la industria para interpretar jerga, typos, apodos y abreviaturas. NO necesitas una lista explícita — infiere del contexto y del catálogo.
+4. Si NO hay match claro en el catálogo, devuelve key=null y confidence baja (<0.6). PERO si solo existe UNA opción posible de ese tipo de producto, SÍ devuelve esa key con confidence alta.
+5. Cantidad por defecto: 1.
+6. Si una línea es basura ("1 ???"), IGNÓRALA.
+7. Si el mensaje es un saludo puro, botón de UI, pregunta de horarios, o "cancelar" → items=[] y non_order=true.
+8. REGLA CRÍTICA: Si el mensaje tiene número + producto (ej. "3 martillos", "5 focos"), SIEMPRE es una orden. Devuelve items con key=null si no está en catálogo. NUNCA non_order=true con patrón "cantidad + producto".
+9. Specs al final de línea aplican a productos previos en esa línea.
+10. Saludos de forwarded messages no son productos.
+11. Nombres de proyecto al inicio no son productos.
+12. PRODUCTOS DEFAULT: Si hay un [DEFAULT] marcado y el cliente NO especifica variante, SIEMPRE elige el [DEFAULT].
+13. En matched_text, devuelve SOLO el nombre SIN la cantidad. La cantidad va en qty.
 
-OUTPUT: JSON válido, sin markdown, exactamente esta estructura:
+OUTPUT: JSON válido, sin markdown:
 {{
   "items": [
     {{
-      "matched_text": "fragmento original del mensaje",
+      "matched_text": "nombre del producto sin cantidad",
       "key": "<key del catálogo o null>",
-      "name": "nombre del catálogo si hay key, o nombre libre si key=null",
-      "qty": entero o decimal,
+      "name": "nombre del catálogo o nombre libre si key=null",
+      "qty": número,
       "unit": "pza|mt|kg|lt|pqt|caja|rollo|bulto|bolsa|null",
       "confidence": 0.0 a 1.0,
-      "notes": "explicación breve si confidence<0.8 o key=null"
+      "notes": "breve si confidence<0.8 o key=null"
     }}
   ],
   "non_order": false
 }}
 
-Si el mensaje NO es una orden, devuelve:
-{{"items": [], "non_order": true}}"""
+Si NO es orden: {{"items": [], "non_order": true}}"""
 
 
 SYSTEM_PROMPT_DYNAMIC = """{system_intro}
@@ -604,44 +632,37 @@ CATÁLOGO DISPONIBLE (formato: "- <key> || <nombre> | <unidad> | <precio>"):
 {catalog}
 
 REGLAS:
-1. Identifica cada producto que el cliente quiere cotizar. El mensaje puede tener 1 o muchos productos separados por comas, guiones, asteriscos, viñetas, saltos de línea, "y", o listas enumeradas.
-2. Para cada producto, elige el <key> del catálogo que mejor corresponde. NUNCA inventes una key que no esté listada arriba.
-3. Si el cliente escribe jerga, typos o nombres cortos, usa tu conocimiento de la industria y la sección de jerga arriba para identificar el producto correcto.
-4. Si NO hay match claro en el catálogo, devuelve key=null y confidence baja (<0.6), con el texto original en matched_text y name. PERO si hay una sola opción posible del tipo de producto (ej. solo existe una perfacinta, un solo basecoat), SÍ devuelve esa key con confidence alta.
-5. Cantidad por defecto: 1. Interpreta "2 de cada", "5 paquetes", "10 mts", cantidades al final del producto ("Tornillo 300"), números con decimal como cantidades (175 o 175.00 panel = 175 unidades, NO precio).
-6. Si una línea dice "1 ???" o similar (basura), IGNÓRALA por completo.
-7. Si el mensaje es un botón de UI, un saludo puro ("hola", "buenos días"), una pregunta de horarios, un número de teléfono, o un "salir" / "cancelar", devuelve items=[] y non_order=true.
-8. REGLA CRÍTICA: Si el mensaje contiene un número + nombre de producto (ej. "3 martillos", "5 focos", "10 cables"), SIEMPRE es una orden. Devuelve items con key=null si no está en catálogo. NUNCA devuelvas non_order=true cuando hay un patrón de "cantidad + producto".
-9. Si un spec aparece al final y aplica a varios productos arriba (ej: "Canal 4 y 6.35 cal 26" → cal 26 aplica a ambos), propágalo.
-10. Si aparece un forward con saludo de otro proveedor antes de la lista, ignora el saludo y parsea SOLO la lista de productos.
-11. Nombres de proyecto al inicio ("Mat. Privanzas", "Del closet") no son productos, son contexto.
-12. PRODUCTOS DEFAULT: Algunos productos tienen la marca [DEFAULT] en el catálogo. Cuando el cliente pide un producto genérico SIN especificar tamaño, calibre, medida, presentación o variante, SIEMPRE elige el producto marcado [DEFAULT] de ese tipo.
-13. En matched_text, devuelve SOLO el nombre del producto SIN la cantidad. La cantidad va en qty.
+1. Identifica cada producto que el cliente quiere. Pueden venir separados por comas, guiones, viñetas, saltos de línea, "y", o listas.
+2. Para cada producto, elige el <key> del catálogo que mejor corresponde. NUNCA inventes una key que no exista.
+3. Usa tu conocimiento de la industria para interpretar jerga, typos y abreviaturas.
+4. Si NO hay match claro, devuelve key=null y confidence baja (<0.6). Si solo existe UNA opción de ese tipo, SÍ devuelve esa key.
+5. Cantidad por defecto: 1.
+6. Basura ("1 ???") → IGNORA.
+7. Saludo puro, botón de UI, pregunta de horarios, "cancelar" → items=[] y non_order=true.
+8. REGLA CRÍTICA: número + producto = SIEMPRE una orden. Devuelve items con key=null si no está en catálogo.
+9. Specs al final de línea aplican a productos previos.
+10. Saludos de forwards no son productos.
+11. Nombres de proyecto al inicio no son productos.
+12. Si hay [DEFAULT] y el cliente NO especifica variante, SIEMPRE elige el [DEFAULT].
+13. matched_text = SOLO nombre SIN cantidad. La cantidad va en qty.
 
-RESOLUCIÓN DE AMBIGÜEDADES — USA TU CONOCIMIENTO DE LA INDUSTRIA:
-Cuando el cliente NO especifica variante, calibre, medida, etc., NO adivines al azar. Usa tu conocimiento técnico para inferir la opción correcta, tal como lo haría un vendedor experimentado. Analiza el CONTEXTO del pedido completo.
-IMPORTANTE: Si un producto tiene la marca [DEFAULT] y el cliente NO especifica variante, SIEMPRE elige el [DEFAULT].
-Si genuinamente no puedes determinar cuál variante es Y no hay un [DEFAULT] marcado, devuelve key=null y confidence baja.
-NUNCA combines o sumes cantidades de productos diferentes. Cada línea del mensaje es un producto independiente.
-
-OUTPUT: JSON válido, sin markdown, exactamente esta estructura:
+OUTPUT: JSON válido, sin markdown:
 {{{{
   "items": [
     {{{{
-      "matched_text": "fragmento original del mensaje",
-      "key": "<key del catálogo o null>",
-      "name": "nombre del catálogo si hay key, o nombre libre si key=null",
-      "qty": entero o decimal,
+      "matched_text": "nombre sin cantidad",
+      "key": "<key o null>",
+      "name": "nombre del catálogo o libre si key=null",
+      "qty": número,
       "unit": "pza|mt|kg|lt|pqt|caja|rollo|bulto|bolsa|null",
       "confidence": 0.0 a 1.0,
-      "notes": "explicación breve si confidence<0.8 o key=null"
+      "notes": "breve si confidence<0.8 o key=null"
     }}}}
   ],
   "non_order": false
 }}}}
 
-Si el mensaje NO es una orden, devuelve:
-{{{{"items": [], "non_order": true}}}}"""
+Si NO es orden: {{{{"items": [], "non_order": true}}}}"""
 
 
 USER_TEMPLATE = "Mensaje del cliente:\n```\n{text}\n```"
@@ -749,10 +770,8 @@ def llm_parse_order(
             )
 
     if _dynamic_ctx and _dynamic_ctx.get("jerga_hints"):
-        # MERGE: hardcoded base jerga + dynamic catalog-specific jerga
-        # The hardcoded hints have proven street-level terms (permabase, bescool, maya, muro)
-        # The dynamic hints add catalog-specific disambiguation rules
-        jerga_block = JERGA_HINTS + "\n\n--- Reglas adicionales por catálogo ---\n\n" + _dynamic_ctx["jerga_hints"]
+        # Base structural rules + dynamic catalog-specific context per company
+        jerga_block = JERGA_HINTS + "\n\n--- Contexto adicional del catálogo ---\n\n" + _dynamic_ctx["jerga_hints"]
         # Use dynamic system intro + the standard rules
         system_intro = _dynamic_ctx.get("system_intro", "")
         system = SYSTEM_PROMPT_DYNAMIC.format(
