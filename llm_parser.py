@@ -722,17 +722,9 @@ def llm_parse_order(
             "precleaned_text": "",
         }
 
-    # Auto-select model based on order complexity
-    import logging as _lg
-    _log_model = _lg.getLogger("cotizaexpress.llm_parser")
+    # Default to gpt-4o for best accuracy — cost is negligible per message
     if model is None:
-        _n_lines = _estimate_product_lines(cleaned)
-        if _n_lines >= _LARGE_ORDER_THRESHOLD:
-            model = "gpt-4o"
-            _log_model.info("LARGE ORDER (%d lines) → using gpt-4o for accuracy", _n_lines)
-        else:
-            model = "gpt-4o-mini"
-            _log_model.debug("Small order (%d lines) → using gpt-4o-mini", _n_lines)
+        model = "gpt-4o"
 
     # Semantic prefilter (embedding-based) when company_id available, else token-based
     if company_id:
@@ -768,8 +760,8 @@ def llm_parse_order(
         system = SYSTEM_PROMPT.format(jerga=jerga_block, catalog=catalog_block)
     user = USER_TEMPLATE.format(text=cleaned)
 
-    # gpt-4o is slower, give it more time
-    _effective_timeout = 60.0 if model == "gpt-4o" else timeout
+    # gpt-4o needs more time than mini
+    _effective_timeout = max(timeout, 60.0) if "gpt-4o-mini" not in model else timeout
 
     start = time.time()
     try:
