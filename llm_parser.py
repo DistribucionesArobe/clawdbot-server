@@ -510,18 +510,18 @@ def prefilter_catalog_semantic(
 JERGA_HINTS = """Jerga típica de ferretería mexicana:
 - "tablaroca" = panel de yeso. "panel rey" / "panel de yeso" / "hojas de yeso" / "lamina de yeso" / "tablarock" / "tabla roca" / "tblrc" → tablaroca. "muro" / "muros" / "pared" / "paredes" + material = el cliente quiere las hojas/paneles para construir, NO es un producto llamado "muro". "Quiero muro de panel rey 12mm" = quiero tablaroca 12mm.
 - "lightrey" / "light rey" → tablaroca ultralight.
-- "tablaroca WR" / "tablaroca RH" / "tablaroca anti moho" / "azul celeste" / "panel rey MR" → tablaroca anti-moho.
+- "tablaroca WR" / "tablaroca RH" / "tablaroca anti moho" / "azul celeste" / "panel rey MR" / "tablaroca verde" / "bill verde" / "bil verde" / "tablaroca bil verde" → tablaroca anti-moho.
 - "securock" / "securok" → securock (material distinto a tablaroca).
 - "durock" / "duroc" / "durrock" / "permabase" / "perma base" / "permabse" → durock. NOTA: Permabase es la marca competidora (National Gypsum), pero la tienda maneja Durock (USG) como equivalente. Siempre matchea a durock.
 - "basecoat" / "base coat" / "basekoat" / "biscoat" / "bescool" / "bescol" / "bescot" / "pasta tablaroca" / "pasta para juntas" / "pasta durock" / "compuesto para juntas" → basecoat.
 - "redimix" / "redemix" / "ready mix" / "compuesto std plus" / "compuesto estandar plus" → redimix.
 - "perfacinta" / "perfacita" / "prefacinta" / "perfacintas" / "cinta papel" / "cinta de papel usg" / "cinta union" / "cinta de union" → perfacinta usg 75m x 5cm (es el ÚNICO producto de perfacinta — siempre matchea a esa key).
 - "cinta fibra" / "cinta de malla" / "cinta maya" / "maya" / "mayas" / "rollos de maya" / "malla para tablaroca" / "malla tablaroca" / "malla durock" → cinta fibra de vidrio. IMPORTANTE: "maya" (con Y) es un error de ortografía de "malla", NUNCA es "plafón".
-- "pilas" / "pila" / "pijas" = pijas (tornillos). "pija fremer" / "pija flamer" / "pija frame" / "framer" → pija framer. "pija para durock" / "pilas para durock". "pija para tablaroca" / "tornillo para tablaroca" / "pija 6x1" → pija 6 x 1. "pija 10x1 1/2" / "pija 10x1.5" / "fijasora" / "punta de broca" → pija 10 x 1 1/2.
+- "pilas" / "pila" / "pijas" = pijas (tornillos). "pija fremer" / "pija flamer" / "pija frame" / "framer" / "flamer" / "flamer punta fina" → pija framer. IMPORTANTE: "flamer" es un error de ortografía muy común de "framer". Si el cliente dice "flamer" con cualquier especificación (ej. "flamer punta fina de ½ x 7.16"), SIEMPRE matchea a pija framer — ignora specs que no existen en catálogo y elige el framer disponible. "pija para durock" / "pilas para durock". "pija para tablaroca" / "tornillo para tablaroca" / "pija 6x1" → pija 6 x 1. "pija 10x1 1/2" / "pija 10x1.5" / "fijasora" / "punta de broca" → pija 10 x 1 1/2.
 - "taquete ancla" / "taquete anclo" / "ancla de expansion" → taquete expansion. "taquete un cuarto" / "taquetes 1/4" / "taquetes de un cuarto" → taquete de plástico 1/4".
 - "cancel" / "cnal" / "canel" / "canaleta" → canal. "canal de amarre" / "canal amarre" / "canales de amarre" = SIEMPRE es un canal (track de tablaroca), NUNCA es "ángulo de amarre". Elige el canal marcado [DEFAULT] si no especifica medida. "canaleta de carga" / "cargadora" / "canaleta CA" → canaleta de carga.
 - "reborde jota" / "revorde j" / "revoque j" / "reborder j" → reborde j galvanizado.
-- "postes" / "pste" / "psts". "poste para la reja" / "poste de reja" → poste para rejacero.
+- "postes" / "pste" / "psts". "poste para la reja" / "poste de reja" → poste para rejacero. Si el cliente pide una medida de poste que NO existe en el catálogo (ej. "poste 1.10"), elige el poste [DEFAULT] o el más cercano disponible. NO inventes un poste que no esté listado.
 - "reja" / "rejas" → rejacero.
 - "abrazadera" (sin especificar) → abrazadera para rejacero.
 - "galleta" / "plafon galleta" / "plafones registrables" → plafon registrable.
@@ -541,7 +541,10 @@ Cuando el cliente NO especifica variante, calibre, medida, etc., NO adivines al 
 - IMPORTANTE: Si un producto tiene la marca [DEFAULT] en el catálogo y el cliente NO especifica variante/calibre/tamaño, SIEMPRE elige el [DEFAULT]. Es el producto estándar configurado por el dueño de la tienda.
 - Si genuinamente no puedes determinar cuál variante es Y no hay un [DEFAULT] marcado, devuelve key=null y confidence baja para que el bot pregunte al cliente.
 - Si el cliente SÍ especifica (ej. "postes cal 20", "canal cal 22"), SIEMPRE respeta lo que pidió, aunque haya otro marcado como [DEFAULT].
-- NUNCA combines o sumes cantidades de productos diferentes. "1 hoja de securock" y "4 hojas tablaroca" son DOS líneas separadas (1x securock + 4x tablaroca), NO "5x tablaroca". Cada línea del mensaje del cliente es un producto independiente.
+- NUNCA combines o sumes cantidades de productos diferentes. Cada línea del mensaje del cliente es un producto independiente. Ejemplos:
+  * "122 hojas tablaroca estándar" y "6 hojas tablaroca bill verde" = DOS ítems separados (122x tablaroca ultralight + 6x tablaroca anti-moho), NUNCA "128x tablaroca".
+  * "1 hoja de securock" y "4 hojas tablaroca" = DOS ítems (1x securock + 4x tablaroca), NO "5x tablaroca".
+  * Si el cliente pide el mismo tipo de producto pero con diferente variante/color/tipo, son líneas SEPARADAS.
 """
 
 
