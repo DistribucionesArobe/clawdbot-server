@@ -547,6 +547,53 @@ def pricebook_items(
         if conn: conn.close()
 
 
+@router.get("/api/pricebook/needs-pricing")
+def pricebook_needs_pricing(
+    request: Request,
+    authorization: str = Header(default=""),
+):
+    """Returns products auto-added by the quality system that need pricing (price=0, source=auto-quality)"""
+    conn = None
+    cur = None
+    try:
+        if authorization and authorization.lower().startswith("bearer "):
+            company_id = get_company_from_bearer(authorization)["company_id"]
+        else:
+            _ = get_user_from_session(request)
+            company_id = require_company_id(request)
+        if not company_id:
+            raise HTTPException(status_code=400, detail="No pude resolver company_id")
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT id, name, unit, created_at
+            FROM pricebook_items
+            WHERE company_id = %s AND source = 'auto-quality' AND (price IS NULL OR price = 0)
+            ORDER BY created_at DESC
+            LIMIT 50
+            """,
+            (company_id,),
+        )
+        rows = cur.fetchall()
+        items = [
+            {"id": r[0], "name": r[1], "unit": r[2], "created_at": r[3].isoformat() if r[3] else None}
+            for r in rows
+        ]
+        return {"ok": True, "items": items, "count": len(items)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        if conn:
+            try: conn.rollback()
+            except Exception: pass
+        log.error("NEEDS-PRICING ERROR: %s", repr(e))
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
+
+
 @router.post("/api/pricebook/items")
 def pricebook_item_create(request: Request, body: PricebookItemCreateBody):
     _ = get_user_from_session(request)
