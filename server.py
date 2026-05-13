@@ -4634,6 +4634,34 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
     # Último fallback: clasificar con GPT
     intent = _classify_intent(user_text)
     if intent == "product":
+        # Intentar buscar en catálogo antes de dar respuesta genérica
+        _fallback_query = re.sub(
+            r"(?:tienes?|tienen|manejan|venden|hay|necesito|ocupo|quiero|"
+            r"dame|precio|cuanto|cuánto|cuando\s+vale|a\s+como|cómo|"
+            r"de|del|la|el|los|las|un|una)\s*",
+            " ", user_text.strip(), flags=re.IGNORECASE
+        ).strip().rstrip("?.,!¿")
+        if _fallback_query and len(_fallback_query) >= 2:
+            try:
+                _fb_conn = get_conn()
+                _fb_results = _search_pricebook_candidates(_fb_conn, company_id, _fallback_query, limit=10)
+                _fb_conn.close()
+                if _fb_results:
+                    _fb_lines = []
+                    for i, it in enumerate(_fb_results[:8], 1):
+                        _p = float(it.get("price") or 0)
+                        _u = it.get("unit") or "pza"
+                        if _p > 0:
+                            _fb_lines.append(f"{i}. {it['name']} — ${_p:,.2f}/{_u}")
+                        else:
+                            _fb_lines.append(f"{i}. {it['name']}")
+                    return (
+                        f"¡Sí manejamos! Estas son las opciones:\n\n"
+                        + "\n".join(_fb_lines)
+                        + "\n\nPara cotizar, mándame la cantidad y el producto.\nEj: 10 " + (_fb_results[0].get("name") or "producto")
+                    )
+            except Exception as _fb_e:
+                log.error(f"FALLBACK SEARCH ERROR: {repr(_fb_e)}")
         return (
             "¡Claro! Con gusto te cotizo 😊\n\n"
             "Mándame los productos con cantidades, por ejemplo:\n"
