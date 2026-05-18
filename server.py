@@ -4255,52 +4255,64 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
     if state and state.get("pending"):
         pend = state.get("pending") or []
 
-        clarifs_raw = split_clarifications(user_text)
-        clarifs = [c for c in clarifs_raw if c.strip()]
+        # ── CHECK: is the user sending NEW products instead of clarifying pending?
+        # If the message has quantities (e.g. "100 pijas para taquete y 300 franers"),
+        # it's new products — clear stale pending and let normal flow handle it.
+        _has_new_qty = bool(re.search(r"\b\d+\s+[a-záéíóúñü]", user_text.lower()))
+        _only_not_found = all(not p.get("candidates") for p in pend)
+        if _has_new_qty and _only_not_found:
+            log.info(f"PENDING OVERRIDE: user sent new products while stale not-found pending exists. Clearing pending.")
+            state.pop("pending", None)
+            if wa_from:
+                upsert_quote_state(company_id, wa_from, state)
+            # Fall through to normal product processing below
+        else:
+            clarifs_raw = split_clarifications(user_text)
+            clarifs = [c for c in clarifs_raw if c.strip()]
 
-        if clarifs:
-            conn = get_conn()
-            try:
-                still = []
-                for i, p in enumerate(pend):
-                    qty = int(p.get("qty") or 0)
-                    raw = (p.get("raw") or "").strip()
-                    prod_raw = clarifs[i] if i < len(clarifs) else raw
-                    if is_specs_only(prod_raw):
-                        prod_raw = f"{raw} {prod_raw}"
-                    try:
-                        result = smart_search(conn, company_id, prod_raw, qty,
-                                              cart_context=_build_cart_context(state))
-                    except Exception as e:
-                        log.error("SMART SEARCH ERROR:", repr(e))
-                        result = {"status": "not_found", "item": None, "candidates": []}
-                        save_search_miss(company_id, prod_raw)
-                    if result["status"] == "found":
-                        state = cart_add_item(state, {
-                            "sku": result["item"].get("sku"),
-                            "name": result["item"].get("name"),
-                            "unit": result["item"].get("unit") or "unidad",
-                            "price": float(result["item"].get("price") or 0.0),
-                            "vat_rate": result["item"].get("vat_rate"),
-                            "qty": qty,
-                        })
+            if clarifs:
+                conn = get_conn()
+                try:
+                    still = []
+                    for i, p in enumerate(pend):
+                        qty = int(p.get("qty") or 0)
+                        raw = (p.get("raw") or "").strip()
+                        prod_raw = clarifs[i] if i < len(clarifs) else raw
+                        if is_specs_only(prod_raw):
+                            prod_raw = f"{raw} {prod_raw}"
+                        try:
+                            result = smart_search(conn, company_id, prod_raw, qty,
+                                                  cart_context=_build_cart_context(state))
+                        except Exception as e:
+                            log.error("SMART SEARCH ERROR:", repr(e))
+                            result = {"status": "not_found", "item": None, "candidates": []}
+                            save_search_miss(company_id, prod_raw)
+                        if result["status"] == "found":
+                            state = cart_add_item(state, {
+                                "sku": result["item"].get("sku"),
+                                "name": result["item"].get("name"),
+                                "unit": result["item"].get("unit") or "unidad",
+                                "price": float(result["item"].get("price") or 0.0),
+                                "vat_rate": result["item"].get("vat_rate"),
+                                "qty": qty,
+                            })
+                        else:
+                            still.append({
+                                "qty": qty, "raw": prod_raw,
+                                "candidates": result["candidates"],
+                            })
+                    if still:
+                        state["pending"] = still
                     else:
-                        still.append({
-                            "qty": qty, "raw": prod_raw,
-                            "candidates": result["candidates"],
-                        })
-                if still:
-                    state["pending"] = still
-                else:
-                    state.pop("pending", None)
-                if wa_from:
-                    upsert_quote_state(company_id, wa_from, state)
-                return _build_reply_with_pending(state, company_id=company_id, wa_from=wa_from)
-            finally:
-                conn.close()
+                        state.pop("pending", None)
+                    if wa_from:
+                        upsert_quote_state(company_id, wa_from, state)
+                    return _build_reply_with_pending(state, company_id=company_id, wa_from=wa_from)
+                finally:
+                    conn.close()
 
-        if pend:
-            return _build_reply_with_pending(state, company_id=company_id, wa_from=wa_from)
+            if pend:
+                return _build_reply_with_pending(state, company_id=company_id, wa_from=wa_from)
 
     if re.search(r"\b\d+\b", user_text):
         qty, prod_query, _is_bundle2 = extract_qty_and_product(user_text)
