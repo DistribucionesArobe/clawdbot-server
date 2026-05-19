@@ -1015,6 +1015,15 @@ def seed_jerga_global(conn):
         ("hojas de yeso", "tablaroca"),
         ("placa de yeso", "tablaroca"),
         ("placas de yeso", "tablaroca"),
+        # Foamular / aislante XPS (Owens Corning brand — NOT tablaroca)
+        ("foamular", "foamular"),
+        ("formular", "foamular"),
+        ("hojas de formular", "foamular"),
+        ("aislante foamular", "foamular"),
+        ("aislamiento foamular", "foamular"),
+        ("placa foamular", "foamular"),
+        ("placa aislante foamular", "foamular"),
+        ("placa de aislante foamular", "foamular"),
         # NOTE: Competitor brand mappings (Panel Rey, Crest, etc.) are NOT hardcoded here.
         # They are handled dynamically by the LLM normalizer using each tenant's
         # marcas_propias / marcas_competencia configuration. This scales across all
@@ -1356,8 +1365,17 @@ def llm_normalize_query(conn, company_id: str, user_query: str, tenant_context: 
             "NO inventes productos. NO expliques. NO traduzcas al español. "
             "Responde SOLO con el término normalizado en minúsculas, sin puntuación extra.\n\n"
             "REGLA IMPORTANTE: Si el término es una marca, nombre comercial o tipo de producto "
-            "específico (framer, durock, usg, sheetrock, tablaroca, redimix, basecoat, etc.), "
+            "específico (framer, durock, usg, sheetrock, tablaroca, redimix, basecoat, "
+            "foamular, securock, fiberock, densglass, dens, permabase, etc.), "
             "NO lo traduzcas ni lo cambies. Los nombres de productos se mantienen tal cual.\n\n"
+            "REGLA CRÍTICA: NO conviertas todo a 'tablaroca'. Muchos productos son "
+            "diferentes a tablaroca aunque sean placas o paneles. Ejemplos:\n"
+            "- 'foamular' es aislante XPS, NO es tablaroca\n"
+            "- 'securock' es panel de cemento, NO es tablaroca\n"
+            "- 'durock' es panel de cemento, NO es tablaroca\n"
+            "- 'aislante foamular' → 'foamular' (NO 'tablaroca')\n"
+            "- 'placa de aislante foamular' → 'foamular' (NO 'tablaroca')\n"
+            "Si no estás seguro de qué producto es, regrésalo tal cual sin cambios.\n\n"
             "Ejemplos:\n"
             "- 'tr hr' → 'tablaroca resistente a humedad'\n"
             "- 'tr rh' → 'tablaroca anti-moho'\n"
@@ -1373,6 +1391,9 @@ def llm_normalize_query(conn, company_id: str, user_query: str, tenant_context: 
             "- 'cancel' → 'canal'\n"
             "- 'redimix' → 'redimix'\n"
             "- 'framer' → 'framer'\n"
+            "- 'foamular' → 'foamular'\n"
+            "- 'aislante foamular' → 'foamular'\n"
+            "- 'formular' → 'foamular'\n"
             "- 'pija framer' → 'pija framer'\n"
             "- 'pija durock' → 'pija durock'\n"
             "- 'tornillos pa taquete' → 'tornillo para taquete'\n"

@@ -30,7 +30,7 @@ logging.basicConfig(
 log = logging.getLogger("cotizaexpress")
 
 from openai import OpenAI
-from semantic_search import smart_search, rebuild_embeddings_for_company, upsert_single_embedding, seed_jerga_global, auto_generate_context_groups
+from semantic_search import smart_search, rebuild_embeddings_for_company, upsert_single_embedding, seed_jerga_global, auto_generate_context_groups, _phonetic
 from generate_quote_pdf import build_quote_pdf, generate_folio
 
 from fastapi import (
@@ -4258,10 +4258,36 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         # ── CHECK: is the user sending NEW products instead of clarifying pending?
         # If the message has quantities (e.g. "100 pijas para taquete y 300 franers"),
         # it's new products — clear stale pending and let normal flow handle it.
+        # Also detect product-like messages without leading qty (e.g. "Aislamiento foamular 4x8x1")
         _has_new_qty = bool(re.search(r"\b\d+\s+[a-záéíóúñü]", user_text.lower()))
         _only_not_found = all(not p.get("candidates") for p in pend)
-        if _has_new_qty and _only_not_found:
-            log.info(f"PENDING OVERRIDE: user sent new products while stale not-found pending exists. Clearing pending.")
+
+        # Broader detection: if ALL pending are not_found, and the user sends a
+        # multi-word message that looks like a different product (not a pick number,
+        # not "ninguno", not a single-word clarification), clear stale pending.
+        _ut_lower = user_text.lower().strip()
+        _ut_words = [w for w in _ut_lower.split() if len(w) >= 3]
+        _is_pick = bool(re.fullmatch(r"\d{1,2}", _ut_lower.strip()))  # "1", "2", etc.
+        _is_skip = _ut_lower.strip() in {"ninguno", "no", "nada", "cancelar", "salir"}
+        _pending_raws = {_phonetic((p.get("raw") or "").lower()) for p in pend}
+        _new_text_phon = _phonetic(_ut_lower)
+        # Check if the new message shares significant tokens with pending raws
+        _shares_tokens = False
+        for _pr in _pending_raws:
+            _pr_tokens = {t for t in _pr.split() if len(t) >= 4}
+            _new_tokens = {t for t in _new_text_phon.split() if len(t) >= 4}
+            if _pr_tokens & _new_tokens:
+                _shares_tokens = True
+                break
+        _looks_like_new_product = (
+            len(_ut_words) >= 2
+            and not _is_pick
+            and not _is_skip
+            and not _shares_tokens  # doesn't share key words with pending items
+        )
+
+        if (_has_new_qty or _looks_like_new_product) and _only_not_found:
+            log.info(f"PENDING OVERRIDE: user sent new products (has_qty={_has_new_qty}, new_product={_looks_like_new_product}) while stale not-found pending exists. Clearing pending.")
             state.pop("pending", None)
             if wa_from:
                 upsert_quote_state(company_id, wa_from, state)
