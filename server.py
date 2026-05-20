@@ -730,6 +730,7 @@ from routes.company import router as company_router
 from routes.admin import router as admin_router
 from routes.empresa import router as empresa_router
 from routes.whatsapp import router as whatsapp_router
+from routes.afiliados import router as afiliados_router, track_referral
 
 app.include_router(pricebook_router)
 app.include_router(pagos_router)
@@ -737,6 +738,7 @@ app.include_router(company_router)
 app.include_router(admin_router)
 app.include_router(empresa_router)
 app.include_router(whatsapp_router)
+app.include_router(afiliados_router)
 
 
 # ── Contact form endpoint ─────────────────────────────────────────────────────
@@ -877,6 +879,7 @@ class RegisterBody(BaseModel):
     email: str
     password: str
     promo_code: Optional[str] = None
+    referral_code: Optional[str] = None
 
 class LoginBody(BaseModel):
     email: str
@@ -5082,6 +5085,16 @@ def register(body: RegisterBody):
         if not row:
             raise HTTPException(status_code=500, detail="No se pudo obtener user_id")
         user_id = row[0]
+
+        # Rastrear referido de afiliado si se proporcionó referral_code
+        _ref = (body.referral_code or "").strip()
+        if _ref:
+            try:
+                track_referral(str(company_id), _ref)
+                cur.execute("UPDATE companies SET referred_by=%s WHERE id=%s", (_ref, company_id))
+                log.info("REGISTRO+REFERRAL: company=%s ref=%s", company_id, _ref)
+            except Exception as re:
+                log.error("REGISTRO REFERRAL ERROR (non-fatal): %s", repr(re))
 
         # Aplicar código promo si se proporcionó
         promo_applied = None

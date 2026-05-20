@@ -111,8 +111,104 @@ def fix_plan_code_promo_bug(conn):
         cur.close()
 
 
+def run_affiliates_migration(conn):
+    """Create affiliate program tables (idempotent)."""
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS affiliates (
+                id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                nombre          TEXT NOT NULL,
+                email           TEXT NOT NULL UNIQUE,
+                telefono        TEXT NOT NULL,
+                empresa         TEXT,
+                zona            TEXT,
+                notas           TEXT,
+                referral_code   TEXT NOT NULL UNIQUE,
+                access_token    TEXT NOT NULL DEFAULT encode(gen_random_bytes(24), 'hex'),
+                mp_email        TEXT,
+                total_earned    NUMERIC NOT NULL DEFAULT 0,
+                total_referrals INT NOT NULL DEFAULT 0,
+                activo          BOOLEAN NOT NULL DEFAULT TRUE,
+                created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
+            CREATE INDEX IF NOT EXISTS idx_affiliates_referral_code ON affiliates(referral_code);
+            CREATE INDEX IF NOT EXISTS idx_affiliates_email ON affiliates(email);
+
+            CREATE TABLE IF NOT EXISTS affiliate_referrals (
+                id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                affiliate_id    UUID NOT NULL REFERENCES affiliates(id),
+                company_id      UUID NOT NULL,
+                referral_code   TEXT NOT NULL,
+                converted       BOOLEAN NOT NULL DEFAULT FALSE,
+                created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
+            CREATE INDEX IF NOT EXISTS idx_affiliate_referrals_affiliate ON affiliate_referrals(affiliate_id);
+            CREATE INDEX IF NOT EXISTS idx_affiliate_referrals_company ON affiliate_referrals(company_id);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_affiliate_referrals_company_unique ON affiliate_referrals(company_id);
+
+            CREATE TABLE IF NOT EXISTS affiliate_commissions (
+                id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                affiliate_id        UUID NOT NULL REFERENCES affiliates(id),
+                referral_id         UUID NOT NULL REFERENCES affiliate_referrals(id),
+                company_id          UUID NOT NULL,
+                payment_id          TEXT,
+                plan                TEXT NOT NULL,
+                commission_type     TEXT NOT NULL,
+                base_amount         NUMERIC NOT NULL,
+                commission_amount   NUMERIC NOT NULL,
+                description         TEXT,
+                status              TEXT NOT NULL DEFAULT 'pending',
+                created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+                paid_at             TIMESTAMPTZ
+            );
+            CREATE INDEX IF NOT EXISTS idx_affiliate_commissions_affiliate ON affiliate_commissions(affiliate_id);
+            CREATE INDEX IF NOT EXISTS idx_affiliate_commissions_status ON affiliate_commissions(status);
+        """)
+        conn.commit()
+        log.info("AFFILIATES MIGRATION: OK")
+    except Exception as e:
+        log.error("AFFILIATES MIGRATION ERROR: %s", repr(e))
+        conn.rollback()
+    finally:
+        cur.close()
+
+
+def run_mp_payment_id_migration(conn):
+    """Add mp_payment_id column to companies (idempotent)."""
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'companies' AND column_name = 'mp_payment_id'
+                ) THEN
+                    ALTER TABLE companies ADD COLUMN mp_payment_id TEXT;
+                END IF;
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'companies' AND column_name = 'referred_by'
+                ) THEN
+                    ALTER TABLE companies ADD COLUMN referred_by TEXT;
+                END IF;
+            END $$;
+        """)
+        conn.commit()
+        log.info("MP_PAYMENT_ID + REFERRED_BY MIGRATION: OK")
+    except Exception as e:
+        log.error("MP_PAYMENT_ID MIGRATION ERROR: %s", repr(e))
+        conn.rollback()
+    finally:
+        cur.close()
+
+
 def run_all(conn):
     """Run all migrations."""
     run_pricebook_migrations(conn)
     run_promo_codes_migration(conn)
     fix_plan_code_promo_bug(conn)
+    run_affiliates_migration(conn)
+    run_mp_payment_id_migration(conn)

@@ -16,6 +16,7 @@ from pydantic import BaseModel
 
 from auth import get_user_from_session, require_company_id
 from db import get_conn
+from routes.afiliados import process_commission
 
 log = logging.getLogger("cotizaexpress.pagos")
 
@@ -27,9 +28,9 @@ router = APIRouter()
 _MP_ACCESS_TOKEN = (os.getenv("MP_ACCESS_TOKEN") or "").strip()
 
 _MP_PLAN_PRICES = {
-    "cotizabot":   1160.00,   # $1,000 + IVA 16% = $1,160 MXN
-    "pro":         2320.00,   # $2,000 + IVA 16% = $2,320 MXN
-    "enterprise":  4640.00,   # $4,000 + IVA 16% = $4,640 MXN
+    "cotizabot":   1000.00,   # $1,000 MXN neto
+    "pro":         2000.00,   # $2,000 MXN neto
+    "enterprise":  4000.00,   # $4,000 MXN neto
 }
 
 _MP_PLAN_NAMES = {
@@ -171,6 +172,11 @@ def pago_estado(request: Request, session_id: str = Query(None), payment_id: str
                     cur.close()
                     conn.close()
                     log.info("MP PLAN ACTIVADO: company=%s plan=%s", mp_company_id, plan)
+                    # Process affiliate commission
+                    try:
+                        process_commission(mp_company_id, plan, str(_payment_id))
+                    except Exception as ce:
+                        log.error("MP ESTADO COMMISSION ERROR: %s", repr(ce))
                 except Exception as e:
                     log.error("MP ESTADO DB ERROR: %s", repr(e))
 
@@ -259,6 +265,11 @@ async def mp_webhook(request: Request):
                         cur.close()
                         conn.close()
                         log.info("MP WEBHOOK PLAN ACTIVADO: company=%s plan=%s", company_id, plan)
+                        # Process affiliate commission
+                        try:
+                            process_commission(company_id, plan, str(data_id))
+                        except Exception as ce:
+                            log.error("MP WEBHOOK COMMISSION ERROR: %s", repr(ce))
                     except Exception as e:
                         log.error("MP WEBHOOK DB ERROR: %s", repr(e))
 
