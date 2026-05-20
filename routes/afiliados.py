@@ -2,7 +2,10 @@
 routes/afiliados.py — Affiliate program endpoints for CotizaExpress.
 
 Affiliate registration, referral tracking, commission calculation, and admin management.
-Commission model: 1 month upfront bonus + 15% recurring monthly.
+Commission model (with protections):
+  - Upfront bonus: 50% of base price (paid after 3-month cliff)
+  - Recurring: 15% monthly (capped at 24 months per referral)
+  - Anti-fraud: no self-referrals, no same-domain referrals
 """
 
 import logging
@@ -25,11 +28,14 @@ router = APIRouter()
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
-COMISION_RECURRENTE = 0.15  # 15% recurring monthly
+COMISION_RECURRENTE = 0.15   # 15% recurring monthly
+BONO_UPFRONT_FACTOR = 0.50   # 50% of base price as upfront bonus
+CLIFF_MONTHS = 3             # Upfront bonus only after 3 payments
+MAX_RECURRING_MONTHS = 24    # Cap recurring commissions at 24 months
 FRONTEND_URL = os.getenv("FRONTEND_URL", "https://cotizaexpress.com")
 
 _PLAN_PRICES_MXN = {
-    "cotizabot":   1000.00,   # Precio base sin IVA
+    "cotizabot":   1000.00,
     "pro":         2000.00,
     "enterprise":  4000.00,
 }
@@ -185,9 +191,10 @@ def validar_codigo(ref: str = Query(...)):
 # INTERNAL: Track referral when a company registers with ?ref= code
 # ══════════════════════════════════════════════════════════════════════════════
 
-def track_referral(company_id: str, referral_code: str):
+def track_referral(company_id: str, referral_code: str, company_email: str = ""):
     """Called from registration endpoint to link a company to an affiliate.
-    This is NOT an API endpoint — it's called internally."""
+    This is NOT an API endpoint — it's called internally.
+    Includes anti-fraud: blocks self-referrals and same-domain referrals."""
     if not referral_code:
         return
 
@@ -196,7 +203,7 @@ def track_referral(company_id: str, referral_code: str):
     try:
         conn = get_conn(); cur = conn.cursor()
         cur.execute(
-            "SELECT id FROM affiliates WHERE referral_code=%s AND activo=TRUE LIMIT 1",
+            "SELECT id, email FROM affiliates WHERE referral_code=%s AND activo=TRUE LIMIT 1",
             (code,),
         )
         row = cur.fetchone()
@@ -205,6 +212,26 @@ def track_referral(company_id: str, referral_code: str):
             return
 
         affiliate_id = row[0]
+        affiliate_email = (row[1] or "").strip().lower()
+
+        # ── Anti-fraud checks ──
+        comp_email = (company_email or "").strip().lower()
+        if comp_email and affiliate_email:
+            # Block self-referral (same email)
+            if comp_email == affiliate_email:
+                log.warning("TRACK REFERRAL BLOCKED: self-referral email=%s", comp_email)
+                return
+            # Block same-domain referral (e.g., juan@acme.com referring pedro@acme.com)
+            aff_domain = affiliate_email.split("@")[-1] if "@" in affiliate_email else ""
+            comp_domain = comp_email.split("@")[-1] if "@" in comp_email else ""
+            # Only block corporate domains, not public email providers
+            public_domains = {"gmail.com", "hotmail.com", "outlook.com", "yahoo.com",
+                              "live.com", "icloud.com", "protonmail.com", "mail.com",
+                              "yahoo.com.mx", "hotmail.es", "outlook.es"}
+            if aff_domain and comp_domain and aff_domain == comp_domain and aff_domain not in public_domains:
+                log.warning("TRACK REFERRAL BLOCKED: same domain=%s affiliate=%s company=%s",
+                            aff_domain, affiliate_email, comp_email)
+                return
 
         # Check if already tracked
         cur.execute(
@@ -238,7 +265,11 @@ def track_referral(company_id: str, referral_code: str):
 
 def process_commission(company_id: str, plan: str, payment_id: str):
     """Called from pagos webhook when a payment is approved.
-    Calculates commission for the affiliate (if any) and records it."""
+    Commission logic with protections:
+      - Upfront bonus (50% of base) only after CLIFF_MONTHS consecutive payments
+      - Recurring 15% capped at MAX_RECURRING_MONTHS per referral
+      - Duplicate payment_id check to avoid double-counting
+    """
     if not company_id or not plan:
         return
 
@@ -250,7 +281,17 @@ def process_commission(company_id: str, plan: str, payment_id: str):
     try:
         conn = get_conn(); cur = conn.cursor()
 
-        # Find affiliate for this company
+        # ── Duplicate check: don't process same payment_id twice ──
+        if payment_id:
+            cur.execute(
+                "SELECT 1 FROM affiliate_commissions WHERE payment_id=%s LIMIT 1",
+                (payment_id,),
+            )
+            if cur.fetchone():
+                log.warning("COMMISSION SKIP: duplicate payment_id=%s", payment_id)
+                return
+
+        # ── Find affiliate for this company ──
         cur.execute(
             """
             SELECT ar.affiliate_id, ar.id as referral_id, a.nombre, a.email
@@ -267,53 +308,91 @@ def process_commission(company_id: str, plan: str, payment_id: str):
 
         affiliate_id, referral_id, aff_name, aff_email = row
 
-        # Check if this is the first payment (upfront bonus) or recurring
+        # ── Count existing commissions for this referral ──
         cur.execute(
             "SELECT COUNT(*) FROM affiliate_commissions WHERE referral_id=%s",
             (referral_id,),
         )
         payment_count = cur.fetchone()[0]
 
-        if payment_count == 0:
-            # First payment: upfront bonus = 1 full month base price
-            commission_amount = base_price
+        # ── Cap check: stop after MAX_RECURRING_MONTHS total commissions ──
+        # (includes the upfront bonus as 1 of the total)
+        if payment_count >= MAX_RECURRING_MONTHS:
+            log.info("COMMISSION CAP REACHED: referral=%s count=%d max=%d",
+                     referral_id, payment_count, MAX_RECURRING_MONTHS)
+            return
+
+        # ── Determine commission type and amount ──
+        commission_amount = 0
+        commission_type = ""
+        description = ""
+
+        if payment_count < CLIFF_MONTHS:
+            # Pre-cliff: record the payment but mark as "cliff_pending"
+            # These don't pay out yet — they're tracking that the customer is sticking around
+            commission_amount = 0
+            commission_type = "cliff_pending"
+            description = (
+                f"Pago {payment_count + 1}/{CLIFF_MONTHS} pre-bono - Plan {plan} "
+                f"(bono se libera al mes {CLIFF_MONTHS})"
+            )
+        elif payment_count == CLIFF_MONTHS:
+            # Cliff reached! Pay the upfront bonus (50% of base)
+            commission_amount = round(base_price * BONO_UPFRONT_FACTOR, 2)
             commission_type = "upfront"
-            description = f"Bono primer mes - Plan {plan} (${base_price:,.0f} MXN)"
+            description = (
+                f"Bono de activación ({int(BONO_UPFRONT_FACTOR*100)}%) - Plan {plan} "
+                f"(${commission_amount:,.0f} MXN)"
+            )
         else:
-            # Recurring: 15% of base price
+            # Post-cliff recurring: 15% monthly
             commission_amount = round(base_price * COMISION_RECURRENTE, 2)
             commission_type = "recurring"
-            description = f"Comisión mensual {int(COMISION_RECURRENTE*100)}% - Plan {plan} (${commission_amount:,.0f} MXN)"
+            description = (
+                f"Comisión mensual {int(COMISION_RECURRENTE*100)}% - Plan {plan} "
+                f"(${commission_amount:,.0f} MXN)"
+            )
 
+        # ── Record commission ──
+        status = "pending" if commission_amount > 0 else "cliff_waiting"
         cur.execute(
             """
             INSERT INTO affiliate_commissions
                 (affiliate_id, referral_id, company_id, payment_id, plan, commission_type,
-                 base_amount, commission_amount, description)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 base_amount, commission_amount, description, status)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
             """,
             (affiliate_id, referral_id, company_id, payment_id, plan,
-             commission_type, base_price, commission_amount, description),
+             commission_type, base_price, commission_amount, description, status),
         )
         commission_id = cur.fetchone()[0]
 
-        # Update affiliate totals
-        cur.execute(
-            """
-            UPDATE affiliates
-            SET total_earned = total_earned + %s,
-                total_referrals = (SELECT COUNT(DISTINCT company_id) FROM affiliate_referrals WHERE affiliate_id=%s),
-                updated_at = now()
-            WHERE id = %s
-            """,
-            (commission_amount, affiliate_id, affiliate_id),
-        )
+        # ── Update affiliate totals (only for actual money) ──
+        if commission_amount > 0:
+            cur.execute(
+                """
+                UPDATE affiliates
+                SET total_earned = total_earned + %s,
+                    total_referrals = (SELECT COUNT(DISTINCT company_id) FROM affiliate_referrals WHERE affiliate_id=%s),
+                    updated_at = now()
+                WHERE id = %s
+                """,
+                (commission_amount, affiliate_id, affiliate_id),
+            )
+
+        # ── Mark referral as converted once cliff is reached ──
+        if payment_count >= CLIFF_MONTHS and not payment_count > CLIFF_MONTHS:
+            cur.execute(
+                "UPDATE affiliate_referrals SET converted=TRUE WHERE id=%s",
+                (referral_id,),
+            )
+
         conn.commit()
 
         log.info(
-            "COMMISSION CREATED: affiliate=%s (%s) type=%s amount=$%.2f plan=%s company=%s",
-            affiliate_id, aff_name, commission_type, commission_amount, plan, company_id
+            "COMMISSION CREATED: affiliate=%s (%s) type=%s amount=$%.2f plan=%s company=%s payment#%d",
+            affiliate_id, aff_name, commission_type, commission_amount, plan, company_id, payment_count + 1
         )
     except Exception as e:
         log.error("PROCESS COMMISSION ERROR: %s", repr(e))

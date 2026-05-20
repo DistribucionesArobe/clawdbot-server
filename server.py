@@ -5090,7 +5090,7 @@ def register(body: RegisterBody):
         _ref = (body.referral_code or "").strip()
         if _ref:
             try:
-                track_referral(str(company_id), _ref)
+                track_referral(str(company_id), _ref, company_email=email)
                 cur.execute("UPDATE companies SET referred_by=%s WHERE id=%s", (_ref, company_id))
                 log.info("REGISTRO+REFERRAL: company=%s ref=%s", company_id, _ref)
             except Exception as re:
