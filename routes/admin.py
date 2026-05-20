@@ -546,7 +546,7 @@ def admin_companies(request: Request):
         # Build SELECT dynamically based on what exists
         base_cols = ["id", "name"]
         optional_cols = [
-            "plan_code", "stripe_customer_id", "trial_end", "created_at", "updated_at",
+            "plan_code", "mp_payment_id", "trial_end", "created_at", "updated_at",
             "owner_phone", "telefono_atencion", "address_text", "hours_text",
             "onboarding_completed", "wa_phone_number_id",
             "construccion_ligera_enabled", "rejacero_enabled",

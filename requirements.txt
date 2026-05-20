@@ -12,5 +12,5 @@ rapidfuzz==3.6.2
 rapidfuzz
 pgvector
 reportlab
-stripe
+mercadopago==2.4.0
 Pillow
