@@ -860,8 +860,9 @@ from queries import (
 
 from whatsapp_api import (
     send_whatsapp_text, send_whatsapp_list, send_whatsapp_list_sections,
-    download_whatsapp_media, extract_text_from_image,
+    download_whatsapp_media, extract_text_from_image, extract_text_from_pdf,
     normalize_mx_phone, notify_owner_escalation, notify_owner_comprobante,
+    upload_whatsapp_media, send_whatsapp_document,
 )
 # Backward compat alias
 _normalize_mx_phone = normalize_mx_phone
@@ -985,6 +986,77 @@ def _reply_text_for_log(r) -> str:
     return (r or "").strip()
 
 
+def _maybe_send_quote_pdf(company, from_phone, text_body: str):
+    """If the text contains a folio (CX-XXXXXX), generate and send the PDF as document."""
+    import re as _re
+    m = _re.search(r"Folio:\s*\*?(CX-[A-Z0-9]{4,8})\*?", text_body)
+    if not m:
+        return
+    folio = m.group(1)
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                """
+                SELECT q.folio, q.client_phone, q.items, q.total,
+                       c.name, c.address_text, c.rfc,
+                       c.owner_phone, c.email, c.logo_url, c.brand_color
+                FROM quotes q
+                JOIN companies c ON c.id = q.company_id
+                WHERE q.folio = %s
+                LIMIT 1
+                """,
+                (folio,),
+            )
+            row = cur.fetchone()
+        finally:
+            cur.close()
+            conn.close()
+        if not row:
+            log.warning("PDF SEND: quote %s not found in DB", folio)
+            return
+        (q_folio, client_phone, items_json, total,
+         company_name, address, rfc, owner_phone,
+         company_email, logo_url, brand_color) = row
+        items = items_json if isinstance(items_json, list) else json.loads(items_json or "[]")
+        company_dict = {
+            "name":        company_name or "CotizaExpress",
+            "address":     address or "",
+            "rfc":         rfc or "",
+            "phone":       owner_phone or "",
+            "email":       company_email or "",
+            "logo_url":    logo_url or "",
+            "brand_color": brand_color or "",
+        }
+        pdf_bytes = build_quote_pdf(
+            company=company_dict,
+            items=items,
+            client_phone=client_phone or "",
+            folio=q_folio,
+        )
+        filename = f"cotizacion_{q_folio}.pdf"
+        media_id = upload_whatsapp_media(
+            wa_api_key=company["wa_api_key"],
+            phone_number_id=company["wa_phone_number_id"],
+            file_bytes=pdf_bytes,
+            mime_type="application/pdf",
+            filename=filename,
+        )
+        public_link = f"https://api.cotizaexpress.com/cotizacion/{q_folio}"
+        send_whatsapp_document(
+            wa_api_key=company["wa_api_key"],
+            phone_number_id=company["wa_phone_number_id"],
+            to=from_phone,
+            media_id=media_id,
+            filename=filename,
+            caption=f"📄 Tu cotización {q_folio}\n🔗 También puedes verla aquí: {public_link}",
+        )
+        log.info("PDF SENT: folio=%s to=%s", q_folio, from_phone)
+    except Exception as e:
+        log.error("PDF SEND ERROR (non-fatal): folio=%s err=%s", folio, repr(e))
+
+
 def _send_reply(company, from_phone, reply):
     """Send a reply dict/str to the user via WhatsApp."""
     if not reply:
@@ -1028,6 +1100,10 @@ def _send_reply(company, from_phone, reply):
             json=btn_payload,
             timeout=20,
         )
+        # Auto-send PDF if the text contains a cotización folio
+        _quote_text = reply.get("text") or ""
+        if "Folio:" in _quote_text:
+            _maybe_send_quote_pdf(company, from_phone, _quote_text)
 
     elif isinstance(reply, dict) and reply.get("type") == "text_then_list_sections":
         _pre_text = (reply.get("text") or "").strip()
@@ -1147,6 +1223,45 @@ def _extract_msg_content(msg, company):
                     text="No pude leer la imagen 😔 Intenta enviarla más clara o escribe el pedido.",
                 )
                 return "", msg_type, False, "HANDLED"
+
+    elif msg_type == "document":
+        doc_info = msg.get("document") or {}
+        doc_id = doc_info.get("id")
+        doc_mime = (doc_info.get("mime_type") or "").lower()
+        doc_caption = doc_info.get("caption") or ""
+
+        if doc_id and "pdf" in doc_mime and company.get("wa_api_key"):
+            try:
+                pdf_bytes = download_whatsapp_media(doc_id, company["wa_api_key"])
+                extracted = extract_text_from_pdf(pdf_bytes)
+                if extracted:
+                    text = f"{doc_caption}\n{extracted}".strip() if doc_caption else extracted
+                    log.info("PDF EXTRACTED: %s", text[:200])
+                else:
+                    send_whatsapp_text(
+                        wa_api_key=company["wa_api_key"],
+                        phone_number_id=company["wa_phone_number_id"],
+                        to=from_phone,
+                        text="📄 Recibí tu PDF pero no encontré una lista de productos.\n\nMándame el pedido así:\n10 cemento, 5 varilla 3/8",
+                    )
+                    return "", msg_type, False, "HANDLED"
+            except Exception as e:
+                log.error("PDF PROCESSING ERROR: %s", repr(e))
+                send_whatsapp_text(
+                    wa_api_key=company["wa_api_key"],
+                    phone_number_id=company["wa_phone_number_id"],
+                    to=from_phone,
+                    text="No pude leer el PDF 😔 Intenta enviar una imagen o escribe el pedido.",
+                )
+                return "", msg_type, False, "HANDLED"
+        else:
+            send_whatsapp_text(
+                wa_api_key=company["wa_api_key"],
+                phone_number_id=company["wa_phone_number_id"],
+                to=from_phone,
+                text="📎 Recibí un documento pero solo puedo leer PDFs e imágenes con listas de productos.\n\nMándame el pedido por texto o foto.",
+            )
+            return "", msg_type, False, "HANDLED"
 
     elif msg_type == "interactive":
         interactive = msg.get("interactive") or {}
@@ -4860,6 +4975,63 @@ def download_quote_pdf(
         media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+@app.get("/cotizacion/{folio}")
+def public_quote_pdf(folio: str):
+    """Public endpoint — customers can view/download their cotización PDF (no auth)."""
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT q.folio, q.client_phone, q.items, q.total,
+                   c.name, c.address_text, c.rfc,
+                   c.owner_phone, c.email, c.logo_url, c.brand_color
+            FROM quotes q
+            JOIN companies c ON c.id = q.company_id
+            WHERE q.folio = %s
+            LIMIT 1
+            """,
+            (folio.upper(),),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Cotización no encontrada")
+        (
+            q_folio, client_phone, items_json, total,
+            company_name, address, rfc,
+            owner_phone, company_email, logo_url, brand_color
+        ) = row
+        items = items_json if isinstance(items_json, list) else json.loads(items_json or "[]")
+        company_dict = {
+            "name":        company_name or "CotizaExpress",
+            "address":     address or "",
+            "rfc":         rfc or "",
+            "phone":       owner_phone or "",
+            "email":       company_email or "",
+            "logo_url":    logo_url or "",
+            "brand_color": brand_color or "",
+        }
+    finally:
+        cur.close()
+        conn.close()
+    pdf_bytes = build_quote_pdf(
+        company=company_dict,
+        items=items,
+        client_phone=client_phone or "",
+        folio=q_folio,
+    )
+    filename = f"cotizacion_{q_folio}.pdf"
+    return StreamingResponse(
+        iter([pdf_bytes]),
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'inline; filename="{filename}"',
+            "Cache-Control": "public, max-age=3600",
+        },
+    )
+
 
 @app.get("/api/company/me")
 def company_me(request: Request):

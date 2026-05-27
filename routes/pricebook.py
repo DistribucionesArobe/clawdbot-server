@@ -158,8 +158,33 @@ def download_template(request: Request):
     _ = get_user_from_session(request)
     wb = Workbook()
     ws = wb.active
-    ws.title = "pricebook"
-    ws.append(["nombre", "precio_base", "unidad", "sku", "vat_rate"])
+    ws.title = "productos"
+
+    # Headers
+    headers = ["nombre", "precio_base", "unidad", "sku"]
+    ws.append(headers)
+
+    # Bold headers
+    from openpyxl.styles import Font, PatternFill, Alignment
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill(start_color="059669", end_color="059669", fill_type="solid")
+    for col_idx, _ in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=col_idx)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center")
+
+    # Example rows
+    ws.append(["Cemento gris 50kg", 185.00, "Bulto", "CEM-50"])
+    ws.append(["Varilla 3/8", 89.50, "Pieza", "VAR-38"])
+    ws.append(["Block 15cm", 12.00, "Pieza", "BLK-15"])
+
+    # Column widths
+    ws.column_dimensions["A"].width = 30
+    ws.column_dimensions["B"].width = 15
+    ws.column_dimensions["C"].width = 12
+    ws.column_dimensions["D"].width = 15
+
     bio = BytesIO()
     wb.save(bio)
     bio.seek(0)

@@ -14,3 +14,4 @@ pgvector
 reportlab
 mercadopago==2.4.0
 Pillow
+PyMuPDF==1.24.5

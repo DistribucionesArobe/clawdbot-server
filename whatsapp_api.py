@@ -62,6 +62,43 @@ def send_whatsapp_list_sections(wa_api_key: str, phone_number_id: str, to: str,
         raise RuntimeError(f"WA list sections failed {r.status_code}: {r.text[:400]}")
 
 
+# ── Sending documents ───────────────────────────────────────────────────
+
+def upload_whatsapp_media(wa_api_key: str, phone_number_id: str,
+                          file_bytes: bytes, mime_type: str = "application/pdf",
+                          filename: str = "document.pdf") -> str:
+    """Upload a file to WhatsApp media and return the media_id."""
+    url = f"{WA_API_BASE}/{phone_number_id}/media"
+    headers = {"Authorization": f"Bearer {wa_api_key}"}
+    data = {"messaging_product": "whatsapp", "type": mime_type}
+    files = {"file": (filename, file_bytes, mime_type)}
+    r = requests.post(url, headers=headers, data=data, files=files, timeout=30)
+    if r.status_code >= 300:
+        raise RuntimeError(f"WA media upload failed {r.status_code}: {r.text[:400]}")
+    media_id = r.json().get("id")
+    if not media_id:
+        raise RuntimeError(f"WA media upload: no id returned: {r.text[:400]}")
+    return media_id
+
+
+def send_whatsapp_document(wa_api_key: str, phone_number_id: str, to: str,
+                           media_id: str, filename: str = "cotizacion.pdf",
+                           caption: str = ""):
+    """Send a document message by media_id."""
+    url = f"{WA_API_BASE}/{phone_number_id}/messages"
+    headers = {"Authorization": f"Bearer {wa_api_key}", "Content-Type": "application/json"}
+    doc_obj = {"id": media_id, "filename": filename}
+    if caption:
+        doc_obj["caption"] = caption
+    payload = {
+        "messaging_product": "whatsapp", "to": to,
+        "type": "document", "document": doc_obj,
+    }
+    r = requests.post(url, headers=headers, json=payload, timeout=20)
+    if r.status_code >= 300:
+        raise RuntimeError(f"WA document send failed {r.status_code}: {r.text[:400]}")
+
+
 # ── Media ────────────────────────────────────────────────────────────────
 
 def download_whatsapp_media(image_id: str, wa_api_key: str) -> bytes:
@@ -123,6 +160,78 @@ def extract_text_from_image(image_bytes: bytes) -> str | None:
     except Exception as e:
         log.error("VISION ERROR: %s", repr(e))
         return None
+
+
+def extract_text_from_pdf(pdf_bytes: bytes) -> str | None:
+    """Extract product list text from a PDF using OpenAI Vision (render pages as images)."""
+    try:
+        import fitz  # PyMuPDF
+    except ImportError:
+        log.warning("PDF EXTRACT: PyMuPDF not installed, trying pdfplumber")
+        try:
+            import pdfplumber
+            pdf_obj = pdfplumber.open(io.BytesIO(pdf_bytes))
+            all_text = "\n".join(page.extract_text() or "" for page in pdf_obj.pages[:5])
+            pdf_obj.close()
+            if not all_text.strip():
+                return None
+            # Use OpenAI to parse the raw text into a product list
+            return _parse_raw_text_to_products(all_text)
+        except ImportError:
+            log.error("PDF EXTRACT: Neither PyMuPDF nor pdfplumber installed")
+            return None
+
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        # Try text extraction first (faster, works for digital PDFs)
+        all_text = "\n".join(doc[i].get_text() for i in range(min(len(doc), 5)))
+        doc.close()
+        if all_text.strip() and len(all_text.strip()) > 20:
+            return _parse_raw_text_to_products(all_text)
+
+        # Fallback: render as image and use Vision (for scanned PDFs)
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        page = doc[0]
+        pix = page.get_pixmap(dpi=200)
+        img_bytes = pix.tobytes("png")
+        doc.close()
+        return extract_text_from_image(img_bytes)
+    except Exception as e:
+        log.error("PDF EXTRACT ERROR: %s", repr(e))
+        return None
+
+
+def _parse_raw_text_to_products(raw_text: str) -> str | None:
+    """Use OpenAI to parse raw PDF text into a structured product list."""
+    try:
+        from openai import OpenAI
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            return raw_text[:2000]  # fallback: return raw text
+        client = OpenAI(api_key=api_key)
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{
+                "role": "user",
+                "content": (
+                    "Eres asistente de ferretería mexicana. El siguiente texto fue extraído de un PDF "
+                    "que contiene una lista de materiales o un pedido. "
+                    "Extrae TODOS los productos con sus cantidades. "
+                    "Formato estricto: CANTIDAD PRODUCTO, un item por línea. "
+                    "La cantidad siempre debe ser un número entero. "
+                    "Conserva medidas y especificaciones tal cual aparecen. "
+                    "Ignora encabezados, totales, fechas, logos y textos que no sean productos. "
+                    "Si no hay lista de productos, responde exactamente: NO_LIST\n\n"
+                    f"TEXTO DEL PDF:\n{raw_text[:3000]}"
+                )
+            }],
+            max_tokens=800, temperature=0.1,
+        )
+        result = (resp.choices[0].message.content or "").strip()
+        return None if result == "NO_LIST" else result
+    except Exception as e:
+        log.error("PDF PARSE ERROR: %s", repr(e))
+        return raw_text[:2000] if raw_text.strip() else None
 
 
 # ── WhatsApp Business Profile ───────────────────────────────────────────
