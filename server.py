@@ -679,7 +679,8 @@ def cart_render_quote(state: dict, company_id: str = "", client_phone: str = "")
             folio = save_quote(company_id, client_phone, cart, existing_folio=existing_folio)
             if not existing_folio:
                 state["folio"] = folio
-            folio_txt = f"\n📋 Folio: *{folio}*"
+            pdf_link = f"https://api.cotizaexpress.com/cotizacion/{folio}"
+            folio_txt = f"\n📋 Folio: *{folio}*\n📄 Ver PDF: {pdf_link}"
         except Exception as e:
             log.error("CART RENDER SAVE QUOTE ERROR:", repr(e))
 
