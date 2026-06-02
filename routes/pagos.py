@@ -294,6 +294,46 @@ async def mp_webhook(request: Request):
     return {"ok": True}
 
 
+# ── Cancelar plan ──────────────────────────────────────────────────────────
+
+@router.post("/api/pagos/cancelar")
+def cancelar_plan(request: Request):
+    """Cancelar suscripción: regresa a plan free."""
+    company_id = require_company_id(request)
+    conn = None
+    cur = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE companies
+            SET plan_code = 'free', trial_end = NULL, updated_at = now()
+            WHERE id = %s
+            RETURNING plan_code
+            """,
+            (company_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Empresa no encontrada")
+        conn.commit()
+        log.info("PLAN CANCELADO: company=%s", company_id)
+        return {"ok": True, "plan_code": "free"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        log.error("CANCELAR PLAN ERROR: %s", repr(e))
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
+
+
 # ── Promo Codes ─────────────────────────────────────────────────────────────
 
 @router.post("/api/pagos/promo/crear")
