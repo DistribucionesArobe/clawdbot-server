@@ -15,7 +15,12 @@ log = logging.getLogger("cotizaexpress.sales_bot")
 # ── Config ──────────────────────────────────────────────────────────────────
 
 CX_SALES_PHONE_NUMBER_ID = (os.getenv("CX_SALES_PHONE_NUMBER_ID") or "").strip()
-CX_SALES_WA_API_KEY = (os.getenv("CX_SALES_WA_API_KEY") or os.getenv("WA_API_KEY") or "").strip()
+CX_SALES_WA_API_KEY = (
+    os.getenv("CX_SALES_WA_API_KEY")
+    or os.getenv("WHATSAPP_ACCESS_TOKEN")
+    or os.getenv("WA_API_KEY")
+    or ""
+).strip()
 
 REGISTRO_URL = "https://cotizaexpress.com/registro"
 AGENDAR_URL = "https://calendly.com/cotizaexpress"  # update if different
