@@ -1293,6 +1293,44 @@ async def whatsapp_webhook(request: Request):
     except Exception:
         return {"ok": True}
 
+    # ── Sales bot: CotizaExpress own WhatsApp number ───────────────────
+    from sales_bot import is_sales_number, build_sales_reply, handle_sales_button, CX_SALES_WA_API_KEY
+    if is_sales_number(phone_number_id):
+        value = payload["entry"][0]["changes"][0]["value"]
+        messages = value.get("messages") or []
+        if not messages:
+            return {"ok": True}
+        msg = messages[0]
+        from_phone = msg.get("from")
+        msg_type = msg.get("type", "text")
+
+        # Extract text
+        if msg_type == "text":
+            text = (msg.get("text") or {}).get("body") or ""
+        elif msg_type == "interactive":
+            interactive = msg.get("interactive") or {}
+            itype = interactive.get("type")
+            if itype == "button_reply":
+                text = (interactive.get("button_reply") or {}).get("title") or ""
+            else:
+                text = (interactive.get("list_reply") or {}).get("title") or ""
+        else:
+            text = ""
+
+        if not text.strip():
+            return {"ok": True}
+
+        # Build reply
+        sales_company = {"wa_api_key": CX_SALES_WA_API_KEY, "wa_phone_number_id": phone_number_id}
+        if msg_type == "interactive":
+            reply = handle_sales_button(text)
+        else:
+            reply = await asyncio.to_thread(build_sales_reply, from_phone, text)
+
+        if reply:
+            _send_reply(sales_company, from_phone, reply)
+        return {"ok": True}
+
     company = get_company_by_phone_number_id(phone_number_id)
     if not company:
         return {"ok": True}
