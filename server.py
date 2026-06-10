@@ -5351,7 +5351,7 @@ def register(body: RegisterBody):
     except Exception as e:
         log.error("REGISTER ERROR: %s", repr(e))
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail="Error interno")
+        raise HTTPException(status_code=500, detail=f"Error interno: {str(e)[:200]}")
     finally:
         if cur: cur.close()
         if conn: conn.close()
