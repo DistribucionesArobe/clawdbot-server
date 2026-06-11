@@ -2665,6 +2665,10 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
 
     thanks_triggers = {"gracias", "muchas gracias", "mil gracias", "thx", "thanks"}
     if tnorm in thanks_triggers:
+        # Limpiar carrito si ya hay un folio (cotización entregada)
+        if _cart and _edit_state.get("folio"):
+            clear_quote_state(company_id, wa_from)
+            log.info("CART CLEARED after thanks: folio=%s phone=%s", _edit_state.get("folio"), wa_from)
         return {
             "type": "text_then_buttons",
             "text": "¡Con gusto! 🙌",
@@ -3935,6 +3939,10 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         try:
             state = get_quote_state(company_id, wa_from) if wa_from else None
             if not state:
+                state = {}
+            # Si ya hay un folio (cotización entregada), empezar carrito nuevo
+            if state.get("folio") and state.get("cart"):
+                log.info("NEW ORDER after folio %s — clearing old cart for %s", state.get("folio"), wa_from)
                 state = {}
             state.pop("pending_specs", None)
             state.pop("pending", None)
