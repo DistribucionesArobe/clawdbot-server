@@ -1347,11 +1347,39 @@ def llm_normalize_query(conn, company_id: str, user_query: str, tenant_context: 
             if best_match:
                 orig_sub, norm_sub, start, size = best_match
                 norm_sub = _strip_accents(norm_sub)
-                new_words = words[:start] + norm_sub.split() + words[start + size:]
-                result = " ".join(new_words)
-                print(f"JERGA GLOBAL PARTIAL: '{q}' → '{result}' (replaced '{orig_sub}' → '{norm_sub}')")
-                _increment_jerga_usage(conn, orig_sub, success=False)
-                return result, "global"
+
+                # Guard: single-word jerga matches (e.g. "hojas"→"tablaroca") should
+                # NOT fire when other content words exist in the query.
+                # "hojas de unicel" → "hojas" matches but "unicel" is real content
+                #   → skip replacement so "unicel" is searched instead.
+                # "hojas de tablaroca" → matched at size 3 already, this doesn't apply.
+                # "10 hojas" → "hojas" matches, no other content words → apply.
+                _packaging_jerga = {"hojas", "hoja", "rollos", "rollo", "bultos",
+                                    "bulto", "tiras", "tira", "laminas", "lamina",
+                                    "placas", "placa", "paneles", "panel"}
+                _stopwords_partial = {"para", "de", "del", "la", "el", "un", "una",
+                                      "con", "sin", "los", "las", "en", "y", "o"}
+                if size == 1 and orig_sub in _packaging_jerga:
+                    remaining = [w for i, w in enumerate(words)
+                                 if (i < start or i >= start + size)
+                                 and w not in _stopwords_partial and len(w) >= 3]
+                    if remaining:
+                        print(f"JERGA GLOBAL PARTIAL SKIP: '{q}' — "
+                              f"single-word packaging match '{orig_sub}' but other "
+                              f"content words exist: {remaining}")
+                        # Fall through to LLM normalization instead
+                    else:
+                        new_words = words[:start] + norm_sub.split() + words[start + size:]
+                        result = " ".join(new_words)
+                        print(f"JERGA GLOBAL PARTIAL: '{q}' → '{result}' (replaced '{orig_sub}' → '{norm_sub}')")
+                        _increment_jerga_usage(conn, orig_sub, success=False)
+                        return result, "global"
+                else:
+                    new_words = words[:start] + norm_sub.split() + words[start + size:]
+                    result = " ".join(new_words)
+                    print(f"JERGA GLOBAL PARTIAL: '{q}' → '{result}' (replaced '{orig_sub}' → '{norm_sub}')")
+                    _increment_jerga_usage(conn, orig_sub, success=False)
+                    return result, "global"
     except Exception as e:
         print(f"JERGA GLOBAL PARTIAL ERROR: {repr(e)}")
 
@@ -1373,8 +1401,10 @@ def llm_normalize_query(conn, company_id: str, user_query: str, tenant_context: 
             "- 'foamular' es aislante XPS, NO es tablaroca\n"
             "- 'securock' es panel de cemento, NO es tablaroca\n"
             "- 'durock' es panel de cemento, NO es tablaroca\n"
+            "- 'unicel' es poliestireno expandido, NO es tablaroca\n"
             "- 'aislante foamular' → 'foamular' (NO 'tablaroca')\n"
             "- 'placa de aislante foamular' → 'foamular' (NO 'tablaroca')\n"
+            "- 'hojas de unicel' → 'unicel' (NO 'tablaroca')\n"
             "Si no estás seguro de qué producto es, regrésalo tal cual sin cambios.\n\n"
             "Ejemplos:\n"
             "- 'tr hr' → 'tablaroca resistente a humedad'\n"
@@ -1398,6 +1428,8 @@ def llm_normalize_query(conn, company_id: str, user_query: str, tenant_context: 
             "- 'pija durock' → 'pija durock'\n"
             "- 'tornillos pa taquete' → 'tornillo para taquete'\n"
             "- 'pija pada tablaroca' → 'pija para tablaroca'\n"
+            "- 'hojas de unicel' → 'unicel'\n"
+            "- 'unicel' → 'unicel'\n"
             "Si ya es un término estándar, regrésalo igual."
         )
         # Brand-aware context: teach the LLM to map competitor brands → tenant's brands
