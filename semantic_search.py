@@ -1057,7 +1057,18 @@ def seed_jerga_global(conn):
         ("pasta tablaroca", "basecoat"),
         ("pasta para juntas", "basecoat"),
         ("compuesto para juntas", "basecoat"),
+        # Basecoat misspellings — customers butcher the brand name
+        ("beiscot", "basecoat"),
+        ("beiscot usg", "basecoat"),
+        ("beis coat", "basecoat"),
+        ("beiscoat", "basecoat"),
+        ("baiscot", "basecoat"),
+        ("vasecoat", "basecoat"),
+        ("base coat usg", "basecoat"),
         # Malla / cinta para juntas
+        # NOTE: bare "malla" is NOT mapped globally — it's ambiguous
+        # (could be cinta fibra de vidrio OR malla borreguera/ciclónica).
+        # Context-based disambiguation handles this in smart_search.
         ("malla para durock", "cinta fibra de vidrio"),
         ("malla durock", "cinta fibra de vidrio"),
         ("malla para tablaroca", "cinta fibra de vidrio"),
@@ -1122,6 +1133,13 @@ def seed_jerga_global(conn):
         ("cinta union", "perfacinta"),
         ("cinta de union", "perfacinta"),
         ("cintas de union", "perfacinta"),
+        # Taquete con tornillo / taquete y tornillo = pija y taquete
+        ("taquete con tornillo", "pija y taquete"),
+        ("taquetes con tornillo", "pija y taquete"),
+        ("taquete con pija", "pija y taquete"),
+        ("taquetes con pija", "pija y taquete"),
+        ("taquete plastico con tornillo", "pija y taquete"),
+        ("taquetes plastico con tornillo", "pija y taquete"),
         # Taquete Anclo = taquete metálico de expansión (DIFERENTE a taquete de plástico)
         # Anclo es marca de taquete de expansión, más cercano a "taquete expansion" o "ancla"
         ("taquete anclo", "taquete expansion"),
@@ -1851,8 +1869,11 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                     bonus += 30
                 else:
                     bonus -= 20  # Wrong size variant
-            if cal and (_re.search(rf"\bcal\s*{cal}\b", n)):
-                bonus += 50
+            if cal:
+                if _re.search(rf"\bcal(?:ibre)?\s*\.?\s*{cal}\b", n):
+                    bonus += 50
+                else:
+                    bonus -= 30  # Wrong caliber variant
             _bt = [t for t in q.split() if len(t) >= 4]
             for tok in _bt:
                 if tok in n:
@@ -2131,6 +2152,26 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                 conn.rollback()
             except Exception:
                 pass
+
+        # ── Context-aware disambiguation for ambiguous single-word queries ──
+        # "malla" alone is ambiguous: could be cinta fibra de vidrio (drywall)
+        # or malla borreguera/ciclónica (fencing). Use cart context to decide.
+        _DRYWALL_KEYWORDS = {"durock", "tablaroca", "basecoat", "redimix", "perfacinta",
+                             "canal", "canales", "poste", "postes", "pija", "pijas",
+                             "cinta fibra", "plafon", "solera", "framer"}
+        _CONTEXT_OVERRIDES = {
+            # query → (product_name, required_context_keywords)
+            "malla": ("cinta fibra de vidrio", _DRYWALL_KEYWORDS),
+        }
+        q_stripped_check = q.strip().lower()
+        if q_stripped_check in _CONTEXT_OVERRIDES and cart_context:
+            _override_name, _required_ctx = _CONTEXT_OVERRIDES[q_stripped_check]
+            _cart_lower = cart_context.lower()
+            _ctx_match = any(kw in _cart_lower for kw in _required_ctx)
+            if _ctx_match:
+                print(f"CONTEXT OVERRIDE: '{q}' → '{_override_name}' (cart has drywall products)")
+                q = _phonetic(_override_name)
+                q_tokens = [t for t in q.split() if t not in _stopwords]
 
         q_pre_llm = q  # guardar query antes de normalizar para cachear después
         # Pass original (non-phonetic) query to LLM so it understands the words correctly
