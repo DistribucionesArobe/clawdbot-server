@@ -686,8 +686,11 @@ def hybrid_search(conn, company_id: str, user_query: str, q_normalized: str,
                     bonus += 0.01
                 else:
                     bonus -= 0.005
-        if q_cal and _re.search(rf"\bcal\s*{q_cal}\b", name):
-            bonus += 0.015
+        if q_cal:
+            if _re.search(rf"\bcal(?:ibre)?\s*\.?\s*{q_cal}\b", name):
+                bonus += 0.015
+            else:
+                bonus -= 0.01  # wrong caliber penalty
         entry["rrf"] += bonus
 
     merged.sort(key=lambda x: x["rrf"], reverse=True)
@@ -1692,8 +1695,10 @@ def _gpt_catalog_fallback(conn, company_id: str, user_query: str,
                 ),
             },
         ]
+        # Use GPT-4o (not mini) — it understands garbled misspellings much better
+        # e.g. "beiscot" → "basecoat", "durok" → "durock"
         resp = _openai_retry(lambda: openai_client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-4o",
             messages=_fb_msgs,
             temperature=0.0,
             max_tokens=20,
@@ -2813,11 +2818,40 @@ def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
             return hybrid_result
 
         if hybrid_result["status"] == "ambiguous" and hybrid_result.get("candidates"):
-            print(f"HYBRID AMBIGUOUS: query='{user_query}' found={len(hybrid_result['candidates'])}")
+            # Try GPT catalog fallback to resolve ambiguity with full catalog context
+            print(f"HYBRID AMBIGUOUS → trying GPT fallback: query='{user_query}' candidates={len(hybrid_result['candidates'])}")
+            _fallback_amb = _gpt_catalog_fallback(conn, company_id, user_query, cart_context)
+            if _fallback_amb and len(_fallback_amb) == 1:
+                _fb_item = _fallback_amb[0]
+                print(f"GPT RESOLVED AMBIGUITY: '{user_query}' → '{_fb_item['name']}'")
+                _cache_local_mapping(conn, company_id, user_query, _fb_item["name"])
+                _log_event("found", "gpt_fallback_resolved", _fb_item)
+                return {"status": "found", "item": _fb_item, "candidates": []}
+            # GPT couldn't resolve either — return original ambiguous result
             _log_event("ambiguous", "hybrid_ambiguous")
             return hybrid_result
 
-        # ── PASO 4: not found ─────────────────────────────────────────────────
+        # ── PASO 4: GPT catalog fallback — last resort, full catalog + GPT-4o ──
+        # Send the RAW customer query (not phonetic-transformed) + full catalog
+        # to GPT-4o which can understand misspellings, slang, and context.
+        # This is what makes "beiscot" → "basecoat" work without jerga entries.
+        print(f"PASO 4: GPT CATALOG FALLBACK for query='{user_query}'")
+        _fallback_results = _gpt_catalog_fallback(conn, company_id, user_query, cart_context)
+        if _fallback_results:
+            # Got a match from GPT — pick the best one
+            if len(_fallback_results) == 1:
+                _fb_item = _fallback_results[0]
+                print(f"GPT FALLBACK FOUND: '{user_query}' → '{_fb_item['name']}'")
+                # Cache for future instant lookups
+                _cache_local_mapping(conn, company_id, user_query, _fb_item["name"])
+                _log_event("found", "gpt_fallback", _fb_item)
+                return {"status": "found", "item": _fb_item, "candidates": []}
+            else:
+                # Multiple candidates — return as ambiguous
+                print(f"GPT FALLBACK AMBIGUOUS: '{user_query}' → {[r['name'] for r in _fallback_results]}")
+                _log_event("ambiguous", "gpt_fallback_ambiguous")
+                return {"status": "ambiguous", "item": None, "candidates": _fallback_results}
+
         print(f"NOT FOUND: query='{user_query}'")
         _log_event("not_found", "not_found")
         return {"status": "not_found", "item": None, "candidates": []}
