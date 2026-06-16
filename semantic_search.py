@@ -1213,6 +1213,21 @@ def seed_jerga_global(conn):
             )
         cur.close()
         print(f"SEED JERGA GLOBAL: {len(_SEED_ENTRIES)} protected entries upserted")
+
+        # Clean up ambiguous single-word entries from local jerga cache
+        # These should never be cached because they mean different things
+        # depending on cart context (e.g. "malla" = tape vs fence)
+        _AMBIGUOUS_CLEANUP = ["malla", "pasta", "cinta", "tira", "canal",
+                              "poste", "placa", "panel", "hoja", "base",
+                              "rollo", "perfil"]
+        cur2 = conn.cursor()
+        for term in _AMBIGUOUS_CLEANUP:
+            cur2.execute(
+                "DELETE FROM diccionario_jerga_local WHERE lower(termino_original) = %s",
+                (term,),
+            )
+        cur2.close()
+        print(f"CACHE CLEANUP: deleted ambiguous single-word entries from jerga_local")
     except Exception as e:
         print(f"SEED JERGA GLOBAL ERROR: {repr(e)}")
 
@@ -1608,13 +1623,21 @@ def _cache_local_mapping(conn, company_id: str, term_original: str, product_name
                 return
     except Exception as _se:
         print(f"CACHE LOCAL SANITY ERROR (non-fatal): {repr(_se)}")
+    # Don't cache ambiguous single-word terms — they can mean different things
+    # depending on cart context (e.g. "malla" = cinta fibra de vidrio OR malla borreguera)
+    _AMBIGUOUS_TERMS = {"malla", "pasta", "cinta", "tira", "canal", "poste",
+                        "placa", "panel", "hoja", "base", "rollo", "perfil"}
+    if t_orig in _AMBIGUOUS_TERMS:
+        print(f"CACHE LOCAL SKIP (ambiguous term): '{t_orig}' → '{t_norm}'")
+        return
     try:
         cur = conn.cursor()
         cur.execute(
             "INSERT INTO diccionario_jerga_local "
             "(company_id, termino_original, termino_normalizado) "
             "VALUES (%s, %s, %s) "
-            "ON CONFLICT (company_id, termino_original) DO NOTHING",
+            "ON CONFLICT (company_id, termino_original) DO UPDATE "
+            "SET termino_normalizado = EXCLUDED.termino_normalizado",
             (company_id, t_orig, t_norm),
         )
         cur.close()
