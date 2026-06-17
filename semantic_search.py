@@ -1756,8 +1756,241 @@ def _gpt_catalog_fallback(conn, company_id: str, user_query: str,
         return []
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# NEW SMART SEARCH — Cache → GPT-4o → Cache
+# The old 1100-line smart_search_legacy is kept below as fallback.
+# This version is simple: GPT-4o IS the search brain.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_AMBIGUOUS_SINGLE_WORDS = {"malla", "pasta", "cinta", "tira", "canal", "poste",
+                           "placa", "panel", "hoja", "base", "rollo", "perfil"}
+
+
+def _check_cache(conn, company_id: str, query: str) -> dict | None:
+    """Check jerga_local cache for an exact match. Returns product dict or None."""
+    q = _phonetic(query.lower().strip())
+    if not q or len(q) < 2:
+        return None
+    # Don't use cache for ambiguous single words — they depend on cart context
+    if q in _AMBIGUOUS_SINGLE_WORDS:
+        return None
+    try:
+        cur = conn.cursor()
+        _JERGA_T = _sql_translate("termino_original")
+        cur.execute(
+            f"SELECT termino_normalizado FROM diccionario_jerga_local "
+            f"WHERE company_id = %s AND lower({_JERGA_T}) = %s LIMIT 1",
+            (company_id, q),
+        )
+        row = cur.fetchone()
+        cur.close()
+        if not row:
+            return None
+        product_name = row[0]
+        # Look up the actual product
+        cur2 = conn.cursor()
+        cur2.execute(
+            "SELECT sku, name, unit, price, vat_rate, bundle_size "
+            "FROM pricebook_items WHERE company_id = %s AND lower(name) = lower(%s) LIMIT 1",
+            (company_id, product_name),
+        )
+        prow = cur2.fetchone()
+        cur2.close()
+        if prow:
+            print(f"CACHE HIT: '{query}' → '{prow[1]}'")
+            return {
+                "sku": prow[0], "name": prow[1], "unit": prow[2],
+                "price": float(prow[3]) if prow[3] is not None else None,
+                "vat_rate": float(prow[4]) if prow[4] is not None else None,
+                "bundle_size": prow[5],
+            }
+        return None
+    except Exception as e:
+        print(f"CACHE CHECK ERROR: {repr(e)}")
+        return None
+
+
+def _gpt_smart_match(conn, company_id: str, user_query: str,
+                     cart_context: str = "", qty: int = 0) -> dict:
+    """
+    Core search: send raw query + full catalog to GPT-4o.
+    GPT understands misspellings, jargon, context — no regex needed.
+    Returns {"status": "found"/"ambiguous"/"not_found", "item": ..., "candidates": [...]}
+    """
+    if not openai_client:
+        print("GPT SMART MATCH: no openai_client")
+        return {"status": "not_found", "item": None, "candidates": []}
+
+    # Load full catalog
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT sku, name, unit, price, vat_rate, bundle_size "
+            "FROM pricebook_items WHERE company_id = %s ORDER BY name ASC LIMIT 500",
+            (company_id,),
+        )
+        rows = cur.fetchall()
+    finally:
+        cur.close()
+
+    if not rows:
+        return {"status": "not_found", "item": None, "candidates": []}
+
+    # Build catalog text — numbered list for GPT to reference
+    catalog_lines = []
+    for i, (sku, name, unit, price, vat_rate, bundle_size) in enumerate(rows):
+        unit_txt = f" ({unit})" if unit else ""
+        catalog_lines.append(f"{i + 1}. {name}{unit_txt}")
+    catalog_str = "\n".join(catalog_lines)
+
+    # Build context block
+    context_block = ""
+    if cart_context:
+        context_block = (
+            f"\nCONTEXTO DEL PEDIDO: el cliente también pidió: {cart_context}\n"
+            f"Usa este contexto para desambiguar. Ejemplo: si el pedido tiene durock/tablaroca, "
+            f"'malla' = cinta de fibra de vidrio, 'pasta' = basecoat.\n"
+        )
+
+    system_prompt = (
+        "Eres un ferretero mexicano experto con 30 años de experiencia. "
+        "Un cliente pide un producto por WhatsApp — puede estar mal escrito, "
+        "abreviado, en jerga, o con errores de OCR de un PDF.\n\n"
+        "Tu trabajo: encontrar el producto correcto en el catálogo.\n\n"
+        "REGLAS:\n"
+        "- UNA coincidencia clara → responde SOLO ese número (ej: '42')\n"
+        "- VARIAS opciones del MISMO producto en diferentes medidas/calibres → "
+        "números por coma, máximo 5 (ej: '42,43,44')\n"
+        "- NADA corresponde → responde: NO\n"
+        "- NUNCA expliques. Solo número(s) o NO.\n\n"
+        "DEBES SER FLEXIBLE con errores de escritura. Ejemplos:\n"
+        "- 'beiscot' = 'basecoat' (fonéticamente igual en español)\n"
+        "- 'durok' = 'durock'\n"
+        "- 'tablarock' = 'tablaroca'\n"
+        "- 'tornillos pa taquete' = 'pija y taquete' o 'pija para taquete'\n"
+        "- 'hojas' sin contexto = tablaroca\n"
+        "- 'malla' con pedido de tablaroca = cinta fibra de vidrio\n"
+        "- 'malla' con pedido de postes/reja = malla borreguera/ciclónica\n\n"
+        "IMPORTANTE sobre especificaciones:\n"
+        "- Si el cliente pide 'calibre 22', SOLO elige productos calibre 22, NO 26\n"
+        "- Si el cliente pide 'canal 6.35', busca '6.35' o 'canal listón' en el nombre\n"
+        "- Respeta medidas, calibres y tamaños exactamente como los pide el cliente\n"
+    )
+
+    try:
+        resp = _openai_retry(lambda: openai_client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": (
+                    f"Catálogo del negocio:\n{catalog_str}\n"
+                    f"{context_block}\n"
+                    f"El cliente pide: \"{user_query}\"\n"
+                    "¿Qué número(s)? (número, números por coma, o NO)"
+                )},
+            ],
+            temperature=0.0,
+            max_tokens=20,
+        ))
+        raw = (resp.choices[0].message.content or "").strip().upper()
+        print(f"GPT SMART MATCH: query='{user_query}' → '{raw}'")
+
+        if raw == "NO" or not raw:
+            return {"status": "not_found", "item": None, "candidates": []}
+
+        # Parse response — could be "42" or "42,43,44"
+        parts = [p.strip() for p in raw.split(",") if p.strip().isdigit()]
+        picked = []
+        for p in parts:
+            idx = int(p) - 1
+            if 0 <= idx < len(rows):
+                sku, name, unit, price, vat_rate, bundle_size = rows[idx]
+                picked.append({
+                    "sku": sku, "name": name, "unit": unit,
+                    "price": float(price) if price is not None else None,
+                    "vat_rate": float(vat_rate) if vat_rate is not None else None,
+                    "bundle_size": bundle_size,
+                })
+
+        if len(picked) == 1:
+            return {"status": "found", "item": picked[0], "candidates": []}
+        elif picked:
+            return {"status": "ambiguous", "item": None, "candidates": picked}
+        else:
+            return {"status": "not_found", "item": None, "candidates": []}
+
+    except Exception as e:
+        print(f"GPT SMART MATCH ERROR: {repr(e)}")
+        return {"status": "not_found", "item": None, "candidates": []}
+
+
 def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                  cart_context: str = "") -> dict:
+    """
+    Product search v2 — simple and reliable.
+
+    1. Cache hit → instant (free)
+    2. GPT-4o with full catalog → understands everything (1-2 sec)
+    3. Cache result → next time is instant
+
+    No regex. No fuzzy matching. No jerga dictionaries.
+    GPT-4o IS the search brain.
+    """
+    q = (user_query or "").strip()
+    if not q:
+        return {"status": "not_found", "item": None, "candidates": []}
+
+    print(f"═══ SMART SEARCH v2: '{q}' (cart: {cart_context[:60] if cart_context else 'empty'}) ═══")
+
+    # ── STEP 1: Cache check (instant, free) ──────────────────────────────
+    cached = _check_cache(conn, company_id, q)
+    if cached:
+        _log_query_event(
+            conn, company_id,
+            original_text=q, cleaned_text=q,
+            normalized_text=None, normalization_source="cache",
+            matched_item_name=cached["name"], matched_item_sku=cached.get("sku"),
+            search_status="found", search_paso="cache",
+        )
+        return {"status": "found", "item": cached, "candidates": []}
+
+    # ── STEP 2: GPT-4o with full catalog ─────────────────────────────────
+    result = _gpt_smart_match(conn, company_id, q, cart_context, qty)
+
+    # ── STEP 3: Cache the result for future instant lookups ──────────────
+    if result["status"] == "found" and result.get("item"):
+        item = result["item"]
+        _cache_local_mapping(conn, company_id, q, item["name"])
+        _log_query_event(
+            conn, company_id,
+            original_text=q, cleaned_text=q,
+            normalized_text=item["name"], normalization_source="gpt4o",
+            matched_item_name=item["name"], matched_item_sku=item.get("sku"),
+            search_status="found", search_paso="gpt_smart_match",
+        )
+    elif result["status"] == "ambiguous":
+        _log_query_event(
+            conn, company_id,
+            original_text=q, cleaned_text=q,
+            normalized_text=None, normalization_source="gpt4o",
+            matched_item_name=None, matched_item_sku=None,
+            search_status="ambiguous", search_paso="gpt_smart_match",
+        )
+    else:
+        _log_query_event(
+            conn, company_id,
+            original_text=q, cleaned_text=q,
+            normalized_text=None, normalization_source="gpt4o",
+            matched_item_name=None, matched_item_sku=None,
+            search_status="not_found", search_paso="gpt_smart_match",
+        )
+
+    return result
+
+
+def smart_search_legacy(conn, company_id: str, user_query: str, qty: int = 0,
+                        cart_context: str = "") -> dict:
+    """LEGACY — kept as fallback. Use smart_search() instead."""
     try:
         from rapidfuzz import fuzz
         import re as _re
