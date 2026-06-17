@@ -372,10 +372,53 @@ def extract_product_query(text: str) -> str:
 
 _BUNDLE_WORDS = {"atado", "atados", "paquete", "paquetes", "bulto", "bultos", "caja", "cajas"}
 
+def _detect_pack_in_name(name: str) -> int | None:
+    """Detecta si el nombre del producto trae presentacion empacada.
+    Ej. 'Angulo con clavo 1 c/100 pzas' -> 100
+        'Tornillos /50 pzas' -> 50
+        'Caja x 25' -> 25
+    Devuelve el tamano del paquete o None si no detecta.
+    """
+    if not name:
+        return None
+    n = name.lower()
+    # patrones: c/100 pzas, c/100pz, /100 pzas, x 25, x25 pzas, paquete de 50
+    patterns = [
+        r"c\s*[/x]\s*(\d{2,4})\s*p",
+        r"(?<!\d)[/]\s*(\d{2,4})\s*p",
+        r"\bx\s*(\d{2,4})\s*p",
+        r"paquete\s+de\s+(\d{2,4})",
+        r"caja\s+de\s+(\d{2,4})",
+    ]
+    for pat in patterns:
+        m = re.search(pat, n)
+        if m:
+            try:
+                size = int(m.group(1))
+                if 2 <= size <= 9999:
+                    return size
+            except ValueError:
+                continue
+    return None
+
+
 def _resolve_bundle_qty(qty: int, is_bundle: bool, item: dict) -> int:
-    """If customer ordered in bundles and product has bundle_size, multiply qty."""
+    """If customer ordered in bundles and product has bundle_size, multiply qty.
+    Tambien detecta presentacion en el nombre del producto (c/100 pzas) y, si el
+    cliente pidio piezas sueltas, calcula cuantos paquetes cubren la cantidad.
+    """
     if is_bundle and item and item.get("bundle_size"):
         return qty * int(item["bundle_size"])
+    # Heuristica: si NO es bundle (cliente pidio piezas sueltas) pero el producto
+    # viene en paquete (ej. 'c/100 pzas'), devolver cuantos paquetes cubren la
+    # cantidad pedida. Asi cubre lo que el cliente quiere sin vender de menos.
+    if item and not is_bundle:
+        name = item.get("name") or ""
+        pack = _detect_pack_in_name(name)
+        if pack and pack > 1 and qty > 0:
+            # ceiling division
+            paquetes = (qty + pack - 1) // pack
+            return max(1, int(paquetes))
     return qty
 
 def extract_qty_and_product(text: str):
@@ -3825,6 +3868,73 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             upsert_quote_state(company_id, wa_from, state)
 
         return _build_reply_with_pending(state, company_id=company_id, wa_from=wa_from)
+
+    # ── FUZZY pick handler: si hay pending con candidates y el user manda texto
+    #    (no numero), intentar resolver por similitud antes de tratar como nueva
+    #    cotizacion. Asi NO perdemos los items pendientes ni la cantidad original.
+    if not _quick_picks and _state_picks.get("pending"):
+        _fz_pend = _state_picks.get("pending") or []
+        _fz_first_idx = next((i for i, p in enumerate(_fz_pend) if p.get("candidates")), None)
+        if _fz_first_idx is not None:
+            _fz_first = _fz_pend[_fz_first_idx]
+            _fz_raw = (_fz_first.get("raw") or "").strip().lower()
+            _fz_cands = _fz_first.get("candidates") or []
+            _fz_text = (user_text or "").strip().lower()
+            # Excluir: textos largos, listas con saltos, comandos, lineas con qty + producto
+            # (esos parecen cotizacion nueva, no respuesta de ambiguedad)
+            _fz_skip = (
+                not _fz_text
+                or len(_fz_text) > 40
+                or "\n" in _fz_text
+                or "," in _fz_text
+                or bool(re.match(r"^\s*\d+\s+\w", _fz_text))
+                or _fz_text in {
+                    "si", "no", "ok", "pagar", "salir", "cancelar",
+                    "agregar mas", "agregar más", "quitar producto",
+                    "nueva cotizacion", "nueva cotización",
+                }
+            )
+            if not _fz_skip:
+                _fz_best_idx = None
+                _fz_best_score = 0
+                for _ci, _c in enumerate(_fz_cands):
+                    _cname = (_c.get("name") or "").lower()
+                    _s = fuzz.partial_ratio(_fz_text, _cname)
+                    if _s > _fz_best_score:
+                        _fz_best_score = _s
+                        _fz_best_idx = _ci
+                # Si la similitud contra candidatos es baja, probar contra el raw del pending
+                if _fz_best_score < 80:
+                    _raw_s = fuzz.partial_ratio(_fz_text, _fz_raw)
+                    if _raw_s >= 70:
+                        _fz_best_idx = 0
+                        _fz_best_score = _raw_s
+                if _fz_best_idx is not None and _fz_best_score >= 70:
+                    state = _state_picks
+                    chosen = _fz_cands[_fz_best_idx]
+                    qty = int(_fz_first.get("qty") or 0)
+                    _fz_bundle = _fz_first.get("is_bundle", False)
+                    qty = _resolve_bundle_qty(qty, _fz_bundle, chosen)
+                    state = cart_add_item(state, {
+                        "sku": chosen.get("sku"),
+                        "name": chosen.get("name"),
+                        "unit": chosen.get("unit") or "unidad",
+                        "price": float(chosen.get("price") or 0.0),
+                        "vat_rate": chosen.get("vat_rate"),
+                        "qty": qty,
+                    })
+                    _fz_pend.pop(_fz_first_idx)
+                    if _fz_pend:
+                        state["pending"] = _fz_pend
+                    else:
+                        state.pop("pending", None)
+                    if wa_from:
+                        upsert_quote_state(company_id, wa_from, state)
+                    log.info(
+                        f"FUZZY PICK: text={_fz_text!r} -> {chosen.get('name')!r} "
+                        f"(score={_fz_best_score}, qty={qty})"
+                    )
+                    return _build_reply_with_pending(state, company_id=company_id, wa_from=wa_from)
 
     # ── Detect conversational "I want to quote" intent without a specific product ──
     # Messages like "me podrías cotizar un material", "quiero precio de algo",
