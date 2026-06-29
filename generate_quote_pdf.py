@@ -22,8 +22,10 @@ import io
 import random
 import string
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from typing import Optional
+
+_MX_TZ = timezone(timedelta(hours=-6))  # CST México (Centro)
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
@@ -140,7 +142,7 @@ def build_quote_pdf(
     if folio is None:
         folio = generate_folio()
 
-    now = datetime.now()
+    now = datetime.now(_MX_TZ)
     fecha_str = now.strftime("%d/%m/%Y  %H:%M")
 
     brand_hex = (company.get("brand_color") or _DEFAULT_PRIMARY).strip()
