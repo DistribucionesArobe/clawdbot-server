@@ -5091,7 +5091,8 @@ def download_quote_pdf(
             """
             SELECT q.folio, q.client_phone, q.items, q.total, q.created_at,
                    c.name, c.address_text, c.rfc,
-                   c.owner_phone, c.email, c.logo_url, c.brand_color
+                   c.owner_phone, c.email, c.logo_url, c.brand_color,
+                   c.discount_threshold, c.discount_percent
             FROM quotes q
             JOIN companies c ON c.id = q.company_id
             WHERE q.company_id = %s::uuid AND q.folio = %s
@@ -5105,7 +5106,8 @@ def download_quote_pdf(
         (
             q_folio, client_phone, items_json, total,
             created_at, company_name, address, rfc,
-            owner_phone, company_email, logo_url, brand_color
+            owner_phone, company_email, logo_url, brand_color,
+            disc_threshold, disc_percent,
         ) = row
         items = items_json if isinstance(items_json, list) else json.loads(items_json or "[]")
         company_dict = {
@@ -5117,6 +5119,13 @@ def download_quote_pdf(
             "logo_url":    logo_url or "",
             "brand_color": brand_color or "",
         }
+        # Calculate discount if applicable
+        raw_total = sum(float(it.get("subtotal", 0)) or (float(it.get("unit_price", 0)) * int(it.get("qty", 0))) for it in items)
+        pdf_disc_percent = None
+        pdf_disc_amount = None
+        if disc_threshold and disc_percent and raw_total >= float(disc_threshold):
+            pdf_disc_percent = float(disc_percent)
+            pdf_disc_amount = round(raw_total * pdf_disc_percent / 100)
     finally:
         cur.close()
         conn.close()
@@ -5125,6 +5134,8 @@ def download_quote_pdf(
         items=items,
         client_phone=client_phone or "",
         folio=q_folio,
+        discount_percent=pdf_disc_percent,
+        discount_amount=pdf_disc_amount,
     )
     filename = f"cotizacion_{q_folio}.pdf"
     return StreamingResponse(
@@ -5144,7 +5155,8 @@ def public_quote_pdf(folio: str):
             """
             SELECT q.folio, q.client_phone, q.items, q.total,
                    c.name, c.address_text, c.rfc,
-                   c.owner_phone, c.email, c.logo_url, c.brand_color
+                   c.owner_phone, c.email, c.logo_url, c.brand_color,
+                   c.discount_threshold, c.discount_percent
             FROM quotes q
             JOIN companies c ON c.id = q.company_id
             WHERE q.folio = %s
@@ -5158,7 +5170,8 @@ def public_quote_pdf(folio: str):
         (
             q_folio, client_phone, items_json, total,
             company_name, address, rfc,
-            owner_phone, company_email, logo_url, brand_color
+            owner_phone, company_email, logo_url, brand_color,
+            disc_threshold, disc_percent,
         ) = row
         items = items_json if isinstance(items_json, list) else json.loads(items_json or "[]")
         company_dict = {
@@ -5170,6 +5183,13 @@ def public_quote_pdf(folio: str):
             "logo_url":    logo_url or "",
             "brand_color": brand_color or "",
         }
+        # Calculate discount if applicable
+        raw_total = sum(float(it.get("subtotal", 0)) or (float(it.get("unit_price", 0)) * int(it.get("qty", 0))) for it in items)
+        pdf_disc_percent = None
+        pdf_disc_amount = None
+        if disc_threshold and disc_percent and raw_total >= float(disc_threshold):
+            pdf_disc_percent = float(disc_percent)
+            pdf_disc_amount = round(raw_total * pdf_disc_percent / 100)
     finally:
         cur.close()
         conn.close()
@@ -5178,6 +5198,8 @@ def public_quote_pdf(folio: str):
         items=items,
         client_phone=client_phone or "",
         folio=q_folio,
+        discount_percent=pdf_disc_percent,
+        discount_amount=pdf_disc_amount,
     )
     filename = f"cotizacion_{q_folio}.pdf"
     return StreamingResponse(
@@ -5185,7 +5207,7 @@ def public_quote_pdf(folio: str):
         media_type="application/pdf",
         headers={
             "Content-Disposition": f'inline; filename="{filename}"',
-            "Cache-Control": "public, max-age=3600",
+            "Cache-Control": "no-cache",
         },
     )
 

@@ -134,6 +134,8 @@ def build_quote_pdf(
     items: list[dict],
     client_phone: str,
     folio: Optional[str] = None,
+    discount_percent: Optional[float] = None,
+    discount_amount: Optional[float] = None,
 ) -> bytes:
     if folio is None:
         folio = generate_folio()
@@ -256,10 +258,32 @@ def build_quote_pdf(
     story.append(prod_table)
     story.append(Spacer(1, 0.3*cm))
 
+    # ── DESCUENTO (si aplica) ─────────────────────────────────────────────────
+    display_total = total
+    if discount_percent and discount_amount and discount_amount > 0:
+        display_total = total - discount_amount
+        discount_data = [
+            [Paragraph("Subtotal", S["body"]),
+             Paragraph(_fmt_price(total), S["body_right"])],
+            [Paragraph(f"Descuento {discount_percent:.0f}% por volumen", S["body"]),
+             Paragraph(f"-{_fmt_price(discount_amount)}", S["body_right"])],
+        ]
+        discount_table = Table(discount_data, colWidths=["70%", "30%"])
+        discount_table.setStyle(TableStyle([
+            ("ALIGN",         (1,0),(1,-1), "RIGHT"),
+            ("TOPPADDING",    (0,0),(-1,-1), 4),
+            ("BOTTOMPADDING", (0,0),(-1,-1), 4),
+            ("LEFTPADDING",   (0,0),(-1,-1), 5),
+            ("RIGHTPADDING",  (0,0),(-1,-1), 5),
+            ("LINEBELOW",     (0,-1),(-1,-1), 0.5, colors.HexColor("#cccccc")),
+        ]))
+        story.append(discount_table)
+        story.append(Spacer(1, 0.2*cm))
+
     # ── BLOQUE TOTAL ──────────────────────────────────────────────────────────
     total_table = Table(
         [[Paragraph("TOTAL  (IVA incluido)", S["total_label"]),
-          Paragraph(_fmt_price(total),       S["total_value"])]],
+          Paragraph(_fmt_price(display_total), S["total_value"])]],
         colWidths=["60%", "40%"],
     )
     total_table.setStyle(TableStyle([
