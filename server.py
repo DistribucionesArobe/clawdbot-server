@@ -173,6 +173,40 @@ async def _start_silence_loop():
     asyncio.create_task(_silence_escalation_loop())
     log.info(f"Silence escalation loop started (check every {SILENCE_CHECK_INTERVAL_SEC}s, threshold {SILENCE_THRESHOLD_MIN} min)")
 
+
+@app.on_event("startup")
+async def _clean_stale_caliber_cache():
+    """One-time cleanup: remove cached canal/poste entries that may have wrong calibers."""
+    dsn = DATABASE_URL
+    if not dsn:
+        return
+    try:
+        conn = psycopg2.connect(dsn, connect_timeout=5)
+        conn.autocommit = True
+        cur = conn.cursor()
+        # Delete any cached entries where the query mentions canal/poste with caliber info
+        # These are too specific to cache reliably
+        cur.execute("""
+            DELETE FROM diccionario_jerga_local
+            WHERE (lower(termino_original) LIKE '%%canal%%' OR lower(termino_original) LIKE '%%poste%%')
+              AND (lower(termino_original) LIKE '%%cal%%' OR lower(termino_normalizado) LIKE '%%cal%%')
+        """)
+        deleted = cur.rowcount
+        # Also delete entries where "canal 6.35" was cached to "canal liston" (wrong mapping)
+        cur.execute("""
+            DELETE FROM diccionario_jerga_local
+            WHERE lower(termino_original) LIKE '%%canal%%6.35%%'
+              AND lower(termino_normalizado) LIKE '%%liston%%'
+        """)
+        deleted2 = cur.rowcount
+        cur.close()
+        conn.close()
+        if deleted or deleted2:
+            log.info(f"Cache cleanup: removed {deleted + deleted2} stale canal/poste caliber entries")
+    except Exception as e:
+        log.warning(f"Cache cleanup error (non-fatal): {repr(e)}")
+
+
 # -------------------------
 
 # Middleware (CORS)

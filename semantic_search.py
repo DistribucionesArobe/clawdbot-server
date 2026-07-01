@@ -1630,6 +1630,10 @@ def _cache_local_mapping(conn, company_id: str, term_original: str, product_name
     if t_orig in _AMBIGUOUS_TERMS:
         print(f"CACHE LOCAL SKIP (ambiguous term): '{t_orig}' → '{t_norm}'")
         return
+    # Don't cache queries with caliber specs — different calibers = different products
+    if re.search(r'\bcal(?:ibre)?\s*\d', t_orig):
+        print(f"CACHE LOCAL SKIP (caliber-specific): '{t_orig}' → '{t_norm}'")
+        return
     try:
         cur = conn.cursor()
         cur.execute(
@@ -1774,6 +1778,10 @@ def _check_cache(conn, company_id: str, query: str) -> dict | None:
     # Don't use cache for ambiguous single words — they depend on cart context
     if q in _AMBIGUOUS_SINGLE_WORDS:
         return None
+    # Don't use cache for queries with caliber specs — "canal 6.35 cal 22" and
+    # "canal 6.35 cal 26" are DIFFERENT products; caching one poisons the other
+    if re.search(r'\bcal(?:ibre)?\s*\d', q):
+        return None
     try:
         cur = conn.cursor()
         _JERGA_T = _sql_translate("termino_original")
@@ -1871,10 +1879,15 @@ def _gpt_smart_match(conn, company_id: str, user_query: str,
         "- 'hojas' sin contexto = tablaroca\n"
         "- 'malla' con pedido de tablaroca = cinta fibra de vidrio\n"
         "- 'malla' con pedido de postes/reja = malla borreguera/ciclónica\n\n"
-        "IMPORTANTE sobre especificaciones:\n"
-        "- Si el cliente pide 'calibre 22', SOLO elige productos calibre 22, NO 26\n"
-        "- Si el cliente pide 'canal 6.35', busca '6.35' o 'canal listón' en el nombre\n"
-        "- Respeta medidas, calibres y tamaños exactamente como los pide el cliente\n"
+        "IMPORTANTE sobre especificaciones (PRIORIDAD MÁXIMA):\n"
+        "- CALIBRE: si el cliente dice 'calibre 22' o 'cal 22', SOLO elige productos "
+        "que digan 'cal 22' en su nombre. NUNCA devuelvas cal 26 si pidió cal 22, "
+        "ni cal 22 si pidió cal 26, ni cal 24 si pidió cal 20. El calibre debe "
+        "coincidir EXACTAMENTE.\n"
+        "- MEDIDAS: si el cliente dice '6.35', elige productos con '6.35' en el nombre. "
+        "NO confundas 'canal 6.35' con 'canal listón' — son productos DIFERENTES.\n"
+        "- Respeta medidas, calibres y tamaños exactamente como los pide el cliente.\n"
+        "- Cuando hay duda entre calibres, devuelve AMBAS opciones separadas por coma.\n"
     )
 
     try:
