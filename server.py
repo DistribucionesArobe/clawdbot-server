@@ -30,7 +30,7 @@ logging.basicConfig(
 log = logging.getLogger("cotizaexpress")
 
 from openai import OpenAI
-from semantic_search import smart_search, rebuild_embeddings_for_company, upsert_single_embedding, seed_jerga_global, auto_generate_context_groups, _phonetic
+from semantic_search import smart_search, bulk_match, rebuild_embeddings_for_company, upsert_single_embedding, seed_jerga_global, auto_generate_context_groups, _phonetic
 from generate_quote_pdf import build_quote_pdf, generate_folio
 
 from fastapi import (
@@ -4294,7 +4294,62 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         finally:
             conn.close()
 
-    # ── Fallback: regex parser (si LLM no está activo o falló) ──
+    # ── BULK MATCH: single GPT-4o call that extracts AND matches all products ──
+    # This replaces the NER→smart_search pipeline for multi-item messages.
+    # If it works, we skip the old pipeline entirely.
+    _bulk_used = False
+    _lines_count = len([l for l in user_text.strip().split("\n") if l.strip()]) if user_text else 0
+    _has_multiple_items = _lines_count >= 2 or len(re.findall(r"\b\d+\s+[a-záéíóúñ]", user_text or "", re.IGNORECASE)) >= 2
+    if _has_multiple_items and user_text and len(user_text.strip()) > 15:
+        try:
+            conn_bulk = get_conn()
+            _bulk_results = bulk_match(conn_bulk, company_id, user_text)
+            conn_bulk.close()
+        except Exception as _e:
+            log.warning(f"BULK MATCH FAILED (falling back): {repr(_e)}")
+            _bulk_results = None
+
+        if _bulk_results and len(_bulk_results) >= 2:
+            log.info(f"BULK MATCH SUCCESS: {len(_bulk_results)} items matched")
+            _bulk_used = True
+            conn = get_conn()
+            try:
+                state = get_quote_state(company_id, wa_from) if wa_from else None
+                if not state:
+                    state = {}
+                state.pop("pending_specs", None)
+                state.pop("pending", None)
+                missing = []
+                for br in _bulk_results:
+                    qty = br["qty"]
+                    raw_name = br["raw"]
+                    item = br.get("item")
+                    if item and item.get("price") is not None:
+                        _fq = qty
+                        state = cart_add_item(state, {
+                            "sku": item.get("sku"),
+                            "name": item.get("name"),
+                            "unit": item.get("unit") or "unidad",
+                            "price": float(item.get("price") or 0.0),
+                            "vat_rate": item.get("vat_rate"),
+                            "qty": _fq,
+                        })
+                    else:
+                        missing.append({"qty": qty, "raw": raw_name, "candidates": []})
+                if missing:
+                    state["pending"] = missing
+                else:
+                    state.pop("pending", None)
+                    state.pop("retry_count", None)
+                if wa_from:
+                    upsert_quote_state(company_id, wa_from, state)
+                if not state.get("cart") and not missing:
+                    return "No encontré esos productos en el catálogo."
+                return _build_reply_with_pending(state, company_id=company_id, wa_from=wa_from)
+            finally:
+                conn.close()
+
+    # ── Fallback: regex/NER parser (si bulk_match no aplica o falló) ──
     # Detect free-text: single long line with multiple products but no line breaks/bullets
     # e.g. "40 tablaroca 20 angulo 30 canal carga 2000 pijas de 1 1 Kg alambre"
     # These are almost impossible for regex to parse correctly — use GPT first

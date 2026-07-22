@@ -1952,6 +1952,113 @@ def _gpt_smart_match(conn, company_id: str, user_query: str,
         return {"status": "not_found", "item": None, "candidates": []}
 
 
+def bulk_match(conn, company_id: str, raw_message: str) -> list | None:
+    """
+    Single-pass matching: send the ENTIRE customer message + full catalog
+    to GPT-4o in ONE call. GPT extracts products AND matches them simultaneously.
+
+    Returns list of {"qty": int, "raw": str, "item": dict|None} or None on failure.
+    Each entry has the matched catalog item (or None if not found).
+
+    This eliminates the NER→search pipeline where information gets lost between steps.
+    """
+    if not openai_client:
+        return None
+
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT sku, name, unit, price, vat_rate, bundle_size "
+            "FROM pricebook_items WHERE company_id = %s ORDER BY name ASC LIMIT 500",
+            (company_id,),
+        )
+        rows = cur.fetchall()
+    finally:
+        cur.close()
+
+    if not rows:
+        return None
+
+    catalog_lines = []
+    for i, (sku, name, unit, price, vat_rate, bundle_size) in enumerate(rows):
+        unit_txt = f" ({unit})" if unit else ""
+        catalog_lines.append(f"{i + 1}. {name}{unit_txt}")
+    catalog_str = "\n".join(catalog_lines)
+
+    system_prompt = (
+        "Eres un ferretero mexicano experto con 30 años de experiencia. "
+        "Un cliente envió un mensaje por WhatsApp pidiendo varios productos. "
+        "Puede tener errores ortográficos, jerga, abreviaciones.\n\n"
+        "Tu trabajo: extraer CADA producto que pide el cliente, encontrar su "
+        "equivalente en el catálogo, y devolver la cantidad + número de catálogo.\n\n"
+        "REGLAS:\n"
+        "- Usa tu conocimiento de ferretería para interpretar jerga:\n"
+        "  'tes' = 'tee', 'angulos petimetrales' = 'ángulo perimetral',\n"
+        "  'galletas' o 'placas 61x61' = 'plafón registrable',\n"
+        "  'prinsipal' = 'principal', etc.\n"
+        "- Si el cliente dice 'X o Y' (ej: 'placas o galletas'), es UN solo producto.\n"
+        "- IGNORA marcas de competidores (GlassRey, Ternium, etc.) y busca el tipo de producto.\n"
+        "- CALIBRE debe coincidir EXACTAMENTE (cal 22 ≠ cal 26).\n"
+        "- Si un producto NO está en el catálogo, pon 0 como número.\n"
+        "- Responde SOLO JSON, sin explicación.\n\n"
+        "FORMATO de respuesta (JSON array):\n"
+        '[{"qty": 4, "raw": "angulos petimetrales", "num": 12}, '
+        '{"qty": 2, "raw": "tes principal de 3.66", "num": 45}, '
+        '{"qty": 5, "raw": "producto raro", "num": 0}]'
+    )
+
+    try:
+        resp = _openai_retry(lambda: openai_client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": (
+                    f"CATÁLOGO:\n{catalog_str}\n\n"
+                    f"MENSAJE DEL CLIENTE:\n\"{raw_message}\"\n\n"
+                    "Extrae cada producto, encuentra su número de catálogo. JSON:"
+                )},
+            ],
+            temperature=0.0,
+            max_tokens=500,
+        ))
+        raw = (resp.choices[0].message.content or "").strip()
+        # Clean markdown fences
+        raw = raw.replace("```json", "").replace("```", "").strip()
+        print(f"BULK MATCH RAW: {raw}")
+
+        parsed = json.loads(raw)
+        if not isinstance(parsed, list):
+            return None
+
+        results = []
+        for entry in parsed:
+            qty = int(entry.get("qty", 0))
+            raw_name = str(entry.get("raw", "")).strip()
+            num = int(entry.get("num", 0))
+
+            if not qty or not raw_name:
+                continue
+
+            item = None
+            if num > 0 and num <= len(rows):
+                sku, name, unit, price, vat_rate, bundle_size = rows[num - 1]
+                item = {
+                    "sku": sku, "name": name, "unit": unit,
+                    "price": float(price) if price is not None else None,
+                    "vat_rate": float(vat_rate) if vat_rate is not None else None,
+                    "bundle_size": bundle_size,
+                }
+
+            results.append({"qty": qty, "raw": raw_name, "item": item})
+
+        print(f"BULK MATCH RESULTS: {[(r['qty'], r['raw'], r['item']['name'] if r['item'] else 'NOT FOUND') for r in results]}")
+        return results if results else None
+
+    except Exception as e:
+        print(f"BULK MATCH ERROR: {repr(e)}")
+        return None
+
+
 def smart_search(conn, company_id: str, user_query: str, qty: int = 0,
                  cart_context: str = "") -> dict:
     """
