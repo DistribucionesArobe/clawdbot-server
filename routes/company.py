@@ -49,6 +49,9 @@ class CompanySettingsBody(BaseModel):
     marcas_competencia: Optional[str] = None
     giro: Optional[str] = None
     giro_otro: Optional[str] = None
+    # Structured attention schedule: {"tz": "America/Monterrey",
+    #   "days": {"mon": {"open": "09:00", "close": "18:00", "closed": false}, ...}}
+    attention_schedule: Optional[dict] = None
 
     @validator('discount_threshold', 'discount_percent', pre=True)
     def coerce_empty_to_none(cls, v):
@@ -125,7 +128,7 @@ def company_settings_update(request: Request, body: CompanySettingsBody):
     _add_bool(body.pintura_enabled, "pintura_enabled")
     _add_bool(body.impermeabilizante_enabled, "impermeabilizante_enabled")
 
-    if not _sets:
+    if not _sets and body.attention_schedule is None:
         return {"ok": True}
 
     # CLABE validation
@@ -169,7 +172,22 @@ def company_settings_update(request: Request, body: CompanySettingsBody):
                     END IF;
                 END $$;
             """)
+        # Attention schedule (JSONB)
+        cur.execute("""
+            DO $$ BEGIN
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                               WHERE table_name='companies' AND column_name='attention_schedule')
+                THEN ALTER TABLE companies ADD COLUMN attention_schedule JSONB;
+                END IF;
+            END $$;
+        """)
         conn.commit()
+
+        # attention_schedule (JSONB) — set via json string
+        if body.attention_schedule is not None:
+            import json as _json
+            _sets.append("attention_schedule=%s::jsonb")
+            _vals.append(_json.dumps(body.attention_schedule))
 
         _sets.append("updated_at=now()")
         _vals.append(company_id)
@@ -251,6 +269,7 @@ def company_settings_get(request: Request):
             ("giro", "TEXT"),
             ("giro_otro", "TEXT"),
             ("plan_code", "VARCHAR(30) DEFAULT 'free'"),
+            ("attention_schedule", "JSONB"),
         ]:
             cur.execute(f"""
                 DO $$ BEGIN
@@ -269,7 +288,7 @@ def company_settings_get(request: Request):
                    owner_phone, email, rfc, brand_color, logo_url,
                    discount_threshold, discount_percent, welcome_products_hint, welcome_message,
                    telefono_atencion, marcas_propias, marcas_competencia,
-                   giro, giro_otro, plan_code
+                   giro, giro_otro, plan_code, attention_schedule
             FROM companies WHERE id=%s LIMIT 1
             """,
             (company_id,),
@@ -295,6 +314,7 @@ def company_settings_get(request: Request):
                 "giro": row[20] or None,
                 "giro_otro": row[21] or None,
                 "plan_code": row[22] or "free",
+                "attention_schedule": row[23] or None,
             },
         }
     finally:

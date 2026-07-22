@@ -945,6 +945,74 @@ from whatsapp_api import (
 # Backward compat alias
 _normalize_mx_phone = normalize_mx_phone
 
+
+# -------------------------
+# Attention schedule (horario de atención humana)
+# -------------------------
+_DAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+_DAY_NAMES_ES = {"mon": "lunes", "tue": "martes", "wed": "miércoles",
+                 "thu": "jueves", "fri": "viernes", "sat": "sábado", "sun": "domingo"}
+
+
+def staff_available_now(company_id: str):
+    """
+    Check if human staff is available right now per the company's
+    attention_schedule. Returns (available, msg):
+      - (None, None)  → no schedule configured (behave as always)
+      - (True, None)  → staff available now
+      - (False, msg)  → closed; msg says when they open next
+    """
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT attention_schedule FROM companies WHERE id=%s", (company_id,))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        log.warning(f"STAFF SCHEDULE READ ERROR: {repr(e)}")
+        return (None, None)
+
+    sched = row[0] if row else None
+    if not sched or not isinstance(sched, dict) or not sched.get("days"):
+        return (None, None)
+
+    from zoneinfo import ZoneInfo
+    tz_name = sched.get("tz") or "America/Mexico_City"
+    try:
+        now = datetime.now(ZoneInfo(tz_name))
+    except Exception:
+        now = datetime.now(ZoneInfo("America/Mexico_City"))
+
+    days = sched["days"]
+
+    def _day_cfg(key):
+        d = days.get(key) or {}
+        if d.get("closed"):
+            return None
+        o, c = (d.get("open") or "").strip(), (d.get("close") or "").strip()
+        if not o or not c:
+            return None
+        return (o, c)
+
+    today_key = _DAY_KEYS[now.weekday()]
+    cfg = _day_cfg(today_key)
+    now_hm = now.strftime("%H:%M")
+
+    if cfg and cfg[0] <= now_hm < cfg[1]:
+        return (True, None)
+
+    # Closed now — find next opening
+    if cfg and now_hm < cfg[0]:
+        return (False, f"hoy a las {cfg[0]}")
+    for i in range(1, 8):
+        k = _DAY_KEYS[(now.weekday() + i) % 7]
+        c2 = _day_cfg(k)
+        if c2:
+            day_word = "mañana" if i == 1 else f"el {_DAY_NAMES_ES[k]}"
+            return (False, f"{day_word} a las {c2[0]}")
+    return (None, None)  # schedule exists but all days closed → ignore
+
 # -------------------------
 # Sessions
 # -------------------------
@@ -2931,6 +2999,18 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                     log.error("ESCALATION NOTIFY ERROR:", repr(ne))
         except Exception as e:
             log.error("ESCALATION ERROR:", repr(e))
+        # Check attention schedule — is a human available right now?
+        _avail, _next_open = staff_available_now(company_id)
+        if _avail is False and _next_open:
+            _r = (
+                f"En este momento no hay asesores disponibles 😴\n"
+                f"Te atendemos {_next_open} 🙏\n\n"
+            )
+            if _atencion_phone:
+                _phone_clean = _normalize_mx_phone(_atencion_phone)
+                _r += f"Puedes dejar tu mensaje aquí:\n👉 https://wa.me/{_phone_clean}\n\n"
+            _r += "Mientras tanto puedo cotizarte — mándame tu lista de materiales 🔨"
+            return _r
         # Build response with wa.me link if phone is available
         if _atencion_phone:
             _phone_clean = _normalize_mx_phone(_atencion_phone)
