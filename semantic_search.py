@@ -1992,18 +1992,27 @@ def bulk_match(conn, company_id: str, raw_message: str) -> list | None:
         "Tu trabajo: extraer CADA producto que pide el cliente, encontrar su "
         "equivalente en el catálogo, y devolver la cantidad + número de catálogo.\n\n"
         "REGLAS:\n"
+        "- El campo 'raw' debe ser el texto COMPLETO que escribió el cliente para "
+        "ese producto, incluyendo medidas y especificaciones. NUNCA lo recortes.\n"
+        "- USA LAS MEDIDAS para decidir. Es un plafón/techo registrable típico:\n"
+        "  'tes principal de 3.66' = Tee principal (3.66m)\n"
+        "  'tes secundaria de .61' o 'de 61' = Tee 61 (0.61m)\n"
+        "  'tes secundaria de 1.22' = Tee 1.22 (1.22m)\n"
+        "  'placas de 61 por 61' o 'galletas' = plafón registrable 61x61\n"
+        "  'angulos perimetrales/petimetrales' = ángulo perimetral\n"
         "- Usa tu conocimiento de ferretería para interpretar jerga:\n"
-        "  'tes' = 'tee', 'angulos petimetrales' = 'ángulo perimetral',\n"
-        "  'galletas' o 'placas 61x61' = 'plafón registrable',\n"
-        "  'prinsipal' = 'principal', etc.\n"
+        "  'tes' = 'tee', 'prinsipal' = 'principal', 'petimetral' = 'perimetral'.\n"
         "- Si el cliente dice 'X o Y' (ej: 'placas o galletas'), es UN solo producto.\n"
         "- IGNORA marcas de competidores (GlassRey, Ternium, etc.) y busca el tipo de producto.\n"
         "- CALIBRE debe coincidir EXACTAMENTE (cal 22 ≠ cal 26).\n"
+        "- DECIDE TÚ MISMO usando las medidas/specs del cliente. Solo si de verdad "
+        "es imposible decidir entre varias opciones, usa 'nums' con esas opciones.\n"
         "- Si un producto NO está en el catálogo, pon 0 como número.\n"
         "- Responde SOLO JSON, sin explicación.\n\n"
         "FORMATO de respuesta (JSON array):\n"
         '[{"qty": 4, "raw": "angulos petimetrales", "num": 12}, '
-        '{"qty": 2, "raw": "tes principal de 3.66", "num": 45}, '
+        '{"qty": 15, "raw": "tes secundaria de .61", "num": 45}, '
+        '{"qty": 3, "raw": "lamina", "nums": [7, 8]}, '
         '{"qty": 5, "raw": "producto raro", "num": 0}]'
     )
 
@@ -2030,28 +2039,46 @@ def bulk_match(conn, company_id: str, raw_message: str) -> list | None:
         if not isinstance(parsed, list):
             return None
 
+        def _row_to_item(idx0: int) -> dict:
+            sku, name, unit, price, vat_rate, bundle_size = rows[idx0]
+            return {
+                "sku": sku, "name": name, "unit": unit,
+                "price": float(price) if price is not None else None,
+                "vat_rate": float(vat_rate) if vat_rate is not None else None,
+                "bundle_size": bundle_size,
+            }
+
         results = []
         for entry in parsed:
             qty = int(entry.get("qty", 0))
             raw_name = str(entry.get("raw", "")).strip()
-            num = int(entry.get("num", 0))
+            num = int(entry.get("num", 0) or 0)
+            nums = entry.get("nums") or []
 
             if not qty or not raw_name:
                 continue
 
             item = None
+            candidates = []
             if num > 0 and num <= len(rows):
-                sku, name, unit, price, vat_rate, bundle_size = rows[num - 1]
-                item = {
-                    "sku": sku, "name": name, "unit": unit,
-                    "price": float(price) if price is not None else None,
-                    "vat_rate": float(vat_rate) if vat_rate is not None else None,
-                    "bundle_size": bundle_size,
-                }
+                item = _row_to_item(num - 1)
+            elif nums:
+                for n in nums:
+                    try:
+                        n = int(n)
+                    except (TypeError, ValueError):
+                        continue
+                    if 0 < n <= len(rows):
+                        candidates.append(_row_to_item(n - 1))
+                # If GPT gave "nums" but only one valid → treat as found
+                if len(candidates) == 1:
+                    item = candidates[0]
+                    candidates = []
 
-            results.append({"qty": qty, "raw": raw_name, "item": item})
+            results.append({"qty": qty, "raw": raw_name, "item": item,
+                            "candidates": candidates})
 
-        print(f"BULK MATCH RESULTS: {[(r['qty'], r['raw'], r['item']['name'] if r['item'] else 'NOT FOUND') for r in results]}")
+        print(f"BULK MATCH RESULTS: {[(r['qty'], r['raw'], r['item']['name'] if r['item'] else ('AMBIG:' + str(len(r['candidates'])) if r['candidates'] else 'NOT FOUND')) for r in results]}")
         return results if results else None
 
     except Exception as e:

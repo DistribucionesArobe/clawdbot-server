@@ -4324,6 +4324,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                     qty = br["qty"]
                     raw_name = br["raw"]
                     item = br.get("item")
+                    _cands = br.get("candidates") or []
                     if item and item.get("price") is not None:
                         _fq = qty
                         state = cart_add_item(state, {
@@ -4335,7 +4336,9 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                             "qty": _fq,
                         })
                     else:
-                        missing.append({"qty": qty, "raw": raw_name, "candidates": []})
+                        # Pass GPT's candidate options so the "¿cuál?" question
+                        # shows the RIGHT choices (not a fresh broken search)
+                        missing.append({"qty": qty, "raw": raw_name, "candidates": _cands})
                 if missing:
                     state["pending"] = missing
                 else:
