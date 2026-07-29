@@ -11,7 +11,7 @@ from typing import Optional
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from pydantic import BaseModel, validator
 
-from auth import require_company_id
+from auth import require_company_id, get_user_from_session, hash_password
 from db import get_conn
 from whatsapp_api import update_wa_profile_photo, combine_with_cotizabot, _prepare_profile_image
 
@@ -473,4 +473,107 @@ def delete_company_logo(request: Request):
         return {"ok": True}
     finally:
         if cur:  cur.close()
+        if conn: conn.close()
+
+
+# ── Team / Users management (multi-admin per company) ──────────────────────
+
+class NewUserBody(BaseModel):
+    email: str
+    password: str
+
+
+@router.get("/api/company/users")
+def company_users_list(request: Request):
+    """Lista los usuarios (admins) de la empresa."""
+    company_id = require_company_id(request)
+    conn = None
+    cur = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, email, created_at FROM users WHERE company_id=%s ORDER BY id ASC",
+            (company_id,),
+        )
+        rows = cur.fetchall()
+        return {"ok": True, "users": [
+            {"id": r[0], "email": r[1],
+             "created_at": str(r[2]) if len(r) > 2 and r[2] else None}
+            for r in rows
+        ]}
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
+
+
+@router.post("/api/company/users")
+def company_users_add(request: Request, body: NewUserBody):
+    """Agrega otro admin a la empresa (mismo panel, mismo catálogo)."""
+    company_id = require_company_id(request)
+    email = (body.email or "").strip().lower()
+    password = (body.password or "").strip()
+
+    if not email or "@" not in email:
+        raise HTTPException(status_code=400, detail="Email inválido")
+    if len(password) < 8:
+        raise HTTPException(status_code=400, detail="La contraseña debe tener al menos 8 caracteres")
+
+    conn = None
+    cur = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        # Límite razonable de admins por empresa
+        cur.execute("SELECT COUNT(*) FROM users WHERE company_id=%s", (company_id,))
+        if cur.fetchone()[0] >= 10:
+            raise HTTPException(status_code=400, detail="Máximo 10 usuarios por empresa")
+        # Email único global (es el login)
+        cur.execute("SELECT 1 FROM users WHERE email=%s LIMIT 1", (email,))
+        if cur.fetchone():
+            raise HTTPException(status_code=409, detail="Ese email ya tiene una cuenta")
+        cur.execute(
+            "INSERT INTO users (email, password_hash, company_id) VALUES (%s, %s, %s) RETURNING id",
+            (email, hash_password(password), company_id),
+        )
+        new_id = cur.fetchone()[0]
+        conn.commit()
+        log.info(f"New admin user {email} added to company {company_id}")
+        return {"ok": True, "user_id": new_id, "email": email}
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
+
+
+@router.delete("/api/company/users/{user_id}")
+def company_users_delete(request: Request, user_id: int):
+    """Elimina un admin de la empresa. No puedes borrarte a ti mismo
+    ni dejar la empresa sin usuarios."""
+    company_id = require_company_id(request)
+    me = get_user_from_session(request)
+
+    if int(user_id) == int(me["id"]):
+        raise HTTPException(status_code=400, detail="No puedes eliminar tu propio usuario")
+
+    conn = None
+    cur = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        # Verificar que el usuario pertenece a MI empresa
+        cur.execute(
+            "SELECT 1 FROM users WHERE id=%s AND company_id=%s", (user_id, company_id)
+        )
+        if not cur.fetchone():
+            raise HTTPException(status_code=404, detail="Usuario no encontrado en tu empresa")
+        cur.execute("SELECT COUNT(*) FROM users WHERE company_id=%s", (company_id,))
+        if cur.fetchone()[0] <= 1:
+            raise HTTPException(status_code=400, detail="No puedes dejar la empresa sin usuarios")
+        # Borrar sesiones activas del usuario y luego el usuario
+        cur.execute("DELETE FROM sessions WHERE user_id=%s", (user_id,))
+        cur.execute("DELETE FROM users WHERE id=%s", (user_id,))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        if cur: cur.close()
         if conn: conn.close()
