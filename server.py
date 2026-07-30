@@ -4400,6 +4400,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                 state.pop("pending_specs", None)
                 state.pop("pending", None)
                 missing = []
+                not_available = []
                 for br in _bulk_results:
                     qty = br["qty"]
                     raw_name = br["raw"]
@@ -4415,10 +4416,19 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                             "vat_rate": item.get("vat_rate"),
                             "qty": _fq,
                         })
-                    else:
+                    elif _cands:
                         # Pass GPT's candidate options so the "¿cuál?" question
                         # shows the RIGHT choices (not a fresh broken search)
                         missing.append({"qty": qty, "raw": raw_name, "candidates": _cands})
+                    else:
+                        # GPT vio el catálogo COMPLETO y no encontró nada parecido:
+                        # el producto NO se maneja. Avisar en vez de pedir que lo
+                        # reescriba (eso frustraba al cliente).
+                        not_available.append(raw_name)
+                        try:
+                            save_search_miss(company_id, raw_name)
+                        except Exception:
+                            pass
                 if missing:
                     state["pending"] = missing
                 else:
@@ -4426,9 +4436,24 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
                     state.pop("retry_count", None)
                 if wa_from:
                     upsert_quote_state(company_id, wa_from, state)
+                _na_note = ""
+                if not_available:
+                    _na_list = "\n".join(f"• {n}" for n in not_available)
+                    _na_note = (
+                        f"\n\n🚫 Por el momento *no manejamos*:\n{_na_list}\n"
+                        "Si crees que es un error de nombre, escríbelo de otra forma "
+                        "o pide hablar con un asesor 🙏"
+                    )
                 if not state.get("cart") and not missing:
+                    if not_available:
+                        return (
+                            "Revisé nuestro catálogo completo y por el momento "
+                            "*no manejamos* esos productos:\n"
+                            + "\n".join(f"• {n}" for n in not_available)
+                            + "\n\n¿Te cotizo algo más? 🔨"
+                        )
                     return "No encontré esos productos en el catálogo."
-                return _build_reply_with_pending(state, company_id=company_id, wa_from=wa_from)
+                return _build_reply_with_pending(state, company_id=company_id, wa_from=wa_from) + _na_note
             finally:
                 conn.close()
 
