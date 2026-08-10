@@ -5520,8 +5520,10 @@ class AdminDeleteTestUserBody(BaseModel):
 
 
 @app.post("/api/admin/delete-test-user")
-def admin_delete_test_user(body: AdminDeleteTestUserBody):
-    """Delete a test user and ALL their company data. Requires confirm='DELETE'."""
+def admin_delete_test_user(request: Request, body: AdminDeleteTestUserBody):
+    """Delete a test user and ALL their company data. Requires confirm='DELETE'.
+    Solo admins de CotizaExpress (sesión + email en ADMIN_EMAILS)."""
+    _require_admin(request)
     if body.confirm != "DELETE":
         raise HTTPException(status_code=400, detail="Debes enviar confirm='DELETE'")
     email = (body.email or "").strip().lower()
