@@ -99,6 +99,24 @@ def send_whatsapp_document(wa_api_key: str, phone_number_id: str, to: str,
         raise RuntimeError(f"WA document send failed {r.status_code}: {r.text[:400]}")
 
 
+def send_whatsapp_image(wa_api_key: str, phone_number_id: str, to: str,
+                        media_id: str, caption: str = ""):
+    """Send an image message by media_id (reenvía imágenes recibidas,
+    p.ej. comprobantes de pago, dentro del mismo número del negocio)."""
+    url = f"{WA_API_BASE}/{phone_number_id}/messages"
+    headers = {"Authorization": f"Bearer {wa_api_key}", "Content-Type": "application/json"}
+    img_obj = {"id": media_id}
+    if caption:
+        img_obj["caption"] = caption
+    payload = {
+        "messaging_product": "whatsapp", "to": to,
+        "type": "image", "image": img_obj,
+    }
+    r = requests.post(url, headers=headers, json=payload, timeout=20)
+    if r.status_code >= 300:
+        raise RuntimeError(f"WA image send failed {r.status_code}: {r.text[:400]}")
+
+
 # ── Media ────────────────────────────────────────────────────────────────
 
 def download_whatsapp_media(image_id: str, wa_api_key: str) -> bytes:

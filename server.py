@@ -1327,6 +1327,21 @@ def _extract_msg_content(msg, company):
                         client_phone=from_phone,
                         state=_st_check,
                     )
+                    # Reenviar la IMAGEN real del comprobante al dueño
+                    # (el media_id recibido se puede reenviar desde el mismo número)
+                    try:
+                        from whatsapp_api import send_whatsapp_image
+                        if image_id:
+                            send_whatsapp_image(
+                                wa_api_key=owner_row[1],
+                                phone_number_id=owner_row[2],
+                                to=normalize_mx_phone(owner_row[0]),
+                                media_id=image_id,
+                                caption=f"📎 Comprobante del cliente {from_phone}"
+                                        + (f" — Folio {_st_check.get('folio')}" if _st_check.get('folio') else ""),
+                            )
+                    except Exception as _img_e:
+                        log.error("COMPROBANTE IMAGE FORWARD ERROR:", repr(_img_e))
             except Exception as e:
                 log.error("COMPROBANTE NOTIFY ERROR:", repr(e))
             _st_check.pop("awaiting_comprobante", None)
