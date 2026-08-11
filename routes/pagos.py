@@ -89,6 +89,40 @@ def crear_checkout(request: Request, body: CheckoutBody):
 
     company_id = require_company_id(request)
 
+    # ── Aplicar descuento percentage si la empresa canjeó un código promo ──
+    _conn = None; _cur = None
+    try:
+        _conn = get_conn(); _cur = _conn.cursor()
+        _cur.execute(
+            """
+            SELECT MAX(p.discount_value)
+            FROM promo_code_uses u
+            JOIN promo_codes p ON p.id = u.promo_code_id
+            WHERE u.company_id = %s AND p.discount_type = 'percentage' AND p.active = TRUE
+            """,
+            (company_id,),
+        )
+        _row = _cur.fetchone()
+        _disc = float(_row[0]) if _row and _row[0] else 0.0
+        if _disc >= 100:
+            # 100% de descuento → activar el plan directo, sin pasar por MP
+            _cur.execute(
+                "UPDATE companies SET plan_code=%s, updated_at=now() WHERE id=%s",
+                (plan, company_id),
+            )
+            _conn.commit()
+            log.info("CHECKOUT PROMO 100%%: plan %s activado directo para company %s", plan, company_id)
+            return {"ok": True, "activated": True, "plan": plan,
+                    "message": "¡Plan activado con tu código promocional! (100% de descuento)"}
+        elif _disc > 0:
+            price = round(price * (1 - _disc / 100.0), 2)
+            log.info("CHECKOUT PROMO %s%%: precio ajustado a %s para company %s", _disc, price, company_id)
+    except Exception as _pe:
+        log.warning("PROMO DISCOUNT LOOKUP ERROR: %s", repr(_pe))
+    finally:
+        if _cur: _cur.close()
+        if _conn: _conn.close()
+
     sdk = mercadopago.SDK(_MP_ACCESS_TOKEN)
     try:
         preference_data = {
