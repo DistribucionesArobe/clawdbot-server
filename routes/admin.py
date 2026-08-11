@@ -405,16 +405,18 @@ def admin_set_plan(company_id: str, request: Request, body: AdminSetPlanBody):
     """Manually set a company's plan_code (admin only)."""
     _require_admin(request)
 
-    if body.plan_code not in ("free", "cotizabot", "pro"):
-        raise HTTPException(status_code=400, detail="plan_code debe ser free, cotizabot o pro")
+    if body.plan_code not in ("free", "cotizabot", "pro", "enterprise", "owner"):
+        raise HTTPException(status_code=400, detail="plan_code debe ser free, cotizabot, pro, enterprise u owner")
 
     conn = None
     cur = None
     try:
         conn = get_conn()
         cur = conn.cursor()
+        # Limpiar trial_end al asignar plan manualmente — evita que el
+        # downgrade automático de trial vencido revierta el cambio
         cur.execute(
-            "UPDATE companies SET plan_code=%s, updated_at=now() WHERE id=%s RETURNING id, name",
+            "UPDATE companies SET plan_code=%s, trial_end=NULL, updated_at=now() WHERE id=%s RETURNING id, name",
             (body.plan_code, company_id),
         )
         row = cur.fetchone()
