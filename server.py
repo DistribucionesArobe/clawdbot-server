@@ -5855,6 +5855,136 @@ def auth_logout(request: Request, response: Response):
     return {"ok": True}
 
 
+# ── Password reset ──────────────────────────────────────────────────────
+
+class ForgotPasswordBody(BaseModel):
+    email: str
+
+class ResetPasswordBody(BaseModel):
+    token: str
+    password: str
+
+
+def _send_email(to: str, subject: str, body_text: str) -> bool:
+    _smtp_host = os.environ.get("SMTP_HOST", "mail.privateemail.com")
+    _smtp_port = int(os.environ.get("SMTP_PORT", "465"))
+    _smtp_user = os.environ.get("SMTP_USER", "")
+    _smtp_pass = os.environ.get("SMTP_PASS", "")
+    if not (_smtp_user and _smtp_pass):
+        return False
+    try:
+        import smtplib
+        from email.mime.text import MIMEText
+        from email.mime.multipart import MIMEMultipart
+        msg = MIMEMultipart()
+        msg["From"] = _smtp_user
+        msg["To"] = to
+        msg["Subject"] = subject
+        msg.attach(MIMEText(body_text, "plain", "utf-8"))
+        with smtplib.SMTP_SSL(_smtp_host, _smtp_port) as smtp:
+            smtp.login(_smtp_user, _smtp_pass)
+            smtp.send_message(msg)
+        return True
+    except Exception as e:
+        log.warning("SEND EMAIL ERROR to %s: %s", to, repr(e))
+        return False
+
+
+@app.post("/api/auth/forgot-password")
+def forgot_password(body: ForgotPasswordBody):
+    email = (body.email or "").strip().lower()
+    # Siempre responder ok para no revelar si el correo existe
+    if not email:
+        return {"ok": True}
+    conn = None
+    cur = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS password_resets (
+              token_hash TEXT PRIMARY KEY,
+              user_id INTEGER NOT NULL,
+              expires_at TIMESTAMPTZ NOT NULL,
+              used BOOLEAN DEFAULT FALSE,
+              created_at TIMESTAMPTZ DEFAULT now()
+            )
+        """)
+        cur.execute("SELECT id FROM users WHERE email=%s AND is_active=true", (email,))
+        row = cur.fetchone()
+        if row:
+            user_id = int(row[0])
+            # Máximo 3 solicitudes por hora por usuario
+            cur.execute(
+                "SELECT COUNT(*) FROM password_resets WHERE user_id=%s AND created_at > now() - interval '1 hour'",
+                (user_id,))
+            if int(cur.fetchone()[0]) < 3:
+                token = secrets.token_urlsafe(32)
+                th = hashlib.sha256(token.encode()).hexdigest()
+                cur.execute(
+                    "INSERT INTO password_resets (token_hash, user_id, expires_at) VALUES (%s, %s, now() + interval '1 hour')",
+                    (th, user_id))
+                conn.commit()
+                link = f"https://www.cotizaexpress.com/restablecer-contrasena?token={token}"
+                _send_email(
+                    email,
+                    "Restablece tu contraseña — CotizaExpress",
+                    "Hola,\n\n"
+                    "Recibimos una solicitud para restablecer la contraseña de tu cuenta en CotizaExpress.\n\n"
+                    f"Para crear una contraseña nueva, abre este enlace (válido por 1 hora):\n{link}\n\n"
+                    "Si tú no lo solicitaste, ignora este correo — tu contraseña no cambia.\n\n"
+                    "— El equipo de CotizaExpress\ncotizaexpress.com",
+                )
+                log.info("FORGOT PASSWORD: email sent to user %s", user_id)
+        conn.commit()
+    except Exception as e:
+        log.error("FORGOT PASSWORD ERROR: %s", repr(e))
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
+    return {"ok": True}
+
+
+@app.post("/api/auth/reset-password")
+def reset_password(body: ResetPasswordBody):
+    token = (body.token or "").strip()
+    password = (body.password or "").strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="Enlace inválido o expirado")
+    if len(password) < 8:
+        raise HTTPException(status_code=400, detail="La contraseña debe tener al menos 8 caracteres")
+    if len(password.encode("utf-8")) > 72:
+        raise HTTPException(status_code=400, detail="Contraseña demasiado larga")
+    th = hashlib.sha256(token.encode()).hexdigest()
+    conn = None
+    cur = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT user_id FROM password_resets WHERE token_hash=%s AND used=false AND expires_at > now()",
+            (th,))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=400, detail="Enlace inválido o expirado. Solicita uno nuevo.")
+        user_id = int(row[0])
+        cur.execute("UPDATE users SET password_hash=%s WHERE id=%s", (hash_password(password), user_id))
+        cur.execute("UPDATE password_resets SET used=true WHERE token_hash=%s", (th,))
+        # Cerrar todas las sesiones abiertas del usuario
+        cur.execute("DELETE FROM sessions WHERE user_id=%s", (user_id,))
+        conn.commit()
+        log.info("RESET PASSWORD: user %s updated", user_id)
+        return {"ok": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("RESET PASSWORD ERROR: %s", repr(e))
+        raise HTTPException(status_code=500, detail="Error interno")
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
+
+
 @app.post("/api/companies")
 def create_company(body: CompanyCreateBody):
     name = (body.name or "").strip()
