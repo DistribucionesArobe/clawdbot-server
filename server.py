@@ -8,6 +8,7 @@ import re
 import hashlib
 import string
 import secrets
+import random
 import traceback
 import requests
 from io import BytesIO
@@ -255,6 +256,33 @@ from auth import (
     create_session, get_user_from_session, require_company_id,
     get_company_from_bearer, SESSION_COOKIE_NAME, SESSION_TTL_DAYS,
 )
+
+def ejemplos_pedido(company_id) -> str:
+    """Ejemplos de pedido con productos reales del catálogo de la empresa.
+    Devuelve 3 líneas tipo '10 <producto>'. Fallback genérico si no hay catálogo."""
+    nombres = []
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        # Nombres cortos primero: son mejores ejemplos que los nombres kilométricos
+        cur.execute(
+            "SELECT name FROM pricebook_items "
+            "WHERE company_id=%s AND name IS NOT NULL AND COALESCE(price,0) > 0 "
+            "ORDER BY length(name) ASC LIMIT 12",
+            (company_id,))
+        pool = [r[0].strip() for r in cur.fetchall() if r and r[0] and r[0].strip()]
+        cur.close()
+        conn.close()
+        random.shuffle(pool)
+        nombres = pool[:3]
+    except Exception as e:
+        log.warning("EJEMPLOS PEDIDO ERROR: %s", repr(e))
+        nombres = []
+    if not nombres:
+        nombres = ["cemento", "varilla 3/8", "block 15x20"]
+    qtys = [10, 5, 20]
+    return "\n".join(f"{q} {n}" for q, n in zip(qtys, nombres))
+
 
 def looks_like_product_phrase(text: str) -> bool:
     t = norm_name(text)
@@ -3086,8 +3114,8 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             ejemplos = "\n".join(f"10 {p.strip()}" for p in hint.split(",") if p.strip())
             hint_txt = f"\n\nEj:\n{ejemplos}"
         else:
-            hint_txt = "\n\nEj:\n10 cemento\n5 varilla 3/8\n20 block 15x20"
-        return f"📋 Mándame tu lista de materiales con cantidades:{hint_txt}\n\nO todo en una línea separado por comas."
+            hint_txt = f"\n\nEj:\n{ejemplos_pedido(company_id)}"
+        return f"📋 Mándame tu lista de productos con cantidades:{hint_txt}\n\nO todo en una línea separado por comas."
 
     # ── Catalog browsing: "que tienen para X", "productos para X", "catalogo" ──
     _catalog_match = re.match(
@@ -4099,8 +4127,8 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
             ejemplos = "\n".join(f"10 {p.strip()}" for p in hint.split(",") if p.strip())
             hint_txt = f"\n\nEj:\n{ejemplos}"
         else:
-            hint_txt = "\n\nEj:\n10 cemento\n5 varilla 3/8\n20 block 15x20"
-        return f"¡Claro! Mándame el nombre del material y la cantidad:{hint_txt}\n\nO todo en una línea separado por comas."
+            hint_txt = f"\n\nEj:\n{ejemplos_pedido(company_id)}"
+        return f"¡Claro! Mándame el nombre del producto y la cantidad:{hint_txt}\n\nO todo en una línea separado por comas."
 
     # NOTE: Message batching/accumulation is now handled at the webhook level
     # (per-user async lock + in-memory queue with 3s debounce window).
