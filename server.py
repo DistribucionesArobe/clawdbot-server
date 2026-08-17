@@ -1108,6 +1108,32 @@ import time as _time_mod
 
 _BATCH_WAIT_SECS = 3.0           # seconds to wait for more messages
 _BATCH_MAX_WAIT_SECS = 12.0      # absolute max wait from first message in batch
+
+# Mensajes que casi seguro están completos → responder casi de inmediato
+_QUICK_MSGS = {
+    "hola", "menu", "menú", "pagar", "si", "sí", "no", "gracias", "ok", "listo",
+    "asesor", "ayuda", "cotizar", "catalogo", "catálogo", "horario", "horarios",
+    "ubicacion", "ubicación", "buenas", "buenos dias", "buenos días",
+    "buenas tardes", "buenas noches", "hola buenas", "que tal", "qué tal",
+}
+
+def _first_wait_secs(text: str) -> float:
+    """Debounce adaptativo: espera larga solo cuando el mensaje parece
+    fragmento de una lista que viene en varios mensajes."""
+    t = (text or "").strip().lower()
+    if not t:
+        return _BATCH_WAIT_SECS
+    _t_clean = t.rstrip("!.…😀🙂👋 ").strip()
+    if _t_clean in _QUICK_MSGS or t.endswith("?"):
+        return 0.4   # saludo/comando/pregunta → ya
+    lines = [l for l in t.splitlines() if l.strip()]
+    if len(lines) >= 2:
+        return 1.0   # mandó la lista completa en un solo mensaje
+    if "," in t and re.search(r"\d", t):
+        return 1.0   # lista en una línea separada por comas
+    if re.match(r"^\d+\s+\S+", t) and len(t) < 40:
+        return _BATCH_WAIT_SECS   # parece renglón de lista → esperar más renglones
+    return 1.5
 _user_locks: dict = {}            # (company_id, phone) → asyncio.Lock
 _user_msg_queues: dict = {}       # (company_id, phone) → [{"text":..., "ts":...}, ...]
 _user_batch_first_ts: dict = {}   # (company_id, phone) → timestamp of first msg in batch
@@ -1542,6 +1568,16 @@ async def whatsapp_webhook(request: Request):
 
     from_phone = msg.get("from")
 
+    # ── Visto + "escribiendo..." inmediato (percepción de velocidad) ────
+    if wa_msg_id:
+        try:
+            from whatsapp_api import send_typing_indicator
+            asyncio.create_task(asyncio.to_thread(
+                send_typing_indicator,
+                company["wa_api_key"], company["wa_phone_number_id"], wa_msg_id))
+        except Exception:
+            pass
+
     # ── Extract message content ─────────────────────────────────────────
     text, msg_type, should_batch, early_reply = _extract_msg_content(msg, company)
     if early_reply == "HANDLED":
@@ -1589,24 +1625,28 @@ async def whatsapp_webhook(request: Request):
             _queue_message(company["company_id"], from_phone, text)
             log.info(f"BATCH START: queued '{text[:60]}' for {from_phone}, waiting {_BATCH_WAIT_SECS}s...")
 
-        # Wait for more messages to accumulate
-        _batch_start = _time_mod.time()
-        _last_count = 0
+        # Wait for more messages to accumulate (espera adaptativa)
+        _wait = _first_wait_secs(text)
         while True:
-            await asyncio.sleep(_BATCH_WAIT_SECS)
-            queued = _user_msg_queues.get(key, [])
-            _elapsed = _time_mod.time() - _batch_start
+            _batch_start = _time_mod.time()
+            _last_count = 0
+            while True:
+                await asyncio.sleep(_wait)
+                queued = _user_msg_queues.get(key, [])
+                _elapsed = _time_mod.time() - _batch_start
 
-            # If no new messages arrived since last check, or we hit max wait → process
-            if len(queued) == _last_count or _elapsed >= _BATCH_MAX_WAIT_SECS:
+                # If no new messages arrived since last check, or we hit max wait → process
+                if len(queued) == _last_count or _elapsed >= _BATCH_MAX_WAIT_SECS:
+                    break
+                # New messages arrived — wait one more full cycle
+                _wait = _BATCH_WAIT_SECS
+                _last_count = len(queued)
+                log.info(f"BATCH EXTEND: {len(queued)} msgs queued for {from_phone}, waiting more... ({_elapsed:.1f}s)")
+
+            # Drain all accumulated messages
+            batch = _drain_queue(company["company_id"], from_phone)
+            if batch:
                 break
-            # New messages arrived — wait one more cycle
-            _last_count = len(queued)
-            log.info(f"BATCH EXTEND: {len(queued)} msgs queued for {from_phone}, waiting more... ({_elapsed:.1f}s)")
-
-        # Drain all accumulated messages
-        batch = _drain_queue(company["company_id"], from_phone)
-        if not batch:
             return {"ok": True}
 
         # Combine all texts: join with newline (like a product list)
@@ -1635,6 +1675,24 @@ async def whatsapp_webhook(request: Request):
                 _log_extra = {}
             log_message(company["company_id"], from_phone, "bot", _reply_text_for_log(reply), _log_extra)
             _send_reply(company, from_phone, reply)
+
+        # Si llegaron mensajes mientras procesábamos, atiende el remanente
+        leftover = _drain_queue(company["company_id"], from_phone)
+        if leftover:
+            lo_texts = [m["text"] for m in leftover if m.get("text")]
+            if lo_texts:
+                lo_combined = "\n".join(lo_texts)
+                log.info(f"BATCH LEFTOVER: {len(lo_texts)} msgs for {from_phone}")
+                for m_text in lo_texts:
+                    log_message(company["company_id"], from_phone, "user", m_text)
+                reply2 = await asyncio.to_thread(
+                    build_reply_for_company,
+                    company["company_id"], lo_combined,
+                    wa_from=from_phone, is_interactive=False,
+                )
+                if reply2:
+                    log_message(company["company_id"], from_phone, "bot", _reply_text_for_log(reply2))
+                    _send_reply(company, from_phone, reply2)
 
     return {"ok": True}
 

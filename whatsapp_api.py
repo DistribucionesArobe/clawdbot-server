@@ -548,3 +548,20 @@ def notify_owner_comprobante(wa_api_key: str, phone_number_id: str, owner_phone:
         f"Revisa tu WhatsApp — el cliente acaba de mandar el comprobante."
     )
     send_whatsapp_text(wa_api_key, phone_number_id, owner_phone_clean, msg)
+
+
+def send_typing_indicator(wa_api_key: str, phone_number_id: str, message_id: str):
+    """Marca el mensaje como leído y muestra 'escribiendo...' al cliente.
+    Best effort: nunca lanza excepción."""
+    try:
+        url = f"{WA_API_BASE}/{phone_number_id}/messages"
+        headers = {"Authorization": f"Bearer {wa_api_key}", "Content-Type": "application/json"}
+        payload = {
+            "messaging_product": "whatsapp",
+            "status": "read",
+            "message_id": message_id,
+            "typing_indicator": {"type": "text"},
+        }
+        requests.post(url, headers=headers, json=payload, timeout=10)
+    except Exception:
+        pass
