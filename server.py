@@ -5941,6 +5941,98 @@ def auth_logout(request: Request, response: Response):
     return {"ok": True}
 
 
+# ── Rescate de onboarding: emails a registros sin WhatsApp conectado ────
+ONBOARDING_RESCUE_INTERVAL_SEC = 6 * 3600  # cada 6 horas
+_RESCUE_EXCLUDE = {"ealejandro.robledo@gmail.com", "pedrozv12@hotmail.com"}
+
+
+def _rescue_email(kind: str, company_name: str):
+    nombre = (company_name or "").strip()
+    nombre = "" if (not nombre or "@" in nombre) else f" de {nombre}"
+    if kind == "day1":
+        return (
+            "Tu bot de cotizaciones está a un paso 🤖",
+            f"Hola,\n\n"
+            f"Vimos que creaste tu cuenta en CotizaExpress pero tu bot{nombre} aún no está atendiendo clientes.\n\n"
+            "Lo que te falta toma menos de 10 minutos:\n\n"
+            "1. Sube tu lista de precios (un Excel basta): https://www.cotizaexpress.com/carga-productos\n"
+            "2. Pruébalo al instante en el simulador — escribe como cliente y ve a tu bot cotizar con TUS precios, sin conectar nada: https://www.cotizaexpress.com/simulador\n"
+            "3. ¿Te gustó? Conéctalo a tu WhatsApp y listo.\n\n"
+            "Si te atoras en cualquier paso, escríbenos por WhatsApp y te ayudamos: https://wa.me/528130850381\n\n"
+            "— El equipo de CotizaExpress\ncotizaexpress.com",
+        )
+    return (
+        "¿Te ayudamos a activar tu bot? Son 15 minutos",
+        f"Hola,\n\n"
+        f"Tu cuenta de CotizaExpress sigue esperando — y cada día sin bot son cotizaciones que se contestan tarde o no se contestan.\n\n"
+        "Te ofrecemos ayuda directa: una videollamada de 15 minutos donde configuramos todo contigo — catálogo, WhatsApp y primera cotización.\n\n"
+        "Solo responde este correo o escríbenos por WhatsApp: https://wa.me/528130850381\n\n"
+        "Y si prefieres verlo antes por tu cuenta, prueba el simulador con tus productos: https://www.cotizaexpress.com/simulador\n\n"
+        "— El equipo de CotizaExpress\ncotizaexpress.com",
+    )
+
+
+def _run_onboarding_rescue_once():
+    if not DATABASE_URL:
+        return
+    conn = psycopg2.connect(DATABASE_URL, connect_timeout=10)
+    conn.autocommit = True
+    cur = conn.cursor()
+    try:
+        cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT now()")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS onboarding_emails (
+              user_id INTEGER NOT NULL,
+              kind TEXT NOT NULL,
+              sent_at TIMESTAMPTZ DEFAULT now(),
+              PRIMARY KEY (user_id, kind)
+            )
+        """)
+        for kind, min_h, max_h in (("day1", 20, 72), ("day3", 68, 24 * 14)):
+            cur.execute("""
+                SELECT u.id, u.email, c.name
+                FROM users u
+                JOIN companies c ON c.id = u.company_id
+                WHERE (c.wa_phone_number_id IS NULL OR c.wa_phone_number_id = '')
+                  AND u.created_at < now() - (%s * interval '1 hour')
+                  AND u.created_at > now() - (%s * interval '1 hour')
+                  AND NOT EXISTS (
+                    SELECT 1 FROM onboarding_emails oe
+                    WHERE oe.user_id = u.id AND oe.kind = %s)
+                LIMIT 20
+            """, (min_h, max_h, kind))
+            for uid, email, cname in cur.fetchall():
+                email = (email or "").strip().lower()
+                if not email or "@" not in email or email in _RESCUE_EXCLUDE:
+                    continue
+                subject, body = _rescue_email(kind, cname)
+                ok = _send_email(email, subject, body)
+                # Marcar siempre para no reintentar/spamear
+                cur.execute(
+                    "INSERT INTO onboarding_emails (user_id, kind) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                    (uid, kind))
+                log.info("ONBOARDING RESCUE %s → %s (sent=%s)", kind, email, ok)
+    finally:
+        cur.close()
+        conn.close()
+
+
+async def _onboarding_rescue_loop():
+    await asyncio.sleep(120)  # dejar arrancar el servicio
+    while True:
+        try:
+            await asyncio.to_thread(_run_onboarding_rescue_once)
+        except Exception as _e:
+            log.error("ONBOARDING RESCUE LOOP ERROR: %s", repr(_e))
+        await asyncio.sleep(ONBOARDING_RESCUE_INTERVAL_SEC)
+
+
+@app.on_event("startup")
+async def _start_onboarding_rescue_loop():
+    asyncio.create_task(_onboarding_rescue_loop())
+    log.info("Onboarding rescue loop started (every %ss)", ONBOARDING_RESCUE_INTERVAL_SEC)
+
+
 # ── Simulador web del bot (probar con el catálogo propio, sin WhatsApp) ─
 
 class SimulatorBody(BaseModel):
