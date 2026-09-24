@@ -5941,6 +5941,61 @@ def auth_logout(request: Request, response: Response):
     return {"ok": True}
 
 
+# ── Simulador web del bot (probar con el catálogo propio, sin WhatsApp) ─
+
+class SimulatorBody(BaseModel):
+    text: str
+    interactive: bool = False
+
+
+def _sim_normalize(r):
+    """Convierte la respuesta del bot (str o dict) a mensajes + opciones para el chat web."""
+    msgs, opts = [], []
+    if not r:
+        return msgs, opts
+    if isinstance(r, str):
+        return ([r] if r.strip() else []), opts
+    if isinstance(r, dict):
+        if r.get("text"):
+            msgs.append(r["text"])
+        if r.get("body"):
+            msgs.append(r["body"])
+        for b in (r.get("buttons") or []):
+            opts.append({"label": b, "send": b})
+        for o in (r.get("options") or []):
+            opts.append({"label": o, "send": o})
+        for sec in (r.get("sections") or []):
+            for row in (sec.get("rows") or []):
+                rid = (row.get("id") or "").strip()
+                title = (row.get("title") or "").strip()
+                send = rid if rid.upper().startswith("PICK_") else title
+                label = title + ((" — " + row["description"]) if row.get("description") else "")
+                opts.append({"label": label, "send": send})
+    return msgs, opts
+
+
+@app.post("/api/simulator/message")
+def simulator_message(body: SimulatorBody, request: Request):
+    u = get_user_from_session(request)
+    company_id = u.get("company_id")
+    if not company_id:
+        raise HTTPException(status_code=400, detail="Tu cuenta no tiene empresa")
+    text = (body.text or "").strip()[:2000]
+    if not text:
+        return {"ok": True, "messages": [], "options": []}
+    sim_from = f"sim{u.get('id') or 0}"
+    try:
+        reply = build_reply_for_company(
+            company_id, text, wa_from=sim_from,
+            is_interactive=bool(body.interactive))
+    except Exception as e:
+        log.error("SIMULATOR ERROR: %s", repr(e))
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail="Error del simulador")
+    messages, options = _sim_normalize(reply)
+    return {"ok": True, "messages": messages, "options": options}
+
+
 # ── Password reset ──────────────────────────────────────────────────────
 
 class ForgotPasswordBody(BaseModel):
