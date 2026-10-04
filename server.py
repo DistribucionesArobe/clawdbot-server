@@ -882,7 +882,7 @@ def api_contacto(body: ContactoBody):
         conn.commit()
 
         # Notify owner via WhatsApp (best effort)
-        _owner_wa = os.environ.get("OWNER_WHATSAPP", "528130850381")
+        _owner_wa = os.environ.get("OWNER_WHATSAPP", "")
         try:
             from whatsapp_api import send_whatsapp_message_twilio
             notif = (
@@ -5958,7 +5958,7 @@ def _rescue_email(kind: str, company_name: str):
             "1. Sube tu lista de precios (un Excel basta): https://www.cotizaexpress.com/carga-productos\n"
             "2. Pruébalo al instante en el simulador — escribe como cliente y ve a tu bot cotizar con TUS precios, sin conectar nada: https://www.cotizaexpress.com/simulador\n"
             "3. ¿Te gustó? Conéctalo a tu WhatsApp y listo.\n\n"
-            "Si te atoras en cualquier paso, escríbenos por WhatsApp y te ayudamos: https://wa.me/528130850381\n\n"
+            "Si te atoras en cualquier paso, responde este correo y te ayudamos.\n\n"
             "— El equipo de CotizaExpress\ncotizaexpress.com",
         )
     return (
@@ -5966,7 +5966,7 @@ def _rescue_email(kind: str, company_name: str):
         f"Hola,\n\n"
         f"Tu cuenta de CotizaExpress sigue esperando — y cada día sin bot son cotizaciones que se contestan tarde o no se contestan.\n\n"
         "Te ofrecemos ayuda directa: una videollamada de 15 minutos donde configuramos todo contigo — catálogo, WhatsApp y primera cotización.\n\n"
-        "Solo responde este correo o escríbenos por WhatsApp: https://wa.me/528130850381\n\n"
+        "Solo responde este correo y te contactamos.\n\n"
         "Y si prefieres verlo antes por tu cuenta, prueba el simulador con tus productos: https://www.cotizaexpress.com/simulador\n\n"
         "— El equipo de CotizaExpress\ncotizaexpress.com",
     )
