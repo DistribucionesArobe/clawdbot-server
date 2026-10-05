@@ -6010,12 +6010,41 @@ def cotizador_ia(body: CotizadorIABody, request: Request):
         raise HTTPException(status_code=400, detail="Pega la lista del cliente")
     conn = get_conn()
     try:
+        # ¿Catálogo vacío? Avisar claro en vez de "no encontré"
+        cur_c = conn.cursor()
+        cur_c.execute("SELECT COUNT(*) FROM pricebook_items WHERE company_id=%s", (company_id,))
+        _n_items = int(cur_c.fetchone()[0])
+        cur_c.close()
+        if _n_items == 0:
+            conn.close()
+            return {"ok": True, "encontrados": [], "dudas": [], "no_encontrados": [],
+                    "catalogo_vacio": True}
         res = bulk_match(conn, company_id, texto)
+        # Fallback: si bulk no regresó nada, buscar renglón por renglón
+        if not res:
+            res = []
+            for linea in [l.strip() for l in texto.splitlines() if l.strip()][:10]:
+                m = re.match(r"^(\d+)\s+(.{2,})$", linea)
+                qty_l = int(m.group(1)) if m else 1
+                q_l = m.group(2) if m else linea
+                try:
+                    r1 = smart_search(conn, company_id, q_l, qty=qty_l)
+                except Exception as _e1:
+                    log.warning("COTIZADOR SMART FALLBACK ERROR: %s", repr(_e1))
+                    r1 = {"status": "not_found", "item": None, "candidates": []}
+                res.append({
+                    "qty": qty_l, "raw": linea,
+                    "item": r1.get("item") if r1.get("status") == "found" else None,
+                    "candidates": r1.get("candidates") or [],
+                })
     except Exception as e:
         log.error("COTIZADOR IA ERROR: %s", repr(e))
         res = None
     finally:
-        conn.close()
+        try:
+            conn.close()
+        except Exception:
+            pass
     encontrados, dudas, no_encontrados = [], [], []
     for br in (res or []):
         item = br.get("item")
