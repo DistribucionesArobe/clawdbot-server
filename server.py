@@ -6009,6 +6009,57 @@ class CotizadorGuardarBody(BaseModel):
     idioma: str = "es"           # idioma del PDF: es | en
 
 
+@app.post("/api/cotizador/imagen")
+async def cotizador_imagen(request: Request, file: UploadFile = File(...)):
+    """Lector de imágenes: foto de una lista (escrita a mano, WhatsApp, nota, Excel)
+    → texto de renglones "cantidad producto" para alimentar al cotizador."""
+    u = get_user_from_session(request)
+    if not u.get("company_id"):
+        raise HTTPException(status_code=400, detail="Tu cuenta no tiene empresa")
+    if not openai_client:
+        raise HTTPException(status_code=503, detail="Lector de imágenes no configurado")
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="Imagen vacía")
+    if len(raw) > 8 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Imagen muy grande (máx 8 MB)")
+    mime = (file.content_type or "image/jpeg")
+    if not mime.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Sube una imagen (foto o captura)")
+    import base64 as _b64
+    data_uri = f"data:{mime};base64,{_b64.b64encode(raw).decode()}"
+    try:
+        resp = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": (
+                        "Esta imagen contiene una lista de productos, materiales o trabajos "
+                        "(puede ser escrita a mano, una captura de WhatsApp, una nota de papel, "
+                        "una foto de materiales o una tabla). Extrae los renglones y devuélvelos "
+                        "como texto plano, un renglón por concepto, en formato 'cantidad nombre' "
+                        "(ej: '2 cemento gris 50kg'). Si un renglón no trae cantidad usa 1. "
+                        "Conserva unidades y medidas tal como aparecen (m2, sqft, kg, pza). "
+                        "NO inventes precios ni conceptos que no estén en la imagen. "
+                        "Si la imagen no contiene ninguna lista legible responde exactamente: VACIO"
+                    )},
+                    {"type": "image_url", "image_url": {"url": data_uri, "detail": "high"}},
+                ],
+            }],
+            max_tokens=600,
+            timeout=45,
+        )
+        texto = (resp.choices[0].message.content or "").strip()
+    except Exception as e:
+        log.error("COTIZADOR IMAGEN ERROR: %s", repr(e))
+        raise HTTPException(status_code=502, detail="No pude leer la imagen, intenta de nuevo")
+    if not texto or texto.upper().startswith("VACIO"):
+        raise HTTPException(status_code=422, detail="No encontré una lista en la imagen. Prueba con una foto más clara.")
+    lineas = [l.strip(" -•*\t") for l in texto.splitlines() if l.strip(" -•*\t")][:40]
+    return {"ok": True, "texto": "\n".join(lineas), "renglones": len(lineas)}
+
+
 @app.post("/api/cotizador/ia")
 def cotizador_ia(body: CotizadorIABody, request: Request):
     """Convierte la lista cruda del cliente en renglones cotizados usando el catálogo."""
