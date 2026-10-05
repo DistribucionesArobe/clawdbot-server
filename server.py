@@ -6067,10 +6067,73 @@ def cotizador_guardar(body: CotizadorGuardarBody, request: Request):
                      "unit": it.get("unit") or "pza", "price": price, "qty": qty})
     if not cart:
         raise HTTPException(status_code=400, detail="Agrega al menos un renglón con cantidad y precio")
+    # Límite freemium: 1 cotización gratis al mes; plan pagado = ilimitado
+    _plan = get_company_plan_code(company_id)
+    if _plan not in ("cotizador", "cotizabot", "pro", "complete", "enterprise", "owner"):
+        conn_u = get_conn()
+        conn_u.autocommit = True
+        cur_u = conn_u.cursor()
+        try:
+            cur_u.execute("""
+                CREATE TABLE IF NOT EXISTS cotizador_usage (
+                  company_id UUID NOT NULL,
+                  ym TEXT NOT NULL,
+                  count INTEGER DEFAULT 0,
+                  PRIMARY KEY (company_id, ym)
+                )
+            """)
+            from datetime import datetime as _dtu, timezone as _tzu
+            _ym = _dtu.now(_tzu.utc).strftime("%Y-%m")
+            cur_u.execute("SELECT count FROM cotizador_usage WHERE company_id=%s AND ym=%s", (company_id, _ym))
+            _row_u = cur_u.fetchone()
+            _usados = int(_row_u[0]) if _row_u else 0
+            if _usados >= 1:
+                raise HTTPException(status_code=402, detail="limite_gratis")
+            cur_u.execute("""
+                INSERT INTO cotizador_usage (company_id, ym, count) VALUES (%s, %s, 1)
+                ON CONFLICT (company_id, ym) DO UPDATE SET count = cotizador_usage.count + 1
+            """, (company_id, _ym))
+        finally:
+            cur_u.close()
+            conn_u.close()
     folio = save_quote(company_id, (body.cliente or "cotizador-panel")[:60], cart)
     total = sum(c["price"] * c["qty"] for c in cart)
     return {"ok": True, "folio": folio, "total": total,
             "link": f"https://api.cotizaexpress.com/cotizacion/{folio}"}
+
+
+# ── Refiere a un amigo: link personal por usuario ────────────────────────
+@app.get("/api/referidos/mi-link")
+def referidos_mi_link(request: Request):
+    u = get_user_from_session(request)
+    email = (u.get("email") or "").strip().lower()
+    user_id = u.get("id")
+    if not email:
+        raise HTTPException(status_code=400, detail="Sesión inválida")
+    code = f"amigo{user_id}"
+    conn = get_conn()
+    conn.autocommit = True
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT referral_code FROM affiliates WHERE email=%s LIMIT 1", (email,))
+        row = cur.fetchone()
+        if row:
+            code = row[0]
+        else:
+            try:
+                cur.execute(
+                    "INSERT INTO affiliates (nombre, email, telefono, empresa, zona, notas, referral_code) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                    (u.get("empresa_nombre") or email, email, "", u.get("empresa_nombre") or "",
+                     "", "programa refiere-a-un-amigo", code),
+                )
+            except Exception as e:
+                log.warning("REFERIDOS CREATE ERROR: %s", repr(e))
+    finally:
+        cur.close()
+        conn.close()
+    return {"ok": True, "code": code,
+            "link": f"https://cotizaexpress.com/registro?ref={code}"}
 
 
 # ── Rescate de onboarding: emails a registros sin WhatsApp conectado ────
