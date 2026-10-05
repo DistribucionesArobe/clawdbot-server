@@ -24,7 +24,7 @@ CX_SALES_WA_API_KEY = (
 
 REGISTRO_URL = "https://cotizaexpress.com/registro"
 AGENDAR_URL = "https://calendly.com/cotizaexpress"  # update if different
-WHATSAPP_VENTAS = "+52 834 429 1628"
+WHATSAPP_VENTAS = "+52 81 3085 0381"
 
 SYSTEM_PROMPT = """Eres el asistente de ventas de CotizaExpress por WhatsApp. Tu trabajo es atender a personas interesadas en contratar CotizaExpress para su negocio.
 
@@ -48,10 +48,10 @@ Cuando un cliente del negocio envía un mensaje de WhatsApp pidiendo precios, el
 
 - **Plan Pro**: $2,000 MXN/mes (neto)
   - Todo lo de CotizaBot +
-  - Múltiples usuarios
-  - Descuentos por volumen automáticos
-  - Soporte prioritario
-  - Reportes avanzados
+  - Link de pago Mercado Pago
+  - Datos SPEI automáticos
+  - Notificaciones de pago
+  - Configuración de CLABE
 
 ## Proceso de activación
 1. Se registran en cotizaexpress.com/registro
@@ -59,13 +59,16 @@ Cuando un cliente del negocio envía un mensaje de WhatsApp pidiendo precios, el
 3. Conectan su WhatsApp Business
 4. ¡Listo! El bot comienza a responder cotizaciones
 
-La configuración toma menos de 30 minutos. Nuestro equipo ayuda con la primera carga de productos.
+Nuestro equipo ayuda con la primera carga de productos. La activación depende de la conexión de WhatsApp; no prometas un plazo fijo ni que conservará la app y sus chats hasta verificar la modalidad de conexión.
 
 ## Reglas de conversación
 - Sé amable, profesional y entusiasta pero no empalagoso
 - Responde en español mexicano natural
 - Sé breve — máximo 2-3 párrafos por mensaje
-- Si preguntan algo técnico que no sabes, diles que un asesor los contactará
+- Si preguntan algo técnico que no sabes, ofrece solicitar ayuda al equipo, sin afirmar que ya lo notificaste
+- Si piden una persona, solicita nombre y horario preferido, sin prometer una llamada confirmada
+- Nunca indiques eliminar la cuenta de WhatsApp
+- No inventes disponibilidad, promociones, confirmaciones de pago ni citas
 - Siempre busca llevarlos a registrarse o agendar una llamada
 - Si preguntan por el programa de afiliados, dirígelos a cotizaexpress.com/afiliados
 - NO inventes funciones que no existen
@@ -151,15 +154,15 @@ def handle_sales_button(button_title: str) -> str | dict:
 
     if "registr" in title_lower:
         return (
-            f"¡Excelente! Regístrate aquí y en menos de 30 minutos tu bot estará funcionando:\n\n"
+            f"¡Excelente! Puedes empezar tu registro aquí:\n\n"
             f"👉 {REGISTRO_URL}\n\n"
             f"Si necesitas ayuda con la configuración, escríbenos y te guiamos paso a paso."
         )
     elif "llamada" in title_lower or "agendar" in title_lower:
         return (
             f"Con gusto te agendamos una llamada para mostrarte cómo funciona.\n\n"
-            f"📱 Escríbele directo a Alejandro: {WHATSAPP_VENTAS}\n\n"
-            f"O si prefieres, dime tu nombre y horario y te contactamos nosotros."
+            "Dime tu nombre y horario preferido para solicitar atención del equipo.\n\n"
+            "La llamada queda pendiente de confirmación por una persona."
         )
     elif "precio" in title_lower:
         return {
@@ -173,9 +176,9 @@ def handle_sales_button(button_title: str) -> str | dict:
                 "• Catálogo ilimitado\n\n"
                 "*Pro* — $2,000 MXN/mes\n"
                 "• Todo lo anterior +\n"
-                "• Múltiples usuarios\n"
-                "• Descuentos por volumen\n"
-                "• Soporte prioritario\n\n"
+                "• Links de pago Mercado Pago\n"
+                "• Datos SPEI automáticos\n"
+                "• Notificaciones de pago\n\n"
                 "Sin contratos. Cancela cuando quieras."
             ),
             "body": "¿Listo para empezar?",
@@ -193,7 +196,7 @@ def _fallback_reply(user_text: str) -> str:
         "• Plan CotizaBot: $1,000 MXN/mes\n"
         "• Plan Pro: $2,000 MXN/mes\n\n"
         f"Regístrate aquí: {REGISTRO_URL}\n"
-        f"O escríbele a Alejandro al {WHATSAPP_VENTAS} para más info."
+        "Si prefieres atención de una persona, deja aquí tu nombre y horario preferido."
     )
 
 
