@@ -5444,7 +5444,7 @@ def download_quote_pdf(
 
 
 @app.get("/cotizacion/{folio}")
-def public_quote_pdf(folio: str):
+def public_quote_pdf(folio: str, download: int = 0):
     """Public endpoint — customers can view/download their cotización PDF (no auth)."""
     conn = get_conn()
     cur = conn.cursor()
@@ -5500,11 +5500,12 @@ def public_quote_pdf(folio: str):
         discount_amount=pdf_disc_amount,
     )
     filename = f"cotizacion_{q_folio}.pdf"
+    _disp = "attachment" if download else "inline"
     return StreamingResponse(
         iter([pdf_bytes]),
         media_type="application/pdf",
         headers={
-            "Content-Disposition": f'inline; filename="{filename}"',
+            "Content-Disposition": f'{_disp}; filename="{filename}"',
             "Cache-Control": "no-cache",
         },
     )
