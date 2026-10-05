@@ -2819,7 +2819,7 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
     pagar_triggers = {"pagar", "pago", "como pago", "cómo pago", "quiero pagar", "datos de pago", "datos bancarios", "transferencia"}
     if any(pt == tnorm or pt in tnorm for pt in pagar_triggers):
         _plan = get_company_plan_code(company_id)
-        if _plan not in ("cotizabot", "pro", "enterprise", "owner"):
+        if _plan not in ("cotizabot", "pro", "enterprise", "owner", "cotizabot_usa", "pro_usa"):
             # No plan — redirect to human agent
             return "Escribe *asesor* para que te atiendan con los datos de pago 🙏"
         try:
@@ -6160,7 +6160,7 @@ def cotizador_guardar(body: CotizadorGuardarBody, request: Request):
         raise HTTPException(status_code=400, detail="Agrega al menos un renglón con cantidad y precio")
     # Límite freemium: 1 cotización gratis al mes; plan pagado = ilimitado
     _plan = get_company_plan_code(company_id)
-    if _plan not in ("cotizador", "cotizabot", "pro", "complete", "enterprise", "owner"):
+    if _plan not in ("cotizador", "cotizabot", "pro", "complete", "enterprise", "owner", "cotizador_usa", "cotizabot_usa", "pro_usa"):
         conn_u = get_conn()
         conn_u.autocommit = True
         cur_u = conn_u.cursor()
@@ -6329,6 +6329,120 @@ async def _onboarding_rescue_loop():
 async def _start_onboarding_rescue_loop():
     asyncio.create_task(_onboarding_rescue_loop())
     log.info("Onboarding rescue loop started (every %ss)", ONBOARDING_RESCUE_INTERVAL_SEC)
+
+
+# ── Renovación mensual (planes duran 30 días desde el pago) ─────────────
+
+def _es_plan_usa(plan_code: str) -> bool:
+    return (plan_code or "").endswith("_usa")
+
+
+def _run_renewal_once():
+    """Diario: migra activos sin vencimiento, recuerda a 5 días, y baja a free al vencer."""
+    conn = get_conn()
+    conn.autocommit = True
+    cur = conn.cursor()
+    try:
+        cur.execute("ALTER TABLE companies ADD COLUMN IF NOT EXISTS paid_until TIMESTAMPTZ")
+        cur.execute("ALTER TABLE companies ADD COLUMN IF NOT EXISTS renewal_reminder_at TIMESTAMPTZ")
+
+        # 1) Planes pagados activos sin fecha: arrancan sus 30 días hoy
+        cur.execute("""
+            UPDATE companies SET paid_until = now() + interval '30 days'
+            WHERE plan_code NOT IN ('free', 'owner') AND plan_code IS NOT NULL
+              AND paid_until IS NULL
+              AND (trial_end IS NULL OR trial_end < now())
+        """)
+        if cur.rowcount:
+            log.info("RENEWAL: %s empresas migradas a vencimiento de 30 dias", cur.rowcount)
+
+        # 2) Recordatorio a <=5 días del vencimiento (una vez por ciclo)
+        cur.execute("""
+            SELECT id::text, name, email, plan_code, paid_until FROM companies
+            WHERE plan_code NOT IN ('free', 'owner') AND plan_code IS NOT NULL
+              AND paid_until IS NOT NULL
+              AND paid_until > now() AND paid_until <= now() + interval '5 days'
+              AND (renewal_reminder_at IS NULL OR renewal_reminder_at < now() - interval '6 days')
+        """)
+        for cid, cname, cemail, cplan, cuntil in cur.fetchall():
+            if not cemail or cemail in _RESCUE_EXCLUDE:
+                continue
+            usa = _es_plan_usa(cplan)
+            dias = max(1, (cuntil - datetime.now(timezone.utc)).days)
+            if usa:
+                subject = "Tu plan de CotizaBot vence pronto — renueva en 1 minuto"
+                body = (
+                    f"Hola {cname or ''},\n\n"
+                    f"Tu plan vence en {dias} dia(s). Para seguir haciendo estimates ilimitados, "
+                    "renueva aqui (el cobro sale en pesos MXN, tu tarjeta lo convierte a dolares):\n\n"
+                    "https://cotizaexpress.com/precios\n\n"
+                    "Si no renuevas, tu cuenta pasa al plan gratis (1 estimate al mes) "
+                    "pero no pierdes tu catalogo ni tus datos.\n\n— CotizaExpress"
+                )
+            else:
+                subject = "Tu plan de CotizaBot vence pronto — renueva en 1 minuto"
+                body = (
+                    f"Hola {cname or ''},\n\n"
+                    f"Tu plan vence en {dias} dia(s). Para que tu negocio siga cotizando sin parar, "
+                    "renueva aqui:\n\n"
+                    "https://cotizaexpress.com/precios\n\n"
+                    "Si no renuevas, tu cuenta pasa al plan gratis (1 cotizacion al mes) "
+                    "pero no pierdes tu catalogo ni tus datos.\n\n— CotizaExpress"
+                )
+            try:
+                if _send_email(cemail, subject, body):
+                    cur.execute("UPDATE companies SET renewal_reminder_at = now() WHERE id=%s", (cid,))
+                    log.info("RENEWAL REMINDER: %s (%s) plan=%s vence=%s", cname, cemail, cplan, cuntil)
+            except Exception as e:
+                log.error("RENEWAL REMINDER ERROR %s: %s", cemail, repr(e))
+
+        # 3) Vencidos: bajar a free y avisar
+        cur.execute("""
+            SELECT id::text, name, email, plan_code FROM companies
+            WHERE plan_code NOT IN ('free', 'owner') AND plan_code IS NOT NULL
+              AND paid_until IS NOT NULL AND paid_until < now()
+              AND (trial_end IS NULL OR trial_end < now())
+        """)
+        vencidos = cur.fetchall()
+        for cid, cname, cemail, cplan in vencidos:
+            cur.execute("UPDATE companies SET plan_code='free', updated_at=now() WHERE id=%s", (cid,))
+            log.info("RENEWAL EXPIRED: %s plan=%s -> free", cname, cplan)
+            if cemail and cemail not in _RESCUE_EXCLUDE:
+                try:
+                    _send_email(
+                        cemail,
+                        "Tu plan de CotizaBot vencio — reactivalo cuando quieras",
+                        (
+                            f"Hola {cname or ''},\n\n"
+                            "Tu plan mensual vencio y tu cuenta paso al plan gratis. "
+                            "Tu catalogo y tus datos siguen ahi.\n\n"
+                            "Reactiva en 1 minuto: https://cotizaexpress.com/precios\n\n— CotizaExpress"
+                        ),
+                    )
+                except Exception as e:
+                    log.error("RENEWAL EXPIRED EMAIL ERROR %s: %s", cemail, repr(e))
+    finally:
+        cur.close()
+        conn.close()
+
+
+RENEWAL_INTERVAL_SEC = int(os.getenv("RENEWAL_INTERVAL_SEC", str(6 * 3600)))
+
+
+async def _renewal_loop():
+    await asyncio.sleep(120)
+    while True:
+        try:
+            await asyncio.to_thread(_run_renewal_once)
+        except Exception as _e:
+            log.error("RENEWAL LOOP ERROR: %s", repr(_e))
+        await asyncio.sleep(RENEWAL_INTERVAL_SEC)
+
+
+@app.on_event("startup")
+async def _start_renewal_loop():
+    asyncio.create_task(_renewal_loop())
+    log.info("Renewal loop started (every %ss)", RENEWAL_INTERVAL_SEC)
 
 
 # ── Simulador web del bot (probar con el catálogo propio, sin WhatsApp) ─

@@ -32,6 +32,11 @@ _MP_PLAN_PRICES = {
     "cotizabot":   1000.00,   # $1,000 MXN neto
     "pro":         2000.00,   # $2,000 MXN neto
     "enterprise":  4000.00,   # $4,000 MXN neto
+    # Planes USA: mismos productos, precio anunciado en USD, cobrado en MXN
+    # (pegged ~18.0 MXN/USD, un poco abajo para nunca cobrar de más)
+    "cotizador_usa": 269.00,   # ≈ $15 USD
+    "cotizabot_usa": 879.00,   # ≈ $49 USD
+    "pro_usa":       1789.00,  # ≈ $99 USD
 }
 
 _MP_PLAN_NAMES = {
@@ -39,6 +44,9 @@ _MP_PLAN_NAMES = {
     "cotizabot":   "CotizaBot - Plan Mensual",
     "pro":         "CotizaBot Pro - Plan Mensual",
     "enterprise":  "CotizaBot Enterprise - Plan Mensual",
+    "cotizador_usa": "Cotizador IA USA - Monthly Plan ($15 USD)",
+    "cotizabot_usa": "CotizaBot USA - Monthly Plan ($49 USD)",
+    "pro_usa":       "CotizaBot Pro USA - Monthly Plan ($99 USD)",
 }
 
 
@@ -288,10 +296,15 @@ async def mp_webhook(request: Request):
                     try:
                         conn = get_conn()
                         cur = conn.cursor()
+                        cur.execute("ALTER TABLE companies ADD COLUMN IF NOT EXISTS paid_until TIMESTAMPTZ")
+                        cur.execute("ALTER TABLE companies ADD COLUMN IF NOT EXISTS renewal_reminder_at TIMESTAMPTZ")
                         cur.execute(
                             """
                             UPDATE companies
-                            SET plan_code=%s, mp_payment_id=%s, updated_at=now()
+                            SET plan_code=%s, mp_payment_id=%s,
+                                paid_until=now() + interval '30 days',
+                                renewal_reminder_at=NULL,
+                                updated_at=now()
                             WHERE id=%s
                             RETURNING id
                             """,
