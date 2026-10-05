@@ -5778,7 +5778,14 @@ def register(body: RegisterBody):
         cur = conn.cursor()
 
         slug = re.sub(r'[^a-z0-9]+', '-', email.split("@")[0].lower()).strip('-')
-        cur.execute("INSERT INTO companies (name, slug) VALUES (%s, %s) RETURNING id", (email, slug or None))
+        try:
+            cur.execute("INSERT INTO companies (name, slug) VALUES (%s, %s) RETURNING id", (email, slug or None))
+        except IntegrityError:
+            # Slug ocupado (homónimo u orfandad de una purga anterior): sufijo único
+            conn.rollback()
+            import random as _rnd
+            slug = f"{slug}-{_rnd.randint(1000, 9999)}" if slug else None
+            cur.execute("INSERT INTO companies (name, slug) VALUES (%s, %s) RETURNING id", (email, slug or None))
         company_id = cur.fetchone()[0]
 
         token = generate_api_key()
