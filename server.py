@@ -5735,7 +5735,8 @@ def _purge_account(email: str):
             for table in ("item_embeddings", "pricebook_items", "wa_quote_state",
                           "wa_conversation_windows", "wa_usage_monthly",
                           "search_misses", "conversations", "api_keys", "quotes",
-                          "onboarding_emails"):
+                          "onboarding_emails", "cotizador_usage",
+                          "affiliate_referrals", "affiliate_commissions"):
                 try:
                     col = "user_id" if table == "onboarding_emails" else "company_id"
                     val = user_id if table == "onboarding_emails" else company_id
@@ -5746,8 +5747,12 @@ def _purge_account(email: str):
         if company_id:
             try:
                 cur.execute("DELETE FROM companies WHERE id = %s", (company_id,))
-            except Exception:
-                pass
+            except Exception as _del_e:
+                log.warning("PURGE: no pude borrar company %s (%r); libero slug", company_id, _del_e)
+                try:
+                    cur.execute("UPDATE companies SET slug = slug || '-purged-' || floor(random()*100000)::text WHERE id = %s", (company_id,))
+                except Exception:
+                    pass
         log.info("TEST EMAIL PURGED: %s (user=%s company=%s)", email, user_id, company_id)
         return True
     finally:
