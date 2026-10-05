@@ -405,7 +405,7 @@ def admin_set_plan(company_id: str, request: Request, body: AdminSetPlanBody):
     """Manually set a company's plan_code (admin only)."""
     _require_admin(request)
 
-    if body.plan_code not in ("free", "cotizabot", "pro", "enterprise", "owner"):
+    if body.plan_code not in ("free", "cotizador", "cotizabot", "pro", "enterprise", "owner"):
         raise HTTPException(status_code=400, detail="plan_code debe ser free, cotizabot, pro, enterprise u owner")
 
     conn = None

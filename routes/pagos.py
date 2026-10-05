@@ -28,12 +28,14 @@ router = APIRouter()
 _MP_ACCESS_TOKEN = (os.getenv("MP_ACCESS_TOKEN") or "").strip()
 
 _MP_PLAN_PRICES = {
+    "cotizador":   299.00,    # $299 MXN — cotizador IA sin WhatsApp
     "cotizabot":   1000.00,   # $1,000 MXN neto
     "pro":         2000.00,   # $2,000 MXN neto
     "enterprise":  4000.00,   # $4,000 MXN neto
 }
 
 _MP_PLAN_NAMES = {
+    "cotizador":   "Cotizador IA - Plan Mensual",
     "cotizabot":   "CotizaBot - Plan Mensual",
     "pro":         "CotizaBot Pro - Plan Mensual",
     "enterprise":  "CotizaBot Enterprise - Plan Mensual",

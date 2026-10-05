@@ -5941,6 +5941,87 @@ def auth_logout(request: Request, response: Response):
     return {"ok": True}
 
 
+# ── Cotizador IA: cotizaciones manuales desde el panel (sin WhatsApp) ───
+
+class CotizadorIABody(BaseModel):
+    texto: str
+
+class CotizadorGuardarBody(BaseModel):
+    items: list   # [{name, qty, unit, price, sku?}]
+    cliente: str = ""
+
+
+@app.post("/api/cotizador/ia")
+def cotizador_ia(body: CotizadorIABody, request: Request):
+    """Convierte la lista cruda del cliente en renglones cotizados usando el catálogo."""
+    u = get_user_from_session(request)
+    company_id = u.get("company_id")
+    if not company_id:
+        raise HTTPException(status_code=400, detail="Tu cuenta no tiene empresa")
+    texto = (body.texto or "").strip()[:4000]
+    if not texto:
+        raise HTTPException(status_code=400, detail="Pega la lista del cliente")
+    conn = get_conn()
+    try:
+        res = bulk_match(conn, company_id, texto)
+    except Exception as e:
+        log.error("COTIZADOR IA ERROR: %s", repr(e))
+        res = None
+    finally:
+        conn.close()
+    encontrados, dudas, no_encontrados = [], [], []
+    for br in (res or []):
+        item = br.get("item")
+        qty = int(br.get("qty") or 1)
+        if item and item.get("price") is not None:
+            encontrados.append({
+                "name": item.get("name"), "qty": qty,
+                "unit": item.get("unit") or "pza",
+                "price": float(item.get("price") or 0.0),
+                "sku": item.get("sku") or "",
+            })
+        elif br.get("candidates"):
+            dudas.append({
+                "raw": br.get("raw"), "qty": qty,
+                "candidates": [{
+                    "name": c.get("name"), "unit": c.get("unit") or "pza",
+                    "price": float(c.get("price") or 0.0), "sku": c.get("sku") or "",
+                } for c in br["candidates"][:5]],
+            })
+        else:
+            no_encontrados.append(br.get("raw") or "")
+    if not res:
+        no_encontrados = [texto]
+    return {"ok": True, "encontrados": encontrados, "dudas": dudas, "no_encontrados": no_encontrados}
+
+
+@app.post("/api/cotizador/guardar")
+def cotizador_guardar(body: CotizadorGuardarBody, request: Request):
+    """Guarda la cotización editada y regresa folio + link público."""
+    u = get_user_from_session(request)
+    company_id = u.get("company_id")
+    if not company_id:
+        raise HTTPException(status_code=400, detail="Tu cuenta no tiene empresa")
+    cart = []
+    for it in (body.items or []):
+        try:
+            qty = int(it.get("qty") or 0)
+            price = float(it.get("price") or 0)
+        except (TypeError, ValueError):
+            continue
+        name = (it.get("name") or "").strip()
+        if not name or qty <= 0:
+            continue
+        cart.append({"sku": it.get("sku") or "", "name": name,
+                     "unit": it.get("unit") or "pza", "price": price, "qty": qty})
+    if not cart:
+        raise HTTPException(status_code=400, detail="Agrega al menos un renglón con cantidad y precio")
+    folio = save_quote(company_id, (body.cliente or "cotizador-panel")[:60], cart)
+    total = sum(c["price"] * c["qty"] for c in cart)
+    return {"ok": True, "folio": folio, "total": total,
+            "link": f"https://api.cotizaexpress.com/cotizacion/{folio}"}
+
+
 # ── Rescate de onboarding: emails a registros sin WhatsApp conectado ────
 ONBOARDING_RESCUE_INTERVAL_SEC = 6 * 3600  # cada 6 horas
 _RESCUE_EXCLUDE = {"ealejandro.robledo@gmail.com", "pedrozv12@hotmail.com"}
