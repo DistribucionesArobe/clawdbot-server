@@ -5454,7 +5454,8 @@ def public_quote_pdf(folio: str, download: int = 0):
             SELECT q.folio, q.client_phone, q.items, q.total,
                    c.name, c.address_text, c.rfc,
                    c.owner_phone, c.email, c.logo_url, c.brand_color,
-                   c.discount_threshold, c.discount_percent
+                   c.discount_threshold, c.discount_percent,
+                   COALESCE(q.currency, 'MXN') AS currency
             FROM quotes q
             JOIN companies c ON c.id = q.company_id
             WHERE q.folio = %s
@@ -5469,7 +5470,7 @@ def public_quote_pdf(folio: str, download: int = 0):
             q_folio, client_phone, items_json, total,
             company_name, address, rfc,
             owner_phone, company_email, logo_url, brand_color,
-            disc_threshold, disc_percent,
+            disc_threshold, disc_percent, q_currency,
         ) = row
         items = items_json if isinstance(items_json, list) else json.loads(items_json or "[]")
         company_dict = {
@@ -5498,6 +5499,7 @@ def public_quote_pdf(folio: str, download: int = 0):
         folio=q_folio,
         discount_percent=pdf_disc_percent,
         discount_amount=pdf_disc_amount,
+        currency=q_currency or "MXN",
     )
     filename = f"cotizacion_{q_folio}.pdf"
     _disp = "attachment" if download else "inline"
@@ -5996,6 +5998,7 @@ class CotizadorGuardarBody(BaseModel):
     cliente: str = ""
     vat_pct: float = 16.0        # IVA editable (16 default; 0, 8, 19, etc.)
     vat_incluido: bool = True    # True: los precios ya traen IVA; False: agregarlo
+    moneda: str = "MXN"          # MXN o USD (paisanos en USA)
 
 
 @app.post("/api/cotizador/ia")
@@ -6126,8 +6129,18 @@ def cotizador_guardar(body: CotizadorGuardarBody, request: Request):
             cur_u.close()
             conn_u.close()
     folio = save_quote(company_id, (body.cliente or "cotizador-panel")[:60], cart)
+    # Guardar moneda (columna idempotente)
+    _moneda = "USD" if (body.moneda or "").upper() == "USD" else "MXN"
+    try:
+        conn_m = get_conn(); conn_m.autocommit = True
+        cur_m = conn_m.cursor()
+        cur_m.execute("ALTER TABLE quotes ADD COLUMN IF NOT EXISTS currency TEXT DEFAULT 'MXN'")
+        cur_m.execute("UPDATE quotes SET currency=%s WHERE folio=%s", (_moneda, folio))
+        cur_m.close(); conn_m.close()
+    except Exception as _e:
+        log.warning("CURRENCY SAVE ERROR: %s", repr(_e))
     total = sum(c["price"] * c["qty"] for c in cart)
-    return {"ok": True, "folio": folio, "total": total,
+    return {"ok": True, "folio": folio, "total": total, "moneda": _moneda,
             "link": f"https://api.cotizaexpress.com/cotizacion/{folio}"}
 
 

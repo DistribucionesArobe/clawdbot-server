@@ -138,6 +138,7 @@ def build_quote_pdf(
     folio: Optional[str] = None,
     discount_percent: Optional[float] = None,
     discount_amount: Optional[float] = None,
+    currency: str = "MXN",
 ) -> bytes:
     if folio is None:
         folio = generate_folio()
@@ -284,7 +285,7 @@ def build_quote_pdf(
 
     # ── BLOQUE TOTAL ──────────────────────────────────────────────────────────
     total_table = Table(
-        [[Paragraph("TOTAL  (IVA incluido)", S["total_label"]),
+        [[Paragraph("TOTAL  (USD, tax incluido)" if currency == "USD" else "TOTAL  (IVA incluido)", S["total_label"]),
           Paragraph(_fmt_price(display_total), S["total_value"])]],
         colWidths=["60%", "40%"],
     )
