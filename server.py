@@ -5703,9 +5703,53 @@ def admin_delete_test_user(request: Request, body: AdminDeleteTestUserBody):
 
 # ── Auth endpoints ──────────────────────────────────────────────────────────
 
+# ── Correos de prueba: se pueden re-registrar infinitas veces ────────────
+TEST_EMAILS = {"morty_92@hotmail.com"}
+
+def _purge_account(email: str):
+    """Borra usuario + empresa + datos (solo para TEST_EMAILS)."""
+    conn = get_conn()
+    conn.autocommit = True
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT id, company_id FROM users WHERE email = %s LIMIT 1", (email,))
+        row = cur.fetchone()
+        if not row:
+            return False
+        user_id, company_id = row[0], str(row[1]) if row[1] else None
+        try:
+            cur.execute("DELETE FROM sessions WHERE user_id = %s", (user_id,))
+        except Exception:
+            pass
+        if company_id:
+            for table in ("item_embeddings", "pricebook_items", "wa_quote_state",
+                          "wa_conversation_windows", "wa_usage_monthly",
+                          "search_misses", "conversations", "api_keys", "quotes",
+                          "onboarding_emails"):
+                try:
+                    col = "user_id" if table == "onboarding_emails" else "company_id"
+                    val = user_id if table == "onboarding_emails" else company_id
+                    cur.execute(f"DELETE FROM {table} WHERE {col} = %s", (val,))
+                except Exception:
+                    pass
+        cur.execute("DELETE FROM users WHERE id = %s", (user_id,))
+        if company_id:
+            try:
+                cur.execute("DELETE FROM companies WHERE id = %s", (company_id,))
+            except Exception:
+                pass
+        log.info("TEST EMAIL PURGED: %s (user=%s company=%s)", email, user_id, company_id)
+        return True
+    finally:
+        cur.close()
+        conn.close()
+
+
 @app.post("/api/auth/register")
 def register(body: RegisterBody):
     email = (body.email or "").strip().lower()
+    if email in TEST_EMAILS:
+        _purge_account(email)
     password = (body.password or "").strip()
     if not email:
         raise HTTPException(status_code=400, detail="Email requerido")
