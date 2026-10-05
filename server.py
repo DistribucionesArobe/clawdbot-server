@@ -6068,7 +6068,12 @@ async def cotizador_imagen(request: Request, file: UploadFile = File(...)):
         raise HTTPException(status_code=502, detail="No pude leer la imagen, intenta de nuevo")
     if not texto or texto.upper().startswith("VACIO"):
         raise HTTPException(status_code=422, detail="No encontré una lista en la imagen. Prueba con una foto más clara.")
-    lineas = [l.strip(" -•*\t") for l in texto.splitlines() if l.strip(" -•*\t")][:40]
+    lineas = []
+    for l in texto.splitlines():
+        l = l.replace("`", "").strip(" -•*\t")
+        if len(l) > 1:
+            lineas.append(l)
+    lineas = lineas[:40]
     return {"ok": True, "texto": "\n".join(lineas), "renglones": len(lineas)}
 
 
@@ -6097,7 +6102,17 @@ def cotizador_ia(body: CotizadorIABody, request: Request):
         # Fallback: si bulk no regresó nada, buscar renglón por renglón
         if not res:
             res = []
-            for linea in [l.strip() for l in texto.splitlines() if l.strip()][:10]:
+            _lineas_raw = []
+            for _l in texto.splitlines():
+                _l = _l.strip()
+                if not _l:
+                    continue
+                # Listas en un solo renglón separadas por comas o puntos y comas
+                if _l.count(",") >= 2 or _l.count(";") >= 2:
+                    _lineas_raw.extend(p.strip() for p in re.split(r"[,;]", _l) if len(p.strip()) > 2)
+                else:
+                    _lineas_raw.append(_l)
+            for linea in _lineas_raw[:25]:
                 m = re.match(r"^(\d+)\s+(.{2,})$", linea)
                 qty_l = int(m.group(1)) if m else 1
                 q_l = m.group(2) if m else linea
