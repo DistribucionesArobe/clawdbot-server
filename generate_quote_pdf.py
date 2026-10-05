@@ -140,6 +140,7 @@ def build_quote_pdf(
     discount_amount: Optional[float] = None,
     currency: str = "MXN",
     lang: str = "es",
+    promo: bool = False,
 ) -> bytes:
     if folio is None:
         folio = generate_folio()
@@ -326,11 +327,19 @@ def build_quote_pdf(
         S["footer"],
     ))
     story.append(Spacer(1, 3))
-    story.append(Paragraph(
-        'Generado por <a href="https://cotizaexpress.com"><u>cotizaexpress.com</u></a>'
-        f"  •  {fecha_str}",
-        S["footer"],
-    ))
+    if promo:
+        _promo_txt = (
+            'Need estimates too? Make yours free at <a href="https://cotizaexpress.com/usa"><u>cotizaexpress.com/usa</u></a>'
+            if en else
+            '¿Tú también mandas cotizaciones? Haz la tuya gratis en <a href="https://cotizaexpress.com"><u>cotizaexpress.com</u></a>'
+        )
+        story.append(Paragraph(_promo_txt + f"  •  {fecha_str}", S["footer"]))
+    else:
+        story.append(Paragraph(
+            'Generado por <a href="https://cotizaexpress.com"><u>cotizaexpress.com</u></a>'
+            f"  •  {fecha_str}",
+            S["footer"],
+        ))
 
     doc.build(story)
     return buf.getvalue()

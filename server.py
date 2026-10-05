@@ -5461,7 +5461,8 @@ def public_quote_pdf(folio: str, download: int = 0):
                    c.owner_phone, c.email, c.logo_url, c.brand_color,
                    c.discount_threshold, c.discount_percent,
                    COALESCE(q.currency, 'MXN') AS currency,
-                   COALESCE(q.pdf_lang, 'es') AS pdf_lang
+                   COALESCE(q.pdf_lang, 'es') AS pdf_lang,
+                   COALESCE(c.plan_code, 'free') AS plan_code
             FROM quotes q
             JOIN companies c ON c.id = q.company_id
             WHERE q.folio = %s
@@ -5476,7 +5477,7 @@ def public_quote_pdf(folio: str, download: int = 0):
             q_folio, client_phone, items_json, total,
             company_name, address, rfc,
             owner_phone, company_email, logo_url, brand_color,
-            disc_threshold, disc_percent, q_currency, q_pdf_lang,
+            disc_threshold, disc_percent, q_currency, q_pdf_lang, q_plan_code,
         ) = row
         items = items_json if isinstance(items_json, list) else json.loads(items_json or "[]")
         company_dict = {
@@ -5507,6 +5508,7 @@ def public_quote_pdf(folio: str, download: int = 0):
         discount_amount=pdf_disc_amount,
         currency=q_currency or "MXN",
         lang=q_pdf_lang or "es",
+        promo=(q_plan_code or "free") == "free",
     )
     filename = f"cotizacion_{q_folio}.pdf"
     _disp = "attachment" if download else "inline"
