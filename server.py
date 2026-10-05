@@ -5447,15 +5447,21 @@ def download_quote_pdf(
 def public_quote_pdf(folio: str, download: int = 0):
     """Public endpoint — customers can view/download their cotización PDF (no auth)."""
     conn = get_conn()
+    conn.autocommit = True
     cur = conn.cursor()
     try:
+        try:
+            cur.execute("ALTER TABLE quotes ADD COLUMN IF NOT EXISTS pdf_lang TEXT DEFAULT 'es'")
+        except Exception:
+            pass
         cur.execute(
             """
             SELECT q.folio, q.client_phone, q.items, q.total,
                    c.name, c.address_text, c.rfc,
                    c.owner_phone, c.email, c.logo_url, c.brand_color,
                    c.discount_threshold, c.discount_percent,
-                   COALESCE(q.currency, 'MXN') AS currency
+                   COALESCE(q.currency, 'MXN') AS currency,
+                   COALESCE(q.pdf_lang, 'es') AS pdf_lang
             FROM quotes q
             JOIN companies c ON c.id = q.company_id
             WHERE q.folio = %s
@@ -5470,7 +5476,7 @@ def public_quote_pdf(folio: str, download: int = 0):
             q_folio, client_phone, items_json, total,
             company_name, address, rfc,
             owner_phone, company_email, logo_url, brand_color,
-            disc_threshold, disc_percent, q_currency,
+            disc_threshold, disc_percent, q_currency, q_pdf_lang,
         ) = row
         items = items_json if isinstance(items_json, list) else json.loads(items_json or "[]")
         company_dict = {
@@ -5500,6 +5506,7 @@ def public_quote_pdf(folio: str, download: int = 0):
         discount_percent=pdf_disc_percent,
         discount_amount=pdf_disc_amount,
         currency=q_currency or "MXN",
+        lang=q_pdf_lang or "es",
     )
     filename = f"cotizacion_{q_folio}.pdf"
     _disp = "attachment" if download else "inline"
@@ -5999,6 +6006,7 @@ class CotizadorGuardarBody(BaseModel):
     vat_pct: float = 16.0        # IVA editable (16 default; 0, 8, 19, etc.)
     vat_incluido: bool = True    # True: los precios ya traen IVA; False: agregarlo
     moneda: str = "MXN"          # MXN o USD (paisanos en USA)
+    idioma: str = "es"           # idioma del PDF: es | en
 
 
 @app.post("/api/cotizador/ia")
@@ -6135,7 +6143,9 @@ def cotizador_guardar(body: CotizadorGuardarBody, request: Request):
         conn_m = get_conn(); conn_m.autocommit = True
         cur_m = conn_m.cursor()
         cur_m.execute("ALTER TABLE quotes ADD COLUMN IF NOT EXISTS currency TEXT DEFAULT 'MXN'")
-        cur_m.execute("UPDATE quotes SET currency=%s WHERE folio=%s", (_moneda, folio))
+        cur_m.execute("ALTER TABLE quotes ADD COLUMN IF NOT EXISTS pdf_lang TEXT DEFAULT 'es'")
+        _lang = "en" if (body.idioma or "").lower().startswith("en") else "es"
+        cur_m.execute("UPDATE quotes SET currency=%s, pdf_lang=%s WHERE folio=%s", (_moneda, _lang, folio))
         cur_m.close(); conn_m.close()
     except Exception as _e:
         log.warning("CURRENCY SAVE ERROR: %s", repr(_e))

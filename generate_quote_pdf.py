@@ -139,12 +139,31 @@ def build_quote_pdf(
     discount_percent: Optional[float] = None,
     discount_amount: Optional[float] = None,
     currency: str = "MXN",
+    lang: str = "es",
 ) -> bytes:
     if folio is None:
         folio = generate_folio()
 
+    en = (lang or "es").lower().startswith("en")
     now = datetime.now(_MX_TZ)
-    fecha_str = now.strftime("%d/%m/%Y  %H:%M")
+    fecha_str = now.strftime("%m/%d/%Y  %H:%M") if en else now.strftime("%d/%m/%Y  %H:%M")
+
+    if en:
+        L = {
+            "doc": "ESTIMATE", "fecha": "Date", "cliente": "Customer",
+            "producto": "Description", "cant": "Qty", "unidad": "Unit",
+            "punit": "Unit Price", "subtotal": "Subtotal",
+            "total": "TOTAL  (USD, tax included)" if currency == "USD" else "TOTAL  (tax included)",
+            "footer": "This estimate is valid for 72 hours. Prices subject to change without notice.",
+        }
+    else:
+        L = {
+            "doc": "COTIZACIÓN", "fecha": "Fecha", "cliente": "Cliente",
+            "producto": "Producto", "cant": "Cant.", "unidad": "Unidad",
+            "punit": "P. Unit.", "subtotal": "Subtotal",
+            "total": "TOTAL  (USD, tax incluido)" if currency == "USD" else "TOTAL  (IVA incluido)",
+            "footer": "Esta cotización tiene vigencia de 72 horas. Precios sujetos a cambio sin previo aviso.",
+        }
 
     brand_hex = (company.get("brand_color") or _DEFAULT_PRIMARY).strip()
     primary   = _hex_to_color(brand_hex)
@@ -191,11 +210,11 @@ def build_quote_pdf(
         left_content.append(Paragraph(line, S["company_sub"]))
 
     right_content = [
-        Paragraph("COTIZACIÓN", S["folio_label"]),
+        Paragraph(L["doc"], S["folio_label"]),
         Paragraph(folio, S["folio_value"]),
-        Paragraph(f"Fecha: {fecha_str}", S["folio_label"]),
+        Paragraph(f"{L['fecha']}: {fecha_str}", S["folio_label"]),
         Spacer(1, 4),
-        Paragraph(f"Cliente: {client_phone}", S["folio_label"]),
+        Paragraph(f"{L['cliente']}: {client_phone}", S["folio_label"]),
     ]
 
     header_table = Table([[left_content, right_content]], colWidths=["62%", "38%"])
@@ -214,11 +233,11 @@ def build_quote_pdf(
     col_widths = [0.8*cm, 8.6*cm, 1.7*cm, 1.7*cm, 2.2*cm, 2.6*cm]
     headers = [
         Paragraph("#",          S["col_header"]),
-        Paragraph("Producto",   S["col_header"]),
-        Paragraph("Cant.",      S["col_header"]),
-        Paragraph("Unidad",     S["col_header"]),
-        Paragraph("P. Unit.",   S["col_header"]),
-        Paragraph("Subtotal",   S["col_header"]),
+        Paragraph(L["producto"], S["col_header"]),
+        Paragraph(L["cant"],     S["col_header"]),
+        Paragraph(L["unidad"],   S["col_header"]),
+        Paragraph(L["punit"],    S["col_header"]),
+        Paragraph(L["subtotal"], S["col_header"]),
     ]
     table_data = [headers]
     total = 0.0
@@ -268,7 +287,7 @@ def build_quote_pdf(
         discount_data = [
             [Paragraph("Subtotal", S["body"]),
              Paragraph(_fmt_price(total), S["body_right"])],
-            [Paragraph(f"Descuento {discount_percent:.0f}% por volumen", S["body"]),
+            [Paragraph((f"Volume discount {discount_percent:.0f}%" if en else f"Descuento {discount_percent:.0f}% por volumen"), S["body"]),
              Paragraph(f"-{_fmt_price(discount_amount)}", S["body_right"])],
         ]
         discount_table = Table(discount_data, colWidths=["70%", "30%"])
@@ -285,7 +304,7 @@ def build_quote_pdf(
 
     # ── BLOQUE TOTAL ──────────────────────────────────────────────────────────
     total_table = Table(
-        [[Paragraph("TOTAL  (USD, tax incluido)" if currency == "USD" else "TOTAL  (IVA incluido)", S["total_label"]),
+        [[Paragraph(L["total"], S["total_label"]),
           Paragraph(_fmt_price(display_total), S["total_value"])]],
         colWidths=["60%", "40%"],
     )
@@ -303,7 +322,7 @@ def build_quote_pdf(
     # ── PIE ───────────────────────────────────────────────────────────────────
     story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#cccccc"), spaceAfter=5))
     story.append(Paragraph(
-        "Esta cotización tiene vigencia de 72 horas. Precios sujetos a cambio sin previo aviso.",
+        L["footer"],
         S["footer"],
     ))
     story.append(Spacer(1, 3))
