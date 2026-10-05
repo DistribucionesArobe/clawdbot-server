@@ -5949,6 +5949,8 @@ class CotizadorIABody(BaseModel):
 class CotizadorGuardarBody(BaseModel):
     items: list   # [{name, qty, unit, price, sku?}]
     cliente: str = ""
+    vat_pct: float = 16.0        # IVA editable (16 default; 0, 8, 19, etc.)
+    vat_incluido: bool = True    # True: los precios ya traen IVA; False: agregarlo
 
 
 @app.post("/api/cotizador/ia")
@@ -6012,6 +6014,10 @@ def cotizador_guardar(body: CotizadorGuardarBody, request: Request):
         name = (it.get("name") or "").strip()
         if not name or qty <= 0:
             continue
+        # Si los precios NO incluyen IVA, se agrega aquí para que el PDF
+        # (que muestra "TOTAL IVA incluido") cuadre exacto.
+        if not body.vat_incluido:
+            price = round(price * (1 + max(0.0, float(body.vat_pct or 0)) / 100.0), 2)
         cart.append({"sku": it.get("sku") or "", "name": name,
                      "unit": it.get("unit") or "pza", "price": price, "qty": qty})
     if not cart:
