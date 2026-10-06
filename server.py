@@ -6037,7 +6037,7 @@ async def generador_imagen(request: Request, file: UploadFile = File(...)):
     _dia, _cnt = _GEN_IMG_USO.get(_ip, (_hoy, 0))
     if _dia != _hoy:
         _cnt = 0
-    if _cnt >= 10:
+    if _cnt >= 5:
         raise HTTPException(status_code=429, detail="Límite de fotos por hoy — crea tu cuenta gratis para seguir")
     raw = await file.read()
     if not raw:
