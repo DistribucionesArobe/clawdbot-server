@@ -6343,7 +6343,7 @@ def cotizador_guardar(body: CotizadorGuardarBody, request: Request):
             continue
         # Si los precios NO incluyen IVA, se agrega aquí para que el PDF
         # (que muestra "TOTAL IVA incluido") cuadre exacto.
-        if not body.vat_incluido:
+        if not body.vat_incluido and it.get("gravable", True) is not False:
             price = round(price * (1 + max(0.0, float(body.vat_pct or 0)) / 100.0), 2)
         cart.append({"sku": it.get("sku") or "", "name": name,
                      "unit": it.get("unit") or "pza", "price": price, "qty": qty})
