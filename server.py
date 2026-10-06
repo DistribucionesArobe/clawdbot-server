@@ -6023,6 +6023,66 @@ class CotizadorGuardarBody(BaseModel):
     idioma: str = "es"           # idioma del PDF: es | en
 
 
+# Lector de imágenes PÚBLICO para el generador (sin cuenta) — con tope por IP
+_GEN_IMG_USO = {}  # ip -> (yyyymmdd, count)
+
+@app.post("/api/generador/imagen")
+async def generador_imagen(request: Request, file: UploadFile = File(...)):
+    """Como /api/cotizador/imagen pero sin sesión: alimenta el generador público."""
+    if not openai_client:
+        raise HTTPException(status_code=503, detail="Lector de imágenes no configurado")
+    _ip = (request.headers.get("x-forwarded-for") or (request.client.host if request.client else "?")).split(",")[0].strip()
+    from datetime import datetime as _dtg, timezone as _tzg
+    _hoy = _dtg.now(_tzg.utc).strftime("%Y%m%d")
+    _dia, _cnt = _GEN_IMG_USO.get(_ip, (_hoy, 0))
+    if _dia != _hoy:
+        _cnt = 0
+    if _cnt >= 10:
+        raise HTTPException(status_code=429, detail="Límite de fotos por hoy — crea tu cuenta gratis para seguir")
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="Imagen vacía")
+    if len(raw) > 6 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Imagen muy grande (máx 6 MB)")
+    mime = (file.content_type or "image/jpeg")
+    if not mime.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Sube una imagen (foto o captura)")
+    import base64 as _b64
+    data_uri = f"data:{mime};base64,{_b64.b64encode(raw).decode()}"
+    try:
+        resp = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": (
+                        "Esta imagen contiene una lista de productos, materiales o trabajos "
+                        "(escrita a mano, captura de WhatsApp, nota o tabla). Extrae los renglones "
+                        "como texto plano, un renglón por concepto, formato 'cantidad nombre'. "
+                        "Si no trae cantidad usa 1. Conserva unidades y medidas. NO inventes precios "
+                        "ni conceptos. Si no hay lista legible responde exactamente: VACIO"
+                    )},
+                    {"type": "image_url", "image_url": {"url": data_uri, "detail": "high"}},
+                ],
+            }],
+            max_tokens=600,
+            timeout=45,
+        )
+        texto = (resp.choices[0].message.content or "").strip()
+    except Exception as e:
+        log.error("GENERADOR IMAGEN ERROR: %s", repr(e))
+        raise HTTPException(status_code=502, detail="No pude leer la imagen, intenta de nuevo")
+    if not texto or texto.upper().startswith("VACIO"):
+        raise HTTPException(status_code=422, detail="No encontré una lista en la imagen. Prueba con una foto más clara.")
+    lineas = []
+    for l in texto.splitlines():
+        l = l.replace("`", "").strip(" -•*\t")
+        if len(l) > 1:
+            lineas.append(l)
+    _GEN_IMG_USO[_ip] = (_hoy, _cnt + 1)
+    return {"ok": True, "texto": "\n".join(lineas[:40]), "renglones": len(lineas[:40])}
+
+
 @app.post("/api/cotizador/imagen")
 async def cotizador_imagen(request: Request, file: UploadFile = File(...)):
     """Lector de imágenes: foto de una lista (escrita a mano, WhatsApp, nota, Excel)
