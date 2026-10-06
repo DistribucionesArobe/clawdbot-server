@@ -34,7 +34,7 @@ _MP_PLAN_PRICES = {
     "enterprise":  4000.00,   # $4,000 MXN neto
     # Planes USA: mismos productos, precio anunciado en USD, cobrado en MXN
     # (pegged ~18.0 MXN/USD, un poco abajo para nunca cobrar de más)
-    "cotizador_usa": 269.00,   # ≈ $15 USD
+    "cotizador_usa": 519.00,   # ≈ $29 USD
     "cotizabot_usa": 879.00,   # ≈ $49 USD
     "pro_usa":       1789.00,  # ≈ $99 USD
 }
@@ -44,7 +44,7 @@ _MP_PLAN_NAMES = {
     "cotizabot":   "CotizaBot - Plan Mensual",
     "pro":         "CotizaBot Pro - Plan Mensual",
     "enterprise":  "CotizaBot Enterprise - Plan Mensual",
-    "cotizador_usa": "Cotizador IA USA - Monthly Plan ($15 USD)",
+    "cotizador_usa": "Cotizador IA USA - Monthly Plan ($29 USD)",
     "cotizabot_usa": "CotizaBot USA - Monthly Plan ($49 USD)",
     "pro_usa":       "CotizaBot Pro USA - Monthly Plan ($99 USD)",
 }
