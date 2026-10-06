@@ -5452,6 +5452,8 @@ def public_quote_pdf(folio: str, download: int = 0):
     try:
         try:
             cur.execute("ALTER TABLE quotes ADD COLUMN IF NOT EXISTS pdf_lang TEXT DEFAULT 'es'")
+            cur.execute("ALTER TABLE quotes ADD COLUMN IF NOT EXISTS tax_info JSONB")
+            cur.execute("ALTER TABLE quotes ADD COLUMN IF NOT EXISTS terms JSONB")
         except Exception:
             pass
         cur.execute(
@@ -5462,7 +5464,8 @@ def public_quote_pdf(folio: str, download: int = 0):
                    c.discount_threshold, c.discount_percent,
                    COALESCE(q.currency, 'MXN') AS currency,
                    COALESCE(q.pdf_lang, 'es') AS pdf_lang,
-                   COALESCE(c.plan_code, 'free') AS plan_code
+                   COALESCE(c.plan_code, 'free') AS plan_code,
+                   q.tax_info, q.terms
             FROM quotes q
             JOIN companies c ON c.id = q.company_id
             WHERE q.folio = %s
@@ -5478,7 +5481,12 @@ def public_quote_pdf(folio: str, download: int = 0):
             company_name, address, rfc,
             owner_phone, company_email, logo_url, brand_color,
             disc_threshold, disc_percent, q_currency, q_pdf_lang, q_plan_code,
+            q_tax_info, q_terms,
         ) = row
+        if isinstance(q_tax_info, str):
+            q_tax_info = json.loads(q_tax_info or "null")
+        if isinstance(q_terms, str):
+            q_terms = json.loads(q_terms or "null")
         items = items_json if isinstance(items_json, list) else json.loads(items_json or "[]")
         company_dict = {
             "name":        company_name or "CotizaExpress",
@@ -5504,12 +5512,14 @@ def public_quote_pdf(folio: str, download: int = 0):
         items=items,
         client_phone=client_phone or "",
         folio=q_folio,
-        discount_percent=pdf_disc_percent,
-        discount_amount=pdf_disc_amount,
+        discount_percent=(None if q_tax_info else pdf_disc_percent),
+        discount_amount=(None if q_tax_info else pdf_disc_amount),
         currency=q_currency or "MXN",
         lang=q_pdf_lang or "es",
         promo=(q_plan_code or "free") == "free",
         change_order=(q_change := _co_info_safe(q_folio)),
+        tax=q_tax_info or None,
+        terms=q_terms or None,
     )
     filename = (f"orden_cambio_{q_folio}.pdf" if q_change else f"cotizacion_{q_folio}.pdf")
     _disp = "attachment" if download else "inline"
@@ -6123,6 +6133,7 @@ class CotizadorGuardarBody(BaseModel):
     moneda: str = "MXN"          # MXN o USD (paisanos en USA)
     idioma: str = "es"           # idioma del PDF: es | en
     parent_folio: str = ""       # si viene: es ORDEN DE CAMBIO sobre ese folio
+    condiciones: dict = {}       # validez_dias, anticipo_pct, incluye, no_incluye, licencia, notas
 
 
 # Lector de imágenes PÚBLICO para el generador (sin cuenta) — con tope por IP
@@ -6341,12 +6352,13 @@ def cotizador_guardar(body: CotizadorGuardarBody, request: Request):
         name = (it.get("name") or "").strip()
         if not name or qty <= 0:
             continue
-        # Si los precios NO incluyen IVA, se agrega aquí para que el PDF
-        # (que muestra "TOTAL IVA incluido") cuadre exacto.
-        if not body.vat_incluido and it.get("gravable", True) is not False:
-            price = round(price * (1 + max(0.0, float(body.vat_pct or 0)) / 100.0), 2)
+        # Se guardan precios SIN impuesto; el PDF desglosa subtotal, impuesto y total.
+        _pct_t = max(0.0, float(body.vat_pct or 0)) / 100.0
+        _grav = it.get("gravable", True) is not False
+        if body.vat_incluido and _grav and _pct_t > 0:
+            price = round(price / (1 + _pct_t), 2)
         cart.append({"sku": it.get("sku") or "", "name": name,
-                     "unit": it.get("unit") or "pza", "price": price, "qty": qty})
+                     "unit": it.get("unit") or "pza", "price": price, "qty": qty, "_grav": _grav})
     if not cart:
         raise HTTPException(status_code=400, detail="Agrega al menos un renglón con cantidad y precio")
     _parent = (body.parent_folio or "").strip().upper()
@@ -6390,6 +6402,28 @@ def cotizador_guardar(body: CotizadorGuardarBody, request: Request):
             cur_u.close()
             conn_u.close()
     folio = save_quote(company_id, (body.cliente or "cotizador-panel")[:60], cart)
+    _pct_t = max(0.0, float(body.vat_pct or 0)) / 100.0
+    _sub = round(sum(c["price"] * c["qty"] for c in cart), 2)
+    _sub_grav = sum(c["price"] * c["qty"] for c in cart if c.get("_grav", True))
+    _tax_amt = round(_sub_grav * _pct_t, 2)
+    _tax_info = {
+        "subtotal": _sub, "pct": round(_pct_t * 100, 4), "amount": _tax_amt,
+        "total": round(_sub + _tax_amt, 2),
+        "solo_material": any(not c.get("_grav", True) for c in cart) and any(c.get("_grav", True) for c in cart),
+    }
+    _c = body.condiciones or {}
+    def _txt(k, n=1500):
+        return str(_c.get(k) or "").strip()[:n]
+    try:
+        _vd = int(float(_c.get("validez_dias") or 0)) or (30 if (body.moneda or "").upper() == "USD" else 15)
+    except (TypeError, ValueError):
+        _vd = 30
+    try:
+        _ap = max(0, min(100, int(float(_c.get("anticipo_pct") or 0))))
+    except (TypeError, ValueError):
+        _ap = 0
+    _terms = {"validez_dias": _vd, "anticipo_pct": _ap, "incluye": _txt("incluye"),
+              "no_incluye": _txt("no_incluye"), "licencia": _txt("licencia", 60), "notas": _txt("notas")}
     # Guardar moneda (columna idempotente)
     _moneda = "USD" if (body.moneda or "").upper() == "USD" else "MXN"
     try:
@@ -6402,10 +6436,14 @@ def cotizador_guardar(body: CotizadorGuardarBody, request: Request):
         if _parent:
             _co_migrar(cur_m)
             cur_m.execute("UPDATE quotes SET doc_type='change_order', parent_folio=%s WHERE folio=%s", (_parent, folio))
+        cur_m.execute("ALTER TABLE quotes ADD COLUMN IF NOT EXISTS tax_info JSONB")
+        cur_m.execute("ALTER TABLE quotes ADD COLUMN IF NOT EXISTS terms JSONB")
+        cur_m.execute("UPDATE quotes SET total=%s, tax_info=%s::jsonb, terms=%s::jsonb WHERE folio=%s",
+                      (_tax_info["total"], json.dumps(_tax_info), json.dumps(_terms), folio))
         cur_m.close(); conn_m.close()
     except Exception as _e:
         log.warning("CURRENCY SAVE ERROR: %s", repr(_e))
-    total = sum(c["price"] * c["qty"] for c in cart)
+    total = _tax_info["total"]
     _resp = {"ok": True, "folio": folio, "total": total, "moneda": _moneda,
              "link": f"https://api.cotizaexpress.com/cotizacion/{folio}"}
     if _parent:

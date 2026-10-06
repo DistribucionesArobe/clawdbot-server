@@ -142,7 +142,12 @@ def build_quote_pdf(
     lang: str = "es",
     promo: bool = False,
     change_order: Optional[dict] = None,
+    tax: Optional[dict] = None,
+    terms: Optional[dict] = None,
 ) -> bytes:
+    """tax: {subtotal, pct, amount, total, solo_material} — desglosa el impuesto.
+    terms: {validez_dias, anticipo_pct, incluye, no_incluye, licencia, notas}."""
+    from xml.sax.saxutils import escape as _x
     if folio is None:
         folio = generate_folio()
 
@@ -206,8 +211,9 @@ def build_quote_pdf(
     for line in filter(None, [
         f"RFC: {rfc}" if rfc else None,
         f"Email: {email}" if email else None,
-        f"Tel / WhatsApp: {phone_disp}" if phone_disp else None,
+        (f"Phone: {phone_disp}" if en else f"Tel / WhatsApp: {phone_disp}") if phone_disp else None,
         address if address else None,
+        ((("License #: " if en else "Licencia: ") + _x(str(terms.get("licencia")))) if terms and terms.get("licencia") else None),
     ]):
         left_content.append(Paragraph(line, S["company_sub"]))
 
@@ -305,8 +311,36 @@ def build_quote_pdf(
         story.append(Spacer(1, 0.2*cm))
 
     # ── BLOQUE TOTAL ──────────────────────────────────────────────────────────
+    _total_label = L["total"]
+    if tax:
+        _pct = float(tax.get("pct") or 0)
+        _pct_txt = (f"{_pct:g}%")
+        if currency == "USD":
+            _tl = (f"Sales tax ({_pct_txt})" if en else f"Sales tax ({_pct_txt})")
+        else:
+            _tl = (f"Tax ({_pct_txt})" if en else f"IVA ({_pct_txt})")
+        if tax.get("solo_material"):
+            _tl += (" — materials only" if en else " — solo materiales")
+        _rows_t = [
+            [Paragraph("Subtotal", S["body"]), Paragraph(_fmt_price(float(tax.get("subtotal") or 0)), S["body_right"])],
+        ]
+        if _pct > 0:
+            _rows_t.append([Paragraph(_tl, S["body"]), Paragraph(_fmt_price(float(tax.get("amount") or 0)), S["body_right"])])
+        _tt = Table(_rows_t, colWidths=["70%", "30%"])
+        _tt.setStyle(TableStyle([
+            ("ALIGN",         (1,0),(1,-1), "RIGHT"),
+            ("TOPPADDING",    (0,0),(-1,-1), 4),
+            ("BOTTOMPADDING", (0,0),(-1,-1), 4),
+            ("LEFTPADDING",   (0,0),(-1,-1), 5),
+            ("RIGHTPADDING",  (0,0),(-1,-1), 5),
+            ("LINEBELOW",     (0,-1),(-1,-1), 0.5, colors.HexColor("#cccccc")),
+        ]))
+        story.append(_tt)
+        story.append(Spacer(1, 0.15*cm))
+        display_total = float(tax.get("total") or display_total)
+        _total_label = ("TOTAL (USD)" if currency == "USD" else "TOTAL") if en else ("TOTAL (USD)" if currency == "USD" else "TOTAL (MXN)")
     total_table = Table(
-        [[Paragraph(L["total"], S["total_label"]),
+        [[Paragraph(_total_label, S["total_label"]),
           Paragraph(_fmt_price(display_total), S["total_value"])]],
         colWidths=["60%", "40%"],
     )
@@ -366,10 +400,45 @@ def build_quote_pdf(
 
     story.append(Spacer(1, 0.7*cm))
 
+    # ── CONDICIONES + ACEPTACIÓN (cotizaciones del Cotizador) ─────────────────
+    if terms:
+        def _sec(titulo, texto):
+            if texto and str(texto).strip():
+                story.append(Paragraph(f"<b>{titulo}</b>", S["body"]))
+                for ln in str(texto).strip().splitlines():
+                    if ln.strip():
+                        story.append(Paragraph("• " + _x(ln.strip()), S["body"]))
+                story.append(Spacer(1, 4))
+        _sec("Scope — included" if en else "Incluye", terms.get("incluye"))
+        _sec("Not included" if en else "No incluye", terms.get("no_incluye"))
+        _ant = int(float(terms.get("anticipo_pct") or 0))
+        if _ant > 0:
+            _pago = (f"{_ant}% deposit to schedule the work; balance due upon completion."
+                     if en else f"Anticipo del {_ant}% para agendar el trabajo; el resto al terminar.")
+            story.append(Paragraph(f"<b>{'Payment terms' if en else 'Condiciones de pago'}</b>", S["body"]))
+            story.append(Paragraph(_pago, S["body"]))
+            story.append(Spacer(1, 4))
+        _sec("Notes" if en else "Notas", terms.get("notas"))
+        story.append(Spacer(1, 0.5*cm))
+        _firma = Table([
+            [Paragraph("_______________________________", S["body"]), Paragraph("________________", S["body"])],
+            [Paragraph(("Customer acceptance — name and signature" if en else "Aceptación del cliente — nombre y firma"), S["footer"]),
+             Paragraph(("Date" if en else "Fecha"), S["footer"])],
+        ], colWidths=["65%", "35%"])
+        _firma.setStyle(TableStyle([("LEFTPADDING", (0,0),(-1,-1), 0), ("TOPPADDING", (0,0),(-1,-1), 2)]))
+        story.append(_firma)
+        story.append(Spacer(1, 0.5*cm))
+
     # ── PIE ───────────────────────────────────────────────────────────────────
     story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#cccccc"), spaceAfter=5))
+    if terms:
+        _dias = int(float(terms.get("validez_dias") or 30))
+        _vig = (f"This estimate is valid for {_dias} days from the date above."
+                if en else f"Esta cotización es válida por {_dias} días a partir de la fecha.")
+    else:
+        _vig = L["footer"]
     story.append(Paragraph(
-        L["footer"],
+        _vig,
         S["footer"],
     ))
     story.append(Spacer(1, 3))
@@ -382,7 +451,7 @@ def build_quote_pdf(
         story.append(Paragraph(_promo_txt + f"  •  {fecha_str}", S["footer"]))
     else:
         story.append(Paragraph(
-            'Generado por <a href="https://cotizaexpress.com"><u>cotizaexpress.com</u></a>'
+            ('Created with ' if en else 'Generado con ') + '<a href="https://cotizaexpress.com"><u>cotizaexpress.com</u></a>'
             f"  •  {fecha_str}",
             S["footer"],
         ))
