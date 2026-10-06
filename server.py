@@ -45,7 +45,7 @@ from fastapi import (
     Query,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, HTMLResponse
 from pydantic import BaseModel, validator
 
 
@@ -5509,8 +5509,9 @@ def public_quote_pdf(folio: str, download: int = 0):
         currency=q_currency or "MXN",
         lang=q_pdf_lang or "es",
         promo=(q_plan_code or "free") == "free",
+        change_order=(q_change := _co_info_safe(q_folio)),
     )
-    filename = f"cotizacion_{q_folio}.pdf"
+    filename = (f"orden_cambio_{q_folio}.pdf" if q_change else f"cotizacion_{q_folio}.pdf")
     _disp = "attachment" if download else "inline"
     return StreamingResponse(
         iter([pdf_bytes]),
@@ -5520,6 +5521,106 @@ def public_quote_pdf(folio: str, download: int = 0):
             "Cache-Control": "no-cache",
         },
     )
+
+
+def _co_pagina(folio: str, request: Request, aprobar_nombre: str = None):
+    import html as _h
+    conn = get_conn()
+    conn.autocommit = True
+    cur = conn.cursor()
+    try:
+        _co_migrar(cur)
+        cur.execute("""
+            SELECT q.folio, q.total, COALESCE(q.currency,'MXN'), COALESCE(q.pdf_lang,'es'),
+                   q.doc_type, q.parent_folio, q.approved_at, q.approved_name, q.items, c.name
+            FROM quotes q JOIN companies c ON c.id = q.company_id
+            WHERE q.folio=%s LIMIT 1
+        """, (folio.upper(),))
+        r = cur.fetchone()
+        if not r or (r[4] or "quote") != "change_order":
+            return HTMLResponse("<h2 style='font-family:sans-serif;text-align:center;margin-top:80px'>Orden de cambio no encontrada</h2>", status_code=404)
+        q_folio, q_total, cur_code, lang, _t, parent, approved_at, approved_name, items_json, empresa = r
+        en = (lang or "es").startswith("en")
+        if aprobar_nombre is not None and not approved_at:
+            _ip = (request.headers.get("x-forwarded-for") or (request.client.host if request.client else "")).split(",")[0].strip()
+            cur.execute("UPDATE quotes SET approved_at=now(), approved_name=%s, approved_ip=%s WHERE folio=%s AND approved_at IS NULL",
+                        ((aprobar_nombre or "").strip()[:80], _ip[:60], q_folio))
+            cur.execute("SELECT approved_at, approved_name FROM quotes WHERE folio=%s", (q_folio,))
+            approved_at, approved_name = cur.fetchone()
+            log.info("CHANGE ORDER APPROVED: %s by %r", q_folio, approved_name)
+        cur.execute("SELECT total FROM quotes WHERE folio=%s", (parent,))
+        pt = cur.fetchone()
+        p_total = float(pt[0]) if pt and pt[0] is not None else 0.0
+    finally:
+        cur.close()
+        conn.close()
+    items = items_json if isinstance(items_json, list) else json.loads(items_json or "[]")
+    sym = "USD " if cur_code == "USD" else "$"
+    f = lambda v: f"{sym}{float(v):,.2f}"
+    filas = "".join(
+        f"<tr><td>{_h.escape(str(it.get('name','')))}</td><td style='text-align:center'>{it.get('qty','')}</td><td style='text-align:right'>{f(it.get('subtotal',0))}</td></tr>"
+        for it in items)
+    T = {
+        "titulo": "Change order" if en else "Orden de cambio",
+        "de": "from" if en else "de",
+        "sobre": "Extra work on estimate" if en else "Trabajo adicional sobre la cotización",
+        "orig": "Original estimate" if en else "Cotización original",
+        "este": "This change" if en else "Este cambio",
+        "nuevo": "New project total" if en else "Nuevo total de la obra",
+        "nombre": "Your name" if en else "Tu nombre",
+        "boton": "✅ I approve this change" if en else "✅ Apruebo este cambio",
+        "aviso": "By approving, you agree to the extra work and the new total." if en else "Al aprobar, aceptas el trabajo adicional y el nuevo total.",
+        "ok": "Approved" if en else "Aprobada",
+        "pdf": "View PDF" if en else "Ver PDF",
+    }
+    if approved_at:
+        estado = f"<div class='ok'>✔ {T['ok']}{(' — ' + _h.escape(approved_name)) if approved_name else ''} · {approved_at.strftime('%Y-%m-%d %H:%M')} UTC</div>"
+    else:
+        estado = f"""<form method='post'>
+          <input name='nombre' placeholder='{T['nombre']}' required maxlength='80'>
+          <button type='submit'>{T['boton']}</button>
+          <p class='aviso'>{T['aviso']}</p>
+        </form>"""
+    html = f"""<!doctype html><html lang='{'en' if en else 'es'}'><head><meta charset='utf-8'>
+<meta name='viewport' content='width=device-width,initial-scale=1'><title>{T['titulo']} {q_folio}</title>
+<style>
+body{{font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#f1f5f9;margin:0;padding:24px;color:#0f172a}}
+.card{{max-width:460px;margin:0 auto;background:#fff;border-radius:20px;padding:24px;box-shadow:0 10px 30px rgba(0,0,0,.08)}}
+h1{{font-size:20px;margin:0 0 4px}} .sub{{color:#64748b;font-size:14px;margin-bottom:16px}}
+table{{width:100%;border-collapse:collapse;font-size:14px;margin-bottom:12px}} td{{padding:6px 4px;border-bottom:1px solid #e2e8f0}}
+.res div{{display:flex;justify-content:space-between;padding:4px 0;font-size:14px}} .res .big{{font-weight:800;font-size:16px;border-top:2px solid #059669;margin-top:4px;padding-top:8px}}
+input{{width:100%;box-sizing:border-box;padding:12px;border:1px solid #cbd5e1;border-radius:12px;font-size:16px;margin:16px 0 10px}}
+button{{width:100%;padding:14px;border:0;border-radius:12px;background:#059669;color:#fff;font-size:17px;font-weight:700}}
+.aviso{{color:#94a3b8;font-size:12px;text-align:center}} .ok{{background:#ecfdf5;color:#047857;font-weight:700;padding:14px;border-radius:12px;text-align:center;margin-top:16px}}
+a{{color:#059669}}
+</style></head><body><div class='card'>
+<h1>{T['titulo']} {q_folio}</h1>
+<div class='sub'>{_h.escape(empresa or '')} · {T['sobre']} {parent}</div>
+<table>{filas}</table>
+<div class='res'>
+  <div><span>{T['orig']} {parent}</span><span>{f(p_total)}</span></div>
+  <div><span>{T['este']}</span><span>{f(q_total)}</span></div>
+  <div class='big'><span>{T['nuevo']}</span><span>{f(p_total + float(q_total or 0))}</span></div>
+</div>
+{estado}
+<p style='text-align:center;font-size:13px;margin-top:14px'><a href='/cotizacion/{q_folio}'>{T['pdf']}</a></p>
+</div></body></html>"""
+    return HTMLResponse(html)
+
+
+@app.get("/cotizacion/{folio}/aprobar")
+def change_order_view(folio: str, request: Request):
+    return _co_pagina(folio, request)
+
+
+@app.post("/cotizacion/{folio}/aprobar")
+async def change_order_approve(folio: str, request: Request):
+    try:
+        form = await request.form()
+        nombre = (form.get("nombre") or "").strip()
+    except Exception:
+        nombre = ""
+    return _co_pagina(folio, request, aprobar_nombre=nombre)
 
 
 @app.get("/api/company/me")
@@ -6021,6 +6122,7 @@ class CotizadorGuardarBody(BaseModel):
     vat_incluido: bool = True    # True: los precios ya traen IVA; False: agregarlo
     moneda: str = "MXN"          # MXN o USD (paisanos en USA)
     idioma: str = "es"           # idioma del PDF: es | en
+    parent_folio: str = ""       # si viene: es ORDEN DE CAMBIO sobre ese folio
 
 
 # Lector de imágenes PÚBLICO para el generador (sin cuenta) — con tope por IP
@@ -6247,6 +6349,17 @@ def cotizador_guardar(body: CotizadorGuardarBody, request: Request):
                      "unit": it.get("unit") or "pza", "price": price, "qty": qty})
     if not cart:
         raise HTTPException(status_code=400, detail="Agrega al menos un renglón con cantidad y precio")
+    _parent = (body.parent_folio or "").strip().upper()
+    if _parent:
+        _cp = get_conn()
+        try:
+            _cc = _cp.cursor()
+            _cc.execute("SELECT 1 FROM quotes WHERE folio=%s AND company_id=%s::uuid LIMIT 1", (_parent, company_id))
+            if not _cc.fetchone():
+                raise HTTPException(status_code=404, detail=f"No encontré la cotización {_parent} en tu cuenta")
+            _cc.close()
+        finally:
+            _cp.close()
     # Límite freemium: 1 cotización gratis al mes; plan pagado = ilimitado
     _plan = get_company_plan_code(company_id)
     if _plan not in ("cotizador", "cotizabot", "pro", "complete", "enterprise", "owner", "cotizador_usa", "cotizabot_usa", "pro_usa"):
@@ -6286,12 +6399,60 @@ def cotizador_guardar(body: CotizadorGuardarBody, request: Request):
         cur_m.execute("ALTER TABLE quotes ADD COLUMN IF NOT EXISTS pdf_lang TEXT DEFAULT 'es'")
         _lang = "en" if (body.idioma or "").lower().startswith("en") else "es"
         cur_m.execute("UPDATE quotes SET currency=%s, pdf_lang=%s WHERE folio=%s", (_moneda, _lang, folio))
+        if _parent:
+            _co_migrar(cur_m)
+            cur_m.execute("UPDATE quotes SET doc_type='change_order', parent_folio=%s WHERE folio=%s", (_parent, folio))
         cur_m.close(); conn_m.close()
     except Exception as _e:
         log.warning("CURRENCY SAVE ERROR: %s", repr(_e))
     total = sum(c["price"] * c["qty"] for c in cart)
-    return {"ok": True, "folio": folio, "total": total, "moneda": _moneda,
-            "link": f"https://api.cotizaexpress.com/cotizacion/{folio}"}
+    _resp = {"ok": True, "folio": folio, "total": total, "moneda": _moneda,
+             "link": f"https://api.cotizaexpress.com/cotizacion/{folio}"}
+    if _parent:
+        _resp["parent_folio"] = _parent
+        _resp["aprobar_link"] = f"https://api.cotizaexpress.com/cotizacion/{folio}/aprobar"
+    return _resp
+
+
+def _co_migrar(cur):
+    """Columnas de órdenes de cambio (idempotente)."""
+    cur.execute("ALTER TABLE quotes ADD COLUMN IF NOT EXISTS doc_type TEXT DEFAULT 'quote'")
+    cur.execute("ALTER TABLE quotes ADD COLUMN IF NOT EXISTS parent_folio TEXT")
+    cur.execute("ALTER TABLE quotes ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ")
+    cur.execute("ALTER TABLE quotes ADD COLUMN IF NOT EXISTS approved_name TEXT")
+    cur.execute("ALTER TABLE quotes ADD COLUMN IF NOT EXISTS approved_ip TEXT")
+
+
+def _co_info_safe(folio: str):
+    try:
+        _c = get_conn(); _c.autocommit = True
+        _k = _c.cursor()
+        try:
+            return _co_info(_k, folio)
+        finally:
+            _k.close(); _c.close()
+    except Exception as _e:
+        log.warning("CO INFO ERROR: %r", _e)
+        return None
+
+
+def _co_info(cur, folio: str):
+    """Regresa dict de orden de cambio o None si es cotización normal."""
+    _co_migrar(cur)
+    cur.execute("SELECT doc_type, parent_folio, approved_at, approved_name FROM quotes WHERE folio=%s", (folio,))
+    r = cur.fetchone()
+    if not r or (r[0] or "quote") != "change_order" or not r[1]:
+        return None
+    cur.execute("SELECT total FROM quotes WHERE folio=%s", (r[1],))
+    pt = cur.fetchone()
+    ap = r[2]
+    return {
+        "parent_folio": r[1],
+        "parent_total": float(pt[0]) if pt and pt[0] is not None else 0.0,
+        "approved_at": ap.strftime("%Y-%m-%d %H:%M UTC") if ap else None,
+        "approved_name": r[3] or "",
+        "approve_link": f"https://api.cotizaexpress.com/cotizacion/{folio}/aprobar",
+    }
 
 
 # ── Refiere a un amigo: link personal por usuario ────────────────────────

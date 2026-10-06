@@ -141,6 +141,7 @@ def build_quote_pdf(
     currency: str = "MXN",
     lang: str = "es",
     promo: bool = False,
+    change_order: Optional[dict] = None,
 ) -> bytes:
     if folio is None:
         folio = generate_folio()
@@ -211,7 +212,7 @@ def build_quote_pdf(
         left_content.append(Paragraph(line, S["company_sub"]))
 
     right_content = [
-        Paragraph(L["doc"], S["folio_label"]),
+        Paragraph(((("CHANGE ORDER" if en else "ORDEN DE CAMBIO")) if change_order else L["doc"]), S["folio_label"]),
         Paragraph(folio, S["folio_value"]),
         Paragraph(f"{L['fecha']}: {fecha_str}", S["folio_label"]),
         Spacer(1, 4),
@@ -318,6 +319,51 @@ def build_quote_pdf(
         ("VALIGN",        (0,0),(-1,-1),"MIDDLE"),
     ]))
     story.append(total_table)
+
+    if change_order:
+        _orig = float(change_order.get("parent_total") or 0)
+        _este = float(display_total)
+        _nuevo = _orig + _este
+        _pf = change_order.get("parent_folio") or ""
+        if en:
+            _rows = [
+                [f"Original estimate {_pf}", _fmt_price(_orig)],
+                ["This change order", _fmt_price(_este)],
+                ["NEW PROJECT TOTAL", _fmt_price(_nuevo)],
+            ]
+        else:
+            _rows = [
+                [f"Cotización original {_pf}", _fmt_price(_orig)],
+                ["Esta orden de cambio", _fmt_price(_este)],
+                ["NUEVO TOTAL DE LA OBRA", _fmt_price(_nuevo)],
+            ]
+        story.append(Spacer(1, 0.3*cm))
+        co_table = Table(
+            [[Paragraph(a, S["body"]), Paragraph(b, S["body_right"])] for a, b in _rows],
+            colWidths=["70%", "30%"],
+        )
+        co_table.setStyle(TableStyle([
+            ("LINEABOVE",     (0,2),(-1,2), 1.0, primary),
+            ("TOPPADDING",    (0,0),(-1,-1), 4),
+            ("BOTTOMPADDING", (0,0),(-1,-1), 4),
+            ("LEFTPADDING",   (0,0),(-1,-1), 5),
+            ("RIGHTPADDING",  (0,0),(-1,-1), 5),
+        ]))
+        story.append(co_table)
+        story.append(Spacer(1, 0.3*cm))
+        _ap = change_order.get("approved_at")
+        if _ap:
+            _quien = change_order.get("approved_name") or ""
+            _txt = (f"APPROVED by the customer{(' (' + _quien + ')') if _quien else ''} on {_ap}"
+                    if en else
+                    f"APROBADA por el cliente{(' (' + _quien + ')') if _quien else ''} el {_ap}")
+        else:
+            _link = change_order.get("approve_link") or ""
+            _txt = (f"Pending customer approval — approve at: {_link}"
+                    if en else
+                    f"Pendiente de aprobación del cliente — apruébala en: {_link}")
+        story.append(Paragraph(_txt, S["body"]))
+
     story.append(Spacer(1, 0.7*cm))
 
     # ── PIE ───────────────────────────────────────────────────────────────────
