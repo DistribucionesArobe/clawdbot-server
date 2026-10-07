@@ -5827,7 +5827,7 @@ def admin_delete_test_user(request: Request, body: AdminDeleteTestUserBody):
 # ── Auth endpoints ──────────────────────────────────────────────────────────
 
 # ── Correos de prueba: se pueden re-registrar infinitas veces ────────────
-TEST_EMAILS = {"morty_92@hotmail.com"}
+TEST_EMAILS = {"morty_92@hotmail.com", "contacto@arobegroup.com"}
 
 def _purge_account(email: str):
     """Borra usuario + empresa + datos (solo para TEST_EMAILS)."""
@@ -5840,6 +5840,13 @@ def _purge_account(email: str):
         if not row:
             return False
         user_id, company_id = row[0], str(row[1]) if row[1] else None
+        # Candado: nunca borrar una empresa con plan de paga u owner
+        if company_id:
+            cur.execute("SELECT COALESCE(plan_code, 'free') FROM companies WHERE id = %s", (company_id,))
+            _pc = cur.fetchone()
+            if _pc and _pc[0] not in ("free", ""):
+                log.warning("PURGE BLOQUEADO: %s tiene plan %s", email, _pc[0])
+                return False
         try:
             cur.execute("DELETE FROM sessions WHERE user_id = %s", (user_id,))
         except Exception:
@@ -6529,7 +6536,7 @@ def referidos_mi_link(request: Request):
 
 # ── Rescate de onboarding: emails a registros sin WhatsApp conectado ────
 ONBOARDING_RESCUE_INTERVAL_SEC = 6 * 3600  # cada 6 horas
-_RESCUE_EXCLUDE = {"ealejandro.robledo@gmail.com", "pedrozv12@hotmail.com"}
+_RESCUE_EXCLUDE = {"ealejandro.robledo@gmail.com", "pedrozv12@hotmail.com", "contacto@arobegroup.com", "morty_92@hotmail.com"}
 
 
 def _rescue_email(kind: str, company_name: str):
