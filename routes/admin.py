@@ -575,6 +575,27 @@ def admin_companies(request: Request):
         else:
             select_cols.append("0 as num_conversations")
         select_cols.append("(SELECT u.email FROM users u WHERE u.company_id = c.id LIMIT 1) as owner_email")
+        if "signup_source" in existing_cols:
+            select_cols.append("c.signup_source")
+        else:
+            select_cols.append("NULL as signup_source")
+        select_cols.append("(SELECT COUNT(*) FROM quotes q WHERE q.company_id = c.id) as num_quotes")
+        cur.execute("SELECT to_regclass('public.user_events'), to_regclass('public.signup_feedback')")
+        _ev_t, _fb_t = cur.fetchone()
+        if _ev_t:
+            select_cols.append("""(SELECT string_agg(DISTINCT e.evento, ', ') FROM user_events e
+                                   JOIN users u2 ON u2.id = e.user_id WHERE u2.company_id = c.id) as eventos""")
+            select_cols.append("""(SELECT MAX(e.at) FROM user_events e
+                                   JOIN users u2 ON u2.id = e.user_id WHERE u2.company_id = c.id) as ultima_actividad""")
+        else:
+            select_cols.append("NULL as eventos")
+            select_cols.append("NULL as ultima_actividad")
+        if _fb_t:
+            select_cols.append("""(SELECT string_agg(COALESCE(f.razon, '') || CASE WHEN f.comentario IS NOT NULL THEN ': ' || f.comentario ELSE '' END, ' | ')
+                                   FROM signup_feedback f JOIN users u3 ON u3.id = f.user_id WHERE u3.company_id = c.id) as feedback""")
+        else:
+            select_cols.append("NULL as feedback")
+        select_cols.append("(SELECT COUNT(*) FROM users u4 WHERE u4.company_id = c.id) as num_users")
 
         order_col = "c.created_at" if "created_at" in existing_cols else "c.id"
         query = f"SELECT {', '.join(select_cols)} FROM companies c ORDER BY {order_col} DESC"
@@ -585,7 +606,7 @@ def admin_companies(request: Request):
         for row in rows:
             company = dict(zip(cols, row))
             # Convert datetimes to ISO strings
-            for k in ("trial_end", "created_at", "updated_at"):
+            for k in ("trial_end", "created_at", "updated_at", "ultima_actividad"):
                 if company.get(k):
                     try:
                         company[k] = company[k].isoformat()
@@ -593,6 +614,8 @@ def admin_companies(request: Request):
                         company[k] = str(company[k])
             # Convert UUID
             company["id"] = str(company["id"]) if company.get("id") else ""
+            if not company.get("num_users") and (company.get("name") or "") in ("morty_92@hotmail.com", "contacto@arobegroup.com"):
+                continue  # huérfanas de las cuentas de prueba
             companies.append(company)
 
         return {"companies": companies}

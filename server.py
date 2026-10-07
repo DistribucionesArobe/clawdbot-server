@@ -1055,6 +1055,7 @@ class RegisterBody(BaseModel):
     password: str
     promo_code: Optional[str] = None
     referral_code: Optional[str] = None
+    signup_source: Optional[str] = None
 
 class LoginBody(BaseModel):
     email: str
@@ -5933,6 +5934,16 @@ def register(body: RegisterBody):
             except Exception as ref_err:
                 log.error("REGISTRO REFERRAL ERROR (non-fatal): %s", repr(ref_err))
 
+        # Guardar de dónde vino (utm_source) — no debe tumbar el registro
+        try:
+            cur.execute("SAVEPOINT sp_src")
+            cur.execute("ALTER TABLE companies ADD COLUMN IF NOT EXISTS signup_source TEXT")
+            cur.execute("UPDATE companies SET signup_source=%s WHERE id=%s",
+                        (((body.signup_source or "directo").strip()[:60]), company_id))
+        except Exception as _src_e:
+            cur.execute("ROLLBACK TO SAVEPOINT sp_src")
+            log.warning("SIGNUP SOURCE ERROR: %r", _src_e)
+
         # Aplicar código promo si se proporcionó
         promo_applied = None
         _promo = (body.promo_code or "").strip().upper()
@@ -6400,6 +6411,7 @@ def cotizador_guardar(body: CotizadorGuardarBody, request: Request):
             _row_u = cur_u.fetchone()
             _usados = int(_row_u[0]) if _row_u else 0
             if _usados >= 1:
+                registrar_evento(int(u["id"]), "paywall_visto")
                 raise HTTPException(status_code=402, detail="limite_gratis")
             cur_u.execute("""
                 INSERT INTO cotizador_usage (company_id, ym, count) VALUES (%s, %s, 1)
@@ -6539,6 +6551,183 @@ ONBOARDING_RESCUE_INTERVAL_SEC = 6 * 3600  # cada 6 horas
 _RESCUE_EXCLUDE = {"ealejandro.robledo@gmail.com", "pedrozv12@hotmail.com", "contacto@arobegroup.com", "morty_92@hotmail.com"}
 
 
+import hmac as _hmac, hashlib as _hashlib
+
+_EVENTOS_OK = {
+    "cotizador_visto", "ia_usada", "foto_usada", "paywall_visto", "precios_visto",
+    "wizard_giro", "wizard_productos", "wizard_whatsapp", "wizard_salto_cotizador",
+    "simulador_usado", "ganancia_activada", "orden_cambio_iniciada", "checkout_iniciado",
+}
+
+
+def _ev_tabla(cur):
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS user_events (
+          id BIGSERIAL PRIMARY KEY,
+          user_id INTEGER NOT NULL,
+          evento TEXT NOT NULL,
+          at TIMESTAMPTZ DEFAULT now()
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS user_events_user_idx ON user_events(user_id, at)")
+
+
+def registrar_evento(user_id: int, evento: str):
+    try:
+        c = get_conn(); c.autocommit = True
+        k = c.cursor()
+        try:
+            _ev_tabla(k)
+            # no duplicar el mismo evento en menos de 10 minutos
+            k.execute("""
+                INSERT INTO user_events (user_id, evento)
+                SELECT %s, %s WHERE NOT EXISTS (
+                  SELECT 1 FROM user_events WHERE user_id=%s AND evento=%s AND at > now() - interval '10 minutes')
+            """, (user_id, evento, user_id, evento))
+        finally:
+            k.close(); c.close()
+    except Exception as e:
+        log.warning("EVENTO ERROR %s %s: %r", user_id, evento, e)
+
+
+class EventoBody(BaseModel):
+    evento: str
+
+
+@app.post("/api/evento")
+def api_evento(body: EventoBody, request: Request):
+    try:
+        u = get_user_from_session(request)
+    except HTTPException:
+        return {"ok": False}
+    ev = (body.evento or "").strip()[:40]
+    if ev in _EVENTOS_OK:
+        registrar_evento(int(u["id"]), ev)
+    return {"ok": True}
+
+
+def _fb_secret() -> bytes:
+    return (os.getenv("FEEDBACK_SECRET") or ("fb-" + (DATABASE_URL or "cotizaexpress"))).encode()
+
+
+def _fb_token(uid: int) -> str:
+    return _hmac.new(_fb_secret(), str(uid).encode(), _hashlib.sha256).hexdigest()[:20]
+
+
+_RAZONES = {
+    "no_tiempo": "No tuve tiempo",
+    "no_entendi": "No entendí cómo empezar",
+    "catalogo": "Pensé que tenía que subir mi catálogo",
+    "curioso": "Solo estaba viendo",
+    "precio": "El precio",
+    "fallo": "Algo no funcionó",
+    "otra_app": "Uso otra app o Excel",
+    "poco_uso": "No cotizo tan seguido",
+    "falto_algo": "Le faltó algo",
+    "si_quiero": "Sí lo quiero, ¿cómo activo?",
+}
+
+
+def _fb_links(uid: int, claves) -> str:
+    t = _fb_token(uid)
+    return "\n".join(
+        f"  👉 {_RAZONES[k]}: https://api.cotizaexpress.com/api/porque?u={uid}&t={t}&r={k}" for k in claves)
+
+
+def _fb_tabla(cur):
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS signup_feedback (
+          id BIGSERIAL PRIMARY KEY,
+          user_id INTEGER NOT NULL,
+          razon TEXT,
+          comentario TEXT,
+          at TIMESTAMPTZ DEFAULT now()
+        )
+    """)
+
+
+@app.get("/api/porque")
+def api_porque(u: int, t: str, r: str = ""):
+    if not _hmac.compare_digest(_fb_token(u), t or ""):
+        return HTMLResponse("<p style='font-family:sans-serif;text-align:center;margin-top:80px'>Link no válido</p>", status_code=403)
+    r = r if r in _RAZONES else ""
+    c = get_conn(); c.autocommit = True
+    k = c.cursor()
+    try:
+        _fb_tabla(k)
+        if r:
+            k.execute("INSERT INTO signup_feedback (user_id, razon) VALUES (%s, %s)", (u, r))
+            log.info("FEEDBACK user=%s razon=%s", u, r)
+    finally:
+        k.close(); c.close()
+    extra = ""
+    if r == "si_quiero":
+        extra = "<p><a href='https://www.cotizaexpress.com/precios' style='display:inline-block;background:#059669;color:#fff;padding:12px 20px;border-radius:10px;text-decoration:none;font-weight:700'>Ver planes y activar</a></p>"
+    elif r in ("no_entendi", "catalogo", "fallo"):
+        extra = "<p>No necesitas subir catálogo: entra al Cotizador, escribe el concepto y el precio en la tabla, y genera tu PDF.</p><p><a href='https://www.cotizaexpress.com/cotizador' style='display:inline-block;background:#059669;color:#fff;padding:12px 20px;border-radius:10px;text-decoration:none;font-weight:700'>Hacer mi cotización</a></p>"
+    html = f"""<!doctype html><html lang='es'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Gracias</title>
+<style>body{{font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#f1f5f9;padding:24px;color:#0f172a}}.c{{max-width:460px;margin:40px auto;background:#fff;border-radius:20px;padding:28px;text-align:center}}
+textarea{{width:100%;box-sizing:border-box;border:1px solid #cbd5e1;border-radius:12px;padding:12px;font-size:16px;margin-top:8px}}button{{margin-top:10px;width:100%;padding:12px;border:0;border-radius:12px;background:#0f172a;color:#fff;font-size:16px;font-weight:700}}</style></head>
+<body><div class='c'><h2>¡Gracias! 🙏</h2><p>Con esto mejoramos CotizaBot.</p>{extra}
+<form method='post' action='/api/porque?u={u}&t={t}&r={r}'><p style='color:#64748b;font-size:14px;margin-top:20px'>¿Algo más que nos quieras contar? (opcional)</p>
+<textarea name='comentario' rows='3' maxlength='1000'></textarea><button type='submit'>Enviar</button></form></div></body></html>"""
+    return HTMLResponse(html)
+
+
+@app.post("/api/porque")
+async def api_porque_comentario(request: Request, u: int, t: str, r: str = ""):
+    if not _hmac.compare_digest(_fb_token(u), t or ""):
+        return HTMLResponse("Link no válido", status_code=403)
+    try:
+        form = await request.form()
+        com = (form.get("comentario") or "").strip()[:1000]
+    except Exception:
+        com = ""
+    if com:
+        c = get_conn(); c.autocommit = True
+        k = c.cursor()
+        try:
+            _fb_tabla(k)
+            k.execute("INSERT INTO signup_feedback (user_id, razon, comentario) VALUES (%s, %s, %s)", (u, r or None, com))
+            log.info("FEEDBACK COMENTARIO user=%s: %s", u, com[:200])
+        finally:
+            k.close(); c.close()
+    return HTMLResponse("<div style='font-family:sans-serif;text-align:center;margin-top:80px'><h2>¡Recibido, gracias! 🙌</h2><p><a href='https://www.cotizaexpress.com/cotizador'>Volver a CotizaBot</a></p></div>")
+
+
+def _seguimiento_email(kind: str, uid: int, es_usa: bool):
+    """Correos según lo que hizo (o no hizo) el usuario."""
+    pal = "estimate" if es_usa else "cotización"
+    link_cot = "https://www.cotizaexpress.com/cotizador"
+    if kind == "nudge_cotiza":
+        return (
+            f"Tu primer {pal} en 2 minutos (sin subir catálogo)",
+            "Hola,\n\n"
+            f"Creaste tu cuenta pero todavía no haces tu primer {pal}. Es más fácil de lo que parece:\n\n"
+            "1. Entra al Cotizador: " + link_cot + "\n"
+            "2. Escribe el concepto y el precio en la tabla (como en Excel). No necesitas subir catálogo.\n"
+            "3. Genera el PDF y mándalo por WhatsApp.\n\n"
+            "Tip: si el cliente te mandó la lista por WhatsApp, toma screenshot y súbelo — CotizaBot la llena por ti.\n\n"
+            "— Alejandro, CotizaExpress",
+        )
+    if kind == "porque_sin_cotizar":
+        return (
+            "¿Qué te detuvo? (1 clic)",
+            "Hola,\n\n"
+            f"Vimos que no hiciste tu {pal}. ¿Nos dices por qué? Es un solo clic y nos ayuda muchísimo:\n\n"
+            + _fb_links(uid, ["no_tiempo", "no_entendi", "catalogo", "curioso", "precio", "fallo", "otra_app"]) +
+            "\n\nY si quieres que te ayudemos, solo responde este correo.\n\n— Alejandro, CotizaExpress",
+        )
+    # porque_sin_pagar
+    return (
+        f"¿Te gustó tu {pal}?",
+        "Hola,\n\n"
+        f"Ya hiciste tu primer {pal} con CotizaBot. ¿Qué te pareció? Un clic:\n\n"
+        + _fb_links(uid, ["si_quiero", "precio", "poco_uso", "falto_algo", "otra_app"]) +
+        "\n\nSi algo no te convenció, responde este correo y lo arreglamos.\n\n— Alejandro, CotizaExpress",
+    )
+
+
 def _rescue_email(kind: str, company_name: str):
     nombre = (company_name or "").strip()
     nombre = "" if (not nombre or "@" in nombre) else f" de {nombre}"
@@ -6581,24 +6770,32 @@ def _run_onboarding_rescue_once():
               PRIMARY KEY (user_id, kind)
             )
         """)
-        for kind, min_h, max_h in (("day1", 20, 72), ("day3", 68, 24 * 14)):
-            cur.execute("""
-                SELECT u.id, u.email, c.name
+        cur.execute("ALTER TABLE companies ADD COLUMN IF NOT EXISTS signup_source TEXT")
+        # kind, desde (h), hasta (h), condición sobre cotizaciones
+        for kind, min_h, max_h, cond in (
+            ("nudge_cotiza", 3, 30, "sin"),
+            ("porque_sin_cotizar", 48, 24 * 14, "sin"),
+            ("porque_sin_pagar", 72, 24 * 21, "con"),
+        ):
+            _q_cond = ("= 0" if cond == "sin" else "> 0")
+            cur.execute(f"""
+                SELECT u.id, u.email, c.name, COALESCE(c.signup_source, '')
                 FROM users u
                 JOIN companies c ON c.id = u.company_id
-                WHERE (c.wa_phone_number_id IS NULL OR c.wa_phone_number_id = '')
+                WHERE COALESCE(c.plan_code, 'free') = 'free'
                   AND u.created_at < now() - (%s * interval '1 hour')
                   AND u.created_at > now() - (%s * interval '1 hour')
+                  AND (SELECT COUNT(*) FROM quotes q WHERE q.company_id = c.id) {_q_cond}
                   AND NOT EXISTS (
                     SELECT 1 FROM onboarding_emails oe
                     WHERE oe.user_id = u.id AND oe.kind = %s)
                 LIMIT 20
             """, (min_h, max_h, kind))
-            for uid, email, cname in cur.fetchall():
+            for uid, email, cname, src in cur.fetchall():
                 email = (email or "").strip().lower()
                 if not email or "@" not in email or email in _RESCUE_EXCLUDE:
                     continue
-                subject, body = _rescue_email(kind, cname)
+                subject, body = _seguimiento_email(kind, uid, (src or "").startswith("usa"))
                 ok = _send_email(email, subject, body)
                 # Marcar siempre para no reintentar/spamear
                 cur.execute(
