@@ -5938,13 +5938,16 @@ def register(body: RegisterBody):
 
         # Guardar de dónde vino (utm_source) — no debe tumbar el registro
         try:
-            cur.execute("SAVEPOINT sp_src")
-            cur.execute("ALTER TABLE companies ADD COLUMN IF NOT EXISTS signup_source TEXT")
-            cur.execute("UPDATE companies SET signup_source=%s WHERE id=%s",
-                        (((body.signup_source or "directo").strip()[:60]), company_id))
+            _cs = get_conn(); _cs.autocommit = True
+            _ks = _cs.cursor()
+            try:
+                _ks.execute("ALTER TABLE companies ADD COLUMN IF NOT EXISTS signup_source TEXT")
+                _ks.execute("UPDATE companies SET signup_source=%s WHERE id=%s",
+                            (((body.signup_source or "directo").strip()[:60]), company_id))
+            finally:
+                _ks.close(); _cs.close()
         except Exception as _src_e:
-            cur.execute("ROLLBACK TO SAVEPOINT sp_src")
-            log.warning("SIGNUP SOURCE ERROR: %r", _src_e)
+            log.warning("SIGNUP SOURCE ERROR (no fatal): %r", _src_e)
 
         # Aplicar código promo si se proporcionó
         promo_applied = None
