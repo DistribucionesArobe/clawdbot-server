@@ -1056,6 +1056,7 @@ class RegisterBody(BaseModel):
     promo_code: Optional[str] = None
     referral_code: Optional[str] = None
     signup_source: Optional[str] = None
+    empresa_nombre: Optional[str] = None
 
 class LoginBody(BaseModel):
     email: str
@@ -5899,14 +5900,15 @@ def register(body: RegisterBody):
         cur = conn.cursor()
 
         slug = re.sub(r'[^a-z0-9]+', '-', email.split("@")[0].lower()).strip('-')
+        _nombre_emp = ((body.empresa_nombre or "").strip()[:120]) or email
         try:
-            cur.execute("INSERT INTO companies (name, slug) VALUES (%s, %s) RETURNING id", (email, slug or None))
+            cur.execute("INSERT INTO companies (name, slug) VALUES (%s, %s) RETURNING id", (_nombre_emp, slug or None))
         except IntegrityError:
             # Slug ocupado (homónimo u orfandad de una purga anterior): sufijo único
             conn.rollback()
             import random as _rnd
             slug = f"{slug}-{_rnd.randint(1000, 9999)}" if slug else None
-            cur.execute("INSERT INTO companies (name, slug) VALUES (%s, %s) RETURNING id", (email, slug or None))
+            cur.execute("INSERT INTO companies (name, slug) VALUES (%s, %s) RETURNING id", (_nombre_emp, slug or None))
         company_id = cur.fetchone()[0]
 
         token = generate_api_key()
@@ -6556,7 +6558,7 @@ import hmac as _hmac, hashlib as _hashlib
 _EVENTOS_OK = {
     "cotizador_visto", "ia_usada", "foto_usada", "paywall_visto", "precios_visto",
     "wizard_giro", "wizard_productos", "wizard_whatsapp", "wizard_salto_cotizador",
-    "simulador_usado", "ganancia_activada", "orden_cambio_iniciada", "checkout_iniciado",
+    "simulador_usado", "ganancia_activada", "orden_cambio_iniciada", "checkout_iniciado", "borrador_generador",
 }
 
 
