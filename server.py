@@ -6219,6 +6219,183 @@ async def generador_imagen(request: Request, file: UploadFile = File(...)):
     return {"ok": True, "texto": "\n".join(lineas[:40]), "renglones": len(lineas[:40])}
 
 
+# ── Generador público: el PDF a cambio del correo (captura de contactos) ──
+
+class GeneradorLeadBody(BaseModel):
+    email: str
+    whatsapp: str = ""
+    negocio: str = ""
+    telefono: str = ""
+    cliente: str = ""
+    con_iva: bool = True
+    items: list = []
+    fuente: str = ""
+
+
+def _leads_tabla(cur):
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS generador_leads (
+          id BIGSERIAL PRIMARY KEY,
+          token TEXT UNIQUE NOT NULL,
+          email TEXT NOT NULL,
+          whatsapp TEXT,
+          negocio TEXT,
+          telefono TEXT,
+          cliente TEXT,
+          con_iva BOOLEAN DEFAULT TRUE,
+          items JSONB,
+          fuente TEXT,
+          ip TEXT,
+          created_at TIMESTAMPTZ DEFAULT now(),
+          seguimiento_at TIMESTAMPTZ
+        )
+    """)
+
+
+_GEN_LEAD_USO = {}
+
+
+@app.post("/api/generador/lead")
+def generador_lead(body: GeneradorLeadBody, request: Request):
+    email = (body.email or "").strip().lower()[:120]
+    if not re.match(r"^[^@\s]+@[^@\s]+\.[a-z]{2,}$", email):
+        raise HTTPException(status_code=400, detail="Escribe un correo válido")
+    _ip = (request.headers.get("x-forwarded-for") or (request.client.host if request.client else "?")).split(",")[0].strip()
+    from datetime import datetime as _dtl, timezone as _tzl
+    _hoy = _dtl.now(_tzl.utc).strftime("%Y%m%d")
+    _d, _n = _GEN_LEAD_USO.get(_ip, (_hoy, 0))
+    if _d != _hoy:
+        _n = 0
+    if _n >= 20:
+        raise HTTPException(status_code=429, detail="Demasiadas cotizaciones por hoy — crea tu cuenta gratis para seguir")
+    filas = []
+    for it in (body.items or [])[:60]:
+        try:
+            desc = str(it.get("desc") or "").strip()[:200]
+            qty = float(it.get("qty") or 0)
+            precio = float(it.get("precio") or 0)
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if desc and qty > 0:
+            filas.append({"desc": desc, "qty": qty, "precio": precio})
+    if not filas:
+        raise HTTPException(status_code=400, detail="Agrega al menos un concepto a tu cotización")
+    token = secrets.token_urlsafe(12)
+    c = get_conn(); c.autocommit = True
+    k = c.cursor()
+    try:
+        _leads_tabla(k)
+        k.execute("""
+            INSERT INTO generador_leads (token, email, whatsapp, negocio, telefono, cliente, con_iva, items, fuente, ip)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s)
+        """, (token, email, re.sub(r"\D", "", body.whatsapp or "")[:15], (body.negocio or "").strip()[:120],
+              (body.telefono or "").strip()[:30], (body.cliente or "").strip()[:120], bool(body.con_iva),
+              json.dumps(filas), (body.fuente or "").strip()[:60], _ip[:60]))
+    finally:
+        k.close(); c.close()
+    _GEN_LEAD_USO[_ip] = (_hoy, _n + 1)
+    link = f"https://api.cotizaexpress.com/generador/pdf/{token}"
+    _send_email(
+        email,
+        "Tu cotización está lista 📄",
+        "¡Hola!\n\n"
+        "Aquí está la cotización que armaste en CotizaExpress:\n\n"
+        f"{link}\n\n"
+        "Ábrela, descárgala o mándasela a tu cliente por WhatsApp.\n\n"
+        "¿Quieres que la próxima te salga con tu logo, folio y guardada en tu cuenta? "
+        "Crea tu cuenta gratis (30 segundos) y tu primera cotización formal va por nuestra cuenta:\n"
+        "https://www.cotizaexpress.com/registro?utm_source=lead_generador\n\n"
+        "— Alejandro, CotizaExpress",
+    )
+    log.info("GENERADOR LEAD: %s (%d conceptos, fuente=%s)", email, len(filas), body.fuente)
+    return {"ok": True, "link": link}
+
+
+@app.get("/generador/pdf/{token}")
+def generador_pdf(token: str, download: int = 0):
+    c = get_conn(); c.autocommit = True
+    k = c.cursor()
+    try:
+        _leads_tabla(k)
+        k.execute("SELECT negocio, telefono, cliente, con_iva, items, email FROM generador_leads WHERE token=%s", (token,))
+        r = k.fetchone()
+    finally:
+        k.close(); c.close()
+    if not r:
+        raise HTTPException(status_code=404, detail="Cotización no encontrada")
+    negocio, telefono, cliente, con_iva, items_json, email = r
+    filas = items_json if isinstance(items_json, list) else json.loads(items_json or "[]")
+    items = [{"name": f["desc"], "qty": f["qty"], "unit": "pza", "unit_price": f["precio"],
+              "subtotal": round(f["qty"] * f["precio"], 2)} for f in filas]
+    sub = round(sum(i["subtotal"] for i in items), 2)
+    pct = 16.0 if con_iva else 0.0
+    amt = round(sub * pct / 100, 2)
+    pdf = build_quote_pdf(
+        company={"name": negocio or "Mi negocio", "address": "", "rfc": "", "phone": telefono or "",
+                 "email": "", "logo_url": "", "brand_color": ""},
+        items=items, client_phone=cliente or "", folio="COT-" + token[:6].upper(),
+        currency="MXN", lang="es", promo=True,
+        tax={"subtotal": sub, "pct": pct, "amount": amt, "total": round(sub + amt, 2), "solo_material": False},
+        terms={"validez_dias": 15, "anticipo_pct": 0, "incluye": "", "no_incluye": "", "licencia": "", "notas": ""},
+    )
+    disp = "attachment" if download else "inline"
+    return StreamingResponse(iter([pdf]), media_type="application/pdf",
+                             headers={"Content-Disposition": f'{disp}; filename="cotizacion.pdf"', "Cache-Control": "no-cache"})
+
+
+def _run_leads_seguimiento(cur):
+    """24 h después: a los contactos del generador que no crearon cuenta."""
+    _leads_tabla(cur)
+    cur.execute("""
+        SELECT l.id, l.email, l.negocio FROM generador_leads l
+        WHERE l.seguimiento_at IS NULL
+          AND l.created_at < now() - interval '20 hours'
+          AND l.created_at > now() - interval '7 days'
+          AND NOT EXISTS (SELECT 1 FROM users u WHERE lower(u.email) = lower(l.email))
+          AND l.id = (SELECT MIN(l2.id) FROM generador_leads l2 WHERE lower(l2.email) = lower(l.email))
+        LIMIT 30
+    """)
+    for lid, email, negocio in cur.fetchall():
+        if email in _RESCUE_EXCLUDE:
+            continue
+        ok = _send_email(
+            email,
+            "¿Te sirvió tu cotización?",
+            "Hola,\n\n"
+            "Ayer armaste una cotización en CotizaExpress. ¿Se la mandaste a tu cliente?\n\n"
+            "Con tu cuenta gratis:\n"
+            "• Tus cotizaciones salen con folio y quedan guardadas\n"
+            "• Pegas la lista que te mandaron por WhatsApp (o un screenshot) y se llena sola\n"
+            "• Ves cuánto te queda de ganancia antes de mandar el precio\n\n"
+            "Créala en 30 segundos: https://www.cotizaexpress.com/registro?utm_source=lead_seguimiento\n\n"
+            "Si algo no te funcionó, responde este correo y me cuentas.\n\n"
+            "— Alejandro, CotizaExpress",
+        )
+        cur.execute("UPDATE generador_leads SET seguimiento_at = now() WHERE lower(email) = lower(%s)", (email,))
+        log.info("LEAD SEGUIMIENTO → %s (sent=%s)", email, ok)
+
+
+@app.get("/api/admin/generador-leads")
+def admin_generador_leads(request: Request):
+    u = get_user_from_session(request)
+    if (u.get("email") or "").lower() not in ADMIN_EMAILS:
+        raise HTTPException(status_code=403, detail="Solo admin")
+    c = get_conn(); c.autocommit = True
+    k = c.cursor()
+    try:
+        _leads_tabla(k)
+        k.execute("""
+            SELECT l.created_at, l.email, l.whatsapp, l.negocio, l.cliente, jsonb_array_length(l.items), l.fuente,
+                   EXISTS (SELECT 1 FROM users u WHERE lower(u.email) = lower(l.email)) AS se_registro
+            FROM generador_leads l ORDER BY l.created_at DESC LIMIT 300
+        """)
+        rows = k.fetchall()
+    finally:
+        k.close(); c.close()
+    return {"leads": [{"fecha": r[0].isoformat(), "email": r[1], "whatsapp": r[2], "negocio": r[3], "cliente": r[4],
+                       "conceptos": r[5], "fuente": r[6], "se_registro": r[7]} for r in rows]}
+
+
 @app.post("/api/cotizador/imagen")
 async def cotizador_imagen(request: Request, file: UploadFile = File(...)):
     """Lector de imágenes: foto de una lista (escrita a mano, WhatsApp, nota, Excel)
@@ -6807,6 +6984,10 @@ def _run_onboarding_rescue_once():
                     "INSERT INTO onboarding_emails (user_id, kind) VALUES (%s, %s) ON CONFLICT DO NOTHING",
                     (uid, kind))
                 log.info("ONBOARDING RESCUE %s → %s (sent=%s)", kind, email, ok)
+        try:
+            _run_leads_seguimiento(cur)
+        except Exception as _le:
+            log.warning("LEADS SEGUIMIENTO ERROR: %r", _le)
     finally:
         cur.close()
         conn.close()
