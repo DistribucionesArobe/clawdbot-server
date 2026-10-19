@@ -6553,7 +6553,24 @@ def admin_wa_seguimiento_estado(request: Request):
         return {"ok": False, "linea_config": WA_SEG_LINEA,
                 "detalle": "La línea de seguimiento no está configurada (para ventas faltan CX_SALES_PHONE_NUMBER_ID y CX_SALES_WA_API_KEY)"}
     phone_id, waba_id, token, _cid, etiqueta = canal
+    info = None
+    try:
+        r = requests.get(f"https://graph.facebook.com/v21.0/{phone_id}",
+                         params={"fields": "display_phone_number,verified_name,platform_type,is_on_biz_app,status,code_verification_status,name_status,quality_rating"},
+                         headers={"Authorization": f"Bearer {token}"}, timeout=20)
+        info = r.json()
+    except Exception as e:
+        info = repr(e)
+    nums = None
+    try:
+        r = requests.get(f"https://graph.facebook.com/v21.0/{waba_id}/phone_numbers",
+                         params={"fields": "id,display_phone_number,platform_type,is_on_biz_app,status"},
+                         headers={"Authorization": f"Bearer {token}"}, timeout=20)
+        nums = r.json()
+    except Exception as e:
+        nums = repr(e)
     return {"ok": True, "linea": etiqueta, "phone_number_id": phone_id, "waba": waba_id,
+            "numero": info, "numeros_waba": nums,
             "plantillas": _estado_plantillas(waba_id, token) if waba_id else None}
 
 
