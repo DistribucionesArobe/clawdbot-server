@@ -6850,6 +6850,44 @@ def _guardar_estados_wa(statuses: list):
         k.close(); c.close()
 
 
+@app.get("/api/admin/wa-seguimiento/lista")
+def admin_wa_seguimiento_lista(request: Request):
+    """A quién le escribió el bot de seguimiento, si le llegó / lo leyó y qué contestó."""
+    u = get_user_from_session(request)
+    if (u.get("email") or "").lower() not in ADMIN_EMAILS:
+        raise HTTPException(status_code=403, detail="Solo admin")
+    c = get_conn(); c.autocommit = True
+    k = c.cursor()
+    try:
+        _seg_columnas(k)
+        k.execute("CREATE TABLE IF NOT EXISTS wa_status (msg_id TEXT PRIMARY KEY, destino TEXT, estado TEXT, "
+                  "error_code TEXT, error TEXT, updated_at TIMESTAMPTZ DEFAULT now())")
+        k.execute("""
+            WITH contactos AS (
+              (SELECT DISTINCT ON (right(regexp_replace(whatsapp, '\D', '', 'g'), 10))
+                     'Generador' AS origen, COALESCE(NULLIF(negocio, ''), email) AS nombre, email,
+                     right(regexp_replace(whatsapp, '\D', '', 'g'), 10) AS tel,
+                     wa_seguimiento_at, wa_seguimiento2_at, wa_respuesta, wa_respuesta_at
+              FROM generador_leads WHERE wa_seguimiento_at IS NOT NULL AND COALESCE(whatsapp, '') <> ''
+              ORDER BY right(regexp_replace(whatsapp, '\D', '', 'g'), 10), created_at DESC)
+              UNION ALL
+              SELECT 'Registro', c.name, (SELECT u.email FROM users u WHERE u.company_id = c.id LIMIT 1),
+                     right(regexp_replace(c.owner_phone, '\D', '', 'g'), 10),
+                     c.wa_seguimiento_at, c.wa_seguimiento2_at, c.wa_respuesta, c.wa_respuesta_at
+              FROM companies c WHERE c.wa_seguimiento_at IS NOT NULL AND COALESCE(c.owner_phone, '') <> ''
+            )
+            SELECT ct.*, (SELECT s.estado FROM wa_status s WHERE right(s.destino, 10) = ct.tel
+                          ORDER BY s.updated_at DESC LIMIT 1) AS entrega
+            FROM contactos ct ORDER BY ct.wa_seguimiento_at DESC LIMIT 200
+        """)
+        rows = k.fetchall()
+    finally:
+        k.close(); c.close()
+    f = lambda d: d.isoformat() if d else None
+    return {"contactos": [{"origen": r[0], "nombre": r[1], "email": r[2], "tel": r[3], "enviado": f(r[4]),
+                           "segundo": f(r[5]), "respuesta": r[6], "respondio": f(r[7]), "entrega": r[8]} for r in rows]}
+
+
 @app.get("/api/admin/wa-estados")
 def admin_wa_estados(request: Request):
     u = get_user_from_session(request)
