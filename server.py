@@ -1057,6 +1057,7 @@ class RegisterBody(BaseModel):
     referral_code: Optional[str] = None
     signup_source: Optional[str] = None
     empresa_nombre: Optional[str] = None
+    whatsapp: Optional[str] = None
 
 class LoginBody(BaseModel):
     email: str
@@ -5954,6 +5955,9 @@ def register(body: RegisterBody):
                 _ks.execute("ALTER TABLE companies ADD COLUMN IF NOT EXISTS signup_source TEXT")
                 _ks.execute("UPDATE companies SET signup_source=%s WHERE id=%s",
                             (((body.signup_source or "directo").strip()[:60]), company_id))
+                _wa_reg = re.sub(r"\D", "", body.whatsapp or "")
+                if 10 <= len(_wa_reg) <= 13:
+                    _ks.execute("UPDATE companies SET owner_phone = %s WHERE id = %s", (_wa_reg, company_id))
             finally:
                 _ks.close(); _cs.close()
         except Exception as _src_e:
