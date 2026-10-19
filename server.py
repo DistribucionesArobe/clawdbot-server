@@ -1514,6 +1514,11 @@ async def whatsapp_webhook(request: Request):
     from sales_bot import is_sales_number, build_sales_reply, handle_sales_button, CX_SALES_WA_API_KEY
     if is_sales_number(phone_number_id):
         value = payload["entry"][0]["changes"][0]["value"]
+        if value.get("statuses"):
+            try:
+                await asyncio.to_thread(_guardar_estados_wa, value.get("statuses") or [])
+            except Exception as _se:
+                log.warning("WA STATUS ERROR: %r", _se)
         messages = value.get("messages") or []
         if not messages:
             return {"ok": True}
@@ -6792,6 +6797,51 @@ def admin_correo(body: AdminCorreo, request: Request):
     return {"resultado": res}
 
 
+def _guardar_estados_wa(statuses: list):
+    """Guarda entregado / leído / fallido de los mensajes que manda la línea de ventas."""
+    c = get_conn(); c.autocommit = True
+    k = c.cursor()
+    try:
+        k.execute("""
+            CREATE TABLE IF NOT EXISTS wa_status (
+              msg_id TEXT PRIMARY KEY, destino TEXT, estado TEXT, error_code TEXT, error TEXT,
+              updated_at TIMESTAMPTZ DEFAULT now()
+            )
+        """)
+        for st in statuses[:50]:
+            errs = st.get("errors") or []
+            code = str(errs[0].get("code")) if errs else None
+            err = ((errs[0].get("title") or "") + " " + ((errs[0].get("error_data") or {}).get("details") or "")).strip() if errs else None
+            k.execute("""
+                INSERT INTO wa_status (msg_id, destino, estado, error_code, error) VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (msg_id) DO UPDATE SET estado = EXCLUDED.estado,
+                  error_code = COALESCE(EXCLUDED.error_code, wa_status.error_code),
+                  error = COALESCE(EXCLUDED.error, wa_status.error), updated_at = now()
+            """, (st.get("id"), st.get("recipient_id"), st.get("status"), code, err))
+            if st.get("status") == "failed":
+                log.warning("WA ENTREGA FALLIDA → %s: %s %s", st.get("recipient_id"), code, err)
+    finally:
+        k.close(); c.close()
+
+
+@app.get("/api/admin/wa-estados")
+def admin_wa_estados(request: Request):
+    u = get_user_from_session(request)
+    if (u.get("email") or "").lower() not in ADMIN_EMAILS:
+        raise HTTPException(status_code=403, detail="Solo admin")
+    c = get_conn(); c.autocommit = True
+    k = c.cursor()
+    try:
+        k.execute("CREATE TABLE IF NOT EXISTS wa_status (msg_id TEXT PRIMARY KEY, destino TEXT, estado TEXT, "
+                  "error_code TEXT, error TEXT, updated_at TIMESTAMPTZ DEFAULT now())")
+        k.execute("SELECT destino, estado, error_code, error, updated_at FROM wa_status ORDER BY updated_at DESC LIMIT 100")
+        rows = k.fetchall()
+    finally:
+        k.close(); c.close()
+    return {"estados": [{"destino": r[0], "estado": r[1], "error_code": r[2], "error": r[3],
+                         "fecha": r[4].isoformat() if r[4] else None} for r in rows]}
+
+
 def _pids_seguimiento(cur) -> set:
     """phone_number_id de las líneas desde las que se ha escrito seguimiento (ventas y demo)."""
     pids = set()
@@ -6856,9 +6906,21 @@ def wa_seguimiento_interceptar(company: dict, from_phone: str, msg: dict) -> boo
             k.close(); c.close()
         from whatsapp_api import send_whatsapp_text
         no = texto.lower().startswith("ahora no")
-        resp = ("¡Sin problema! 🙌 Aquí queda tu cuenta lista para cuando la necesites: "
-                "https://www.cotizaexpress.com/cotizador — cualquier duda, escríbeme por aquí."
-                if no else "¡Perfecto! 🙌 En unos minutos te escribo para ayudarte.")
+        duda = "duda" in texto.lower()
+        neg = (negocio or "").strip()
+        if neg.lower() in ("negocio", "mi negocio", "—", "-") or "@" in neg:
+            neg = ""
+        if no:
+            resp = ("¡Sin problema! 🙌 Aquí queda tu cuenta lista para cuando la necesites: "
+                    "https://www.cotizaexpress.com/cotizador — cualquier duda, escríbeme por aquí.")
+        elif duda:
+            resp = ("¡Claro! Soy Alejandro de CotizaBot 👋 Cuéntame tu duda por aquí y te ayudo. "
+                    "Si es sobre una cotización, mándame la lista o un screenshot y lo vemos juntos.")
+        else:
+            resp = (f"Hola, soy Alejandro de CotizaBot 👋 Qué gusto que te sirvió. "
+                    f"¿Qué tipo de productos o trabajos cotizas{' en ' + neg if neg else ''}? "
+                    "Si me mandas por aquí una lista que te hayan pedido (o un screenshot), te enseño en 5 minutos "
+                    "a que se llene sola, con tu logo y folio.")
         try:
             send_whatsapp_text(company["wa_api_key"], company["wa_phone_number_id"], from_phone, resp)
         except Exception as e:
