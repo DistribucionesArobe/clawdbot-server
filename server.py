@@ -6449,8 +6449,11 @@ def admin_wa_seguimiento_estado(request: Request):
     k = c.cursor()
     try:
         canal = _canal_seguimiento(k)
-        k.execute("SELECT phone_display, meta_phone_number_id IS NOT NULL, meta_waba_id IS NOT NULL FROM channels WHERE is_active = true")
-        canales = [{"telefono": r[0], "tiene_phone_id": r[1], "tiene_waba": r[2]} for r in k.fetchall()]
+        k.execute("SELECT to_jsonb(ch) - 'access_token' FROM channels ch WHERE ch.is_active = true")
+        canales = []
+        for (j,) in k.fetchall():
+            j = j if isinstance(j, dict) else json.loads(j or "{}")
+            canales.append({"datos": {kk: vv for kk, vv in j.items() if kk in ("address", "phone_display", "meta_phone_number_id", "meta_waba_id", "company_id")}})
     finally:
         k.close(); c.close()
     if not canal:
