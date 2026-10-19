@@ -6240,6 +6240,9 @@ async def generador_imagen(request: Request, file: UploadFile = File(...)):
 
 # ── Generador público: el PDF a cambio del correo (captura de contactos) ──
 
+GENERADOR_LIMITE_MES = 3
+
+
 class GeneradorLeadBody(BaseModel):
     email: str
     whatsapp: str = ""
@@ -6304,6 +6307,12 @@ def generador_lead(body: GeneradorLeadBody, request: Request):
     k = c.cursor()
     try:
         _leads_tabla(k)
+        # Límite: 3 cotizaciones gratis al mes por correo (las cuentas de prueba no cuentan)
+        if email not in _RESCUE_EXCLUDE:
+            k.execute("SELECT COUNT(*) FROM generador_leads WHERE lower(email) = %s "
+                      "AND created_at >= date_trunc('month', now())", (email,))
+            if int(k.fetchone()[0]) >= GENERADOR_LIMITE_MES:
+                raise HTTPException(status_code=402, detail="limite_generador")
         k.execute("""
             INSERT INTO generador_leads (token, email, whatsapp, negocio, telefono, cliente, con_iva, items, fuente, ip)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s)

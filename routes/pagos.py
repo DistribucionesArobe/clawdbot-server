@@ -39,6 +39,31 @@ _MP_PLAN_PRICES = {
     "pro_usa":       1789.00,  # ≈ $99 USD
 }
 
+# Oferta de entrada: primer mes del Cotizador a precio especial (una sola vez por empresa)
+_INTRO = {
+    "cotizador_intro":     ("cotizador", 99.00, "Cotizador IA - Primer mes ($99)"),
+    "cotizador_usa_intro": ("cotizador_usa", 169.00, "Cotizador IA USA - First month ($9 USD)"),
+}
+
+
+def _intro_disponible(company_id: str) -> bool:
+    """La oferta aplica si la empresa nunca ha pagado ni usado la oferta."""
+    c = get_conn()
+    k = c.cursor()
+    try:
+        k.execute("ALTER TABLE companies ADD COLUMN IF NOT EXISTS intro_usado BOOLEAN DEFAULT FALSE")
+        c.commit()
+        k.execute("SELECT COALESCE(intro_usado, FALSE), mp_payment_id, COALESCE(plan_code, 'free') FROM companies WHERE id = %s",
+                  (company_id,))
+        r = k.fetchone()
+        return bool(r) and not r[0] and not r[1] and r[2] == "free"
+    except Exception as e:
+        log.warning("INTRO DISPONIBLE ERROR: %r", e)
+        return False
+    finally:
+        k.close(); c.close()
+
+
 _MP_PLAN_NAMES = {
     "cotizador":   "Cotizador IA - Plan Mensual",
     "cotizabot":   "CotizaBot - Plan Mensual",
@@ -85,6 +110,14 @@ def _require_admin(request: Request):
     return u
 
 
+@router.get("/api/pagos/oferta-intro")
+def oferta_intro(request: Request):
+    company_id = require_company_id(request)
+    disp = _intro_disponible(company_id)
+    return {"disponible": disp, "mx": {"plan": "cotizador_intro", "precio": 99},
+            "usa": {"plan": "cotizador_usa_intro", "precio": 9}}
+
+
 # ── Mercado Pago checkout ────────────────────────────────────────────────────
 
 @router.post("/api/pagos/crear-checkout")
@@ -93,11 +126,19 @@ def crear_checkout(request: Request, body: CheckoutBody):
         raise HTTPException(status_code=500, detail="MP_ACCESS_TOKEN no configurada")
 
     plan = (body.plan or "").strip().lower()
-    price = _MP_PLAN_PRICES.get(plan)
+    es_intro = plan in _INTRO
+    if es_intro:
+        _base, price, _titulo_intro = _INTRO[plan]
+    else:
+        price = _MP_PLAN_PRICES.get(plan)
     if not price:
         raise HTTPException(status_code=400, detail=f"Plan inválido: {plan}")
 
     company_id = require_company_id(request)
+    if es_intro:
+        if not _intro_disponible(company_id):
+            raise HTTPException(status_code=400, detail="La oferta del primer mes ya no está disponible para tu cuenta")
+        plan = _base
 
     # ── Aplicar descuento percentage si la empresa canjeó un código promo ──
     _conn = None; _cur = None
@@ -138,7 +179,7 @@ def crear_checkout(request: Request, body: CheckoutBody):
         preference_data = {
             "items": [
                 {
-                    "title": _MP_PLAN_NAMES.get(plan, f"CotizaBot {plan}"),
+                    "title": (_titulo_intro if es_intro else _MP_PLAN_NAMES.get(plan, f"CotizaBot {plan}")),
                     "quantity": 1,
                     "unit_price": price,
                     "currency_id": "MXN",
@@ -151,7 +192,7 @@ def crear_checkout(request: Request, body: CheckoutBody):
                 "pending": body.success_url,
             },
             "auto_return": "approved",
-            "external_reference": f"{company_id}|{plan}",
+            "external_reference": f"{company_id}|{plan}" + ("|intro" if es_intro else ""),
             "notification_url": os.getenv("MP_WEBHOOK_URL", "").strip() or None,
             "statement_descriptor": "CotizaExpress",
         }
@@ -291,6 +332,7 @@ async def mp_webhook(request: Request):
                 parts = ext_ref.split("|") if ext_ref else []
                 company_id = parts[0] if len(parts) > 0 else None
                 plan = parts[1] if len(parts) > 1 else None
+                fue_intro = len(parts) > 2 and parts[2] == "intro"
 
                 if status == "approved" and company_id and plan:
                     try:
@@ -313,7 +355,15 @@ async def mp_webhook(request: Request):
                         conn.commit()
                         cur.close()
                         conn.close()
-                        log.info("MP WEBHOOK PLAN ACTIVADO: company=%s plan=%s", company_id, plan)
+                        log.info("MP WEBHOOK PLAN ACTIVADO: company=%s plan=%s intro=%s", company_id, plan, fue_intro)
+                        if fue_intro:
+                            try:
+                                _c2 = get_conn(); _k2 = _c2.cursor()
+                                _k2.execute("ALTER TABLE companies ADD COLUMN IF NOT EXISTS intro_usado BOOLEAN DEFAULT FALSE")
+                                _k2.execute("UPDATE companies SET intro_usado = TRUE WHERE id = %s", (company_id,))
+                                _c2.commit(); _k2.close(); _c2.close()
+                            except Exception as _ie:
+                                log.error("INTRO MARCAR ERROR: %r", _ie)
                         # Process affiliate commission
                         try:
                             process_commission(company_id, plan, str(data_id))
