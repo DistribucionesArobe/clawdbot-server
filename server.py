@@ -6421,7 +6421,7 @@ def _resolver_waba(phone_number_id, token):
         return None
     if phone_number_id in _WABA_CACHE:
         return _WABA_CACHE[phone_number_id]
-    env_waba = (os.getenv("WA_SEGUIMIENTO_WABA") or "").strip()
+    env_waba = (os.getenv("WA_SEGUIMIENTO_WABA") or "1224835083125902").strip()  # Distribuciones Arobe (834 247 2640)
     if env_waba:
         _WABA_CACHE[phone_number_id] = env_waba
         return env_waba
