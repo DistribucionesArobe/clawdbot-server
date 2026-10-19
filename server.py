@@ -1520,6 +1520,12 @@ async def whatsapp_webhook(request: Request):
         from_phone = msg.get("from")
         msg_type = msg.get("type", "text")
 
+        # Respuesta a un seguimiento: la atiende Alejandro, no el bot de ventas
+        if await asyncio.to_thread(wa_seguimiento_interceptar,
+                                   {"wa_api_key": CX_SALES_WA_API_KEY, "wa_phone_number_id": phone_number_id},
+                                   from_phone, msg):
+            return {"ok": True}
+
         # Extract text
         if msg_type == "text":
             text = (msg.get("text") or {}).get("body") or ""
@@ -6405,11 +6411,15 @@ def admin_generador_leads(request: Request):
                        "wa_enviado": bool(r[8]), "wa_respuesta": r[9]} for r in rows]}
 
 
-# ── Bot de seguimiento por WhatsApp para contactos del generador ─────────
+# ── Bot de seguimiento por WhatsApp (contactos del generador y registrados sin pagar) ──
+# Línea por defecto: la de ventas (81 3085 0381, coexistencia: las respuestas llegan a la app de WhatsApp Business).
 
-WA_SEG_TEMPLATE = "cotizabot_seguimiento_v1"
-WA_SEG_DIGITOS = os.getenv("WA_SEGUIMIENTO_DIGITOS", "8342472640")  # línea desde la que se escribe
-_WA_SEG_APROBADA = {"ok": False, "at": 0.0}
+WA_SEG_TEMPLATE = "cotizabot_seguimiento_v1"            # para contactos del generador
+WA_SEG_TEMPLATE_REG = "cotizabot_seguimiento_registro_v1"  # para registrados sin pagar
+WA_SEG_LINEA = (os.getenv("WA_SEGUIMIENTO_LINEA") or "ventas").strip().lower()   # "ventas" o "demo"
+WA_SEG_DIGITOS = os.getenv("WA_SEGUIMIENTO_DIGITOS", "8342472640")  # línea demo
+WA_VENTAS_WABA = (os.getenv("WA_VENTAS_WABA") or "4498523450386715").strip()  # Cotizaexpress.com (81 3085 0381)
+_WA_SEG_APROBADA = {}
 
 
 _WABA_CACHE = {}
@@ -6425,27 +6435,19 @@ def _resolver_waba(phone_number_id, token):
     if env_waba:
         _WABA_CACHE[phone_number_id] = env_waba
         return env_waba
-    try:
-        r = requests.get("https://graph.facebook.com/v21.0/debug_token",
-                         params={"input_token": token, "access_token": token}, timeout=20)
-        ids = []
-        for gs in (r.json().get("data") or {}).get("granular_scopes", []):
-            if gs.get("scope") in ("whatsapp_business_management", "whatsapp_business_messaging"):
-                ids += gs.get("target_ids") or []
-        for w in dict.fromkeys(ids):
-            rr = requests.get(f"https://graph.facebook.com/v21.0/{w}/phone_numbers",
-                              headers={"Authorization": f"Bearer {token}"}, timeout=20)
-            if any(str(x.get("id")) == str(phone_number_id) for x in rr.json().get("data", [])):
-                _WABA_CACHE[phone_number_id] = w
-                log.info("WABA resuelta para %s: %s", phone_number_id, w)
-                return w
-    except Exception as e:
-        log.warning("RESOLVER WABA ERROR: %r", e)
     return None
 
 
 def _canal_seguimiento(cur):
-    """Canal (phone_number_id, waba_id, token, company_id, telefono) de la línea de seguimiento."""
+    """(phone_number_id, waba_id, token, company_id, etiqueta) de la línea desde la que se escribe."""
+    if WA_SEG_LINEA == "ventas":
+        try:
+            from sales_bot import CX_SALES_PHONE_NUMBER_ID, CX_SALES_WA_API_KEY
+        except Exception:
+            CX_SALES_PHONE_NUMBER_ID, CX_SALES_WA_API_KEY = "", ""
+        if CX_SALES_PHONE_NUMBER_ID and CX_SALES_WA_API_KEY:
+            return (CX_SALES_PHONE_NUMBER_ID, WA_VENTAS_WABA, CX_SALES_WA_API_KEY, None, "ventas 81 3085 0381")
+        return None
     cur.execute("""
         SELECT ch.meta_phone_number_id, ch.meta_waba_id, COALESCE(NULLIF(c.wa_api_key, ''), ch.access_token),
                c.id::text, (to_jsonb(ch)::text || ' ' || COALESCE(c.name, ''))
@@ -6459,7 +6461,7 @@ def _canal_seguimiento(cur):
                 tok = (os.getenv("WHATSAPP_ACCESS_TOKEN") or os.getenv("WA_API_KEY") or "").strip()
             if not waba:
                 waba = _resolver_waba(pid, tok)
-            return (pid, waba, tok, cid, WA_SEG_DIGITOS)
+            return (pid, waba, tok, cid, "demo " + WA_SEG_DIGITOS)
     return None
 
 
@@ -6474,6 +6476,40 @@ def _wa_to(num: str) -> str:
     return d
 
 
+def _plantillas_def():
+    botones = {"type": "BUTTONS", "buttons": [
+        {"type": "QUICK_REPLY", "text": "Sí, enséñame"},
+        {"type": "QUICK_REPLY", "text": "Tengo una duda"},
+        {"type": "QUICK_REPLY", "text": "Ahora no"},
+    ]}
+    return [
+        {"name": WA_SEG_TEMPLATE, "language": "es_MX", "category": "MARKETING", "components": [
+            {"type": "BODY", "text": (
+                "Hola 👋 Soy Alejandro de CotizaBot. Vi que armaste tu cotización en cotizaexpress.com. "
+                "¿Te sirvió? Si quieres, te enseño en 5 minutos a que la próxima se llene sola con la lista "
+                "de tu cliente y salga con tu logo y folio.")}, botones]},
+        {"name": WA_SEG_TEMPLATE_REG, "language": "es_MX", "category": "MARKETING", "components": [
+            {"type": "BODY", "text": (
+                "Hola 👋 Soy Alejandro de CotizaBot. Vi que creaste tu cuenta en cotizaexpress.com. "
+                "¿Pudiste hacer tu primera cotización? Si quieres, te ayudo en 5 minutos por aquí "
+                "para que la próxima te salga sola, con tu logo y folio.")}, botones]},
+    ]
+
+
+def _estado_plantillas(waba_id, token):
+    out = {}
+    for t in _plantillas_def():
+        try:
+            r = requests.get(f"https://graph.facebook.com/v21.0/{waba_id}/message_templates",
+                             params={"name": t["name"]}, headers={"Authorization": f"Bearer {token}"}, timeout=20)
+            data = r.json()
+            sts = [x.get("status") for x in data.get("data", []) if x.get("name") == t["name"]]
+            out[t["name"]] = sts[0] if sts else ("NO_EXISTE" if "data" in data else data.get("error", {}).get("message"))
+        except Exception as e:
+            out[t["name"]] = repr(e)
+    return out
+
+
 @app.get("/api/admin/wa-seguimiento")
 def admin_wa_seguimiento_estado(request: Request):
     u = get_user_from_session(request)
@@ -6483,26 +6519,14 @@ def admin_wa_seguimiento_estado(request: Request):
     k = c.cursor()
     try:
         canal = _canal_seguimiento(k)
-        k.execute("SELECT to_jsonb(ch) - 'access_token' FROM channels ch WHERE ch.is_active = true")
-        canales = []
-        for (j,) in k.fetchall():
-            j = j if isinstance(j, dict) else json.loads(j or "{}")
-            canales.append({"datos": {kk: vv for kk, vv in j.items() if kk in ("address", "phone_display", "meta_phone_number_id", "meta_waba_id", "company_id")}})
     finally:
         k.close(); c.close()
     if not canal:
-        return {"ok": False, "detalle": f"No hay canal activo con {WA_SEG_DIGITOS}", "canales": canales}
-    phone_id, waba_id, token, _cid, display = canal
-    estado = None
-    if waba_id and token:
-        try:
-            r = requests.get(f"https://graph.facebook.com/v21.0/{waba_id}/message_templates",
-                             params={"name": WA_SEG_TEMPLATE}, headers={"Authorization": f"Bearer {token}"}, timeout=20)
-            data = r.json()
-            estado = [{"name": t.get("name"), "status": t.get("status"), "lang": t.get("language")} for t in data.get("data", [])] or data
-        except Exception as e:
-            estado = repr(e)
-    return {"ok": True, "linea": display, "waba": bool(waba_id), "plantilla": estado, "canales": canales}
+        return {"ok": False, "linea_config": WA_SEG_LINEA,
+                "detalle": "La línea de seguimiento no está configurada (para ventas faltan CX_SALES_PHONE_NUMBER_ID y CX_SALES_WA_API_KEY)"}
+    phone_id, waba_id, token, _cid, etiqueta = canal
+    return {"ok": True, "linea": etiqueta, "phone_number_id": phone_id, "waba": waba_id,
+            "plantillas": _estado_plantillas(waba_id, token) if waba_id else None}
 
 
 @app.post("/api/admin/wa-seguimiento/crear-plantilla")
@@ -6518,105 +6542,148 @@ def admin_wa_crear_plantilla(request: Request):
         k.close(); c.close()
     if not canal or not canal[1] or not canal[2]:
         raise HTTPException(status_code=400, detail="No encontré la línea de seguimiento con su WABA y token")
-    _phone_id, waba_id, token, _cid, _disp = canal
-    body = {
-        "name": WA_SEG_TEMPLATE,
-        "language": "es_MX",
-        "category": "MARKETING",
-        "components": [
-            {"type": "BODY", "text": (
-                "Hola 👋 Soy Alejandro de CotizaBot. Vi que armaste tu cotización en cotizaexpress.com. "
-                "¿Te sirvió? Si quieres, te enseño en 5 minutos a que la próxima se llene sola con la lista "
-                "de tu cliente y salga con tu logo y folio."
-            )},
-            {"type": "BUTTONS", "buttons": [
-                {"type": "QUICK_REPLY", "text": "Sí, enséñame"},
-                {"type": "QUICK_REPLY", "text": "Tengo una duda"},
-                {"type": "QUICK_REPLY", "text": "Ahora no"},
-            ]},
-        ],
-    }
-    r = requests.post(f"https://graph.facebook.com/v21.0/{waba_id}/message_templates",
-                      json=body, headers={"Authorization": f"Bearer {token}"}, timeout=30)
-    log.info("WA PLANTILLA CREAR %s: %s", r.status_code, r.text[:400])
-    return {"status": r.status_code, "respuesta": r.json() if r.content else None}
+    _phone_id, waba_id, token, _cid, _et = canal
+    existentes = _estado_plantillas(waba_id, token)
+    res = {}
+    for t in _plantillas_def():
+        if existentes.get(t["name"]) in ("APPROVED", "PENDING"):
+            res[t["name"]] = existentes[t["name"]]
+            continue
+        r = requests.post(f"https://graph.facebook.com/v21.0/{waba_id}/message_templates",
+                          json=t, headers={"Authorization": f"Bearer {token}"}, timeout=30)
+        log.info("WA PLANTILLA CREAR %s %s: %s", t["name"], r.status_code, r.text[:300])
+        res[t["name"]] = r.json() if r.content else r.status_code
+    return {"waba": waba_id, "resultado": res}
 
 
-def _plantilla_aprobada(waba_id, token) -> bool:
+def _plantilla_aprobada(waba_id, token, nombre) -> bool:
     import time as _t
-    if _WA_SEG_APROBADA["ok"] and _t.time() - _WA_SEG_APROBADA["at"] < 6 * 3600:
+    c = _WA_SEG_APROBADA.get(nombre)
+    if c and c[0] and _t.time() - c[1] < 6 * 3600:
         return True
-    try:
-        r = requests.get(f"https://graph.facebook.com/v21.0/{waba_id}/message_templates",
-                         params={"name": WA_SEG_TEMPLATE}, headers={"Authorization": f"Bearer {token}"}, timeout=20)
-        ok = any(t.get("status") == "APPROVED" for t in r.json().get("data", []))
-    except Exception:
-        ok = False
-    _WA_SEG_APROBADA.update(ok=ok, at=_t.time())
+    ok = _estado_plantillas(waba_id, token).get(nombre) == "APPROVED"
+    _WA_SEG_APROBADA[nombre] = (ok, _t.time())
     return ok
 
 
-def _run_wa_seguimiento(cur):
-    """Manda la plantilla de seguimiento a los contactos del generador que dejaron WhatsApp."""
-    from whatsapp_api import send_whatsapp_template
+def _seg_columnas(cur):
     _leads_tabla(cur)
     cur.execute("ALTER TABLE generador_leads ADD COLUMN IF NOT EXISTS wa_seguimiento_at TIMESTAMPTZ")
     cur.execute("ALTER TABLE generador_leads ADD COLUMN IF NOT EXISTS wa_respuesta TEXT")
     cur.execute("ALTER TABLE generador_leads ADD COLUMN IF NOT EXISTS wa_respuesta_at TIMESTAMPTZ")
+    cur.execute("ALTER TABLE companies ADD COLUMN IF NOT EXISTS wa_seguimiento_at TIMESTAMPTZ")
+    cur.execute("ALTER TABLE companies ADD COLUMN IF NOT EXISTS wa_respuesta TEXT")
+    cur.execute("ALTER TABLE companies ADD COLUMN IF NOT EXISTS wa_respuesta_at TIMESTAMPTZ")
+
+
+def _run_wa_seguimiento(cur):
+    """Plantilla de seguimiento a contactos del generador y a registrados sin pagar que dejaron WhatsApp."""
+    from whatsapp_api import send_whatsapp_template
+    _seg_columnas(cur)
     canal = _canal_seguimiento(cur)
     if not canal or not canal[1] or not canal[2]:
         return
-    phone_id, waba_id, token, _cid, _disp = canal
-    if not _plantilla_aprobada(waba_id, token):
-        return
+    phone_id, waba_id, token, _cid, _et = canal
+    # Números ya contactados (por cualquiera de las dos vías) — nunca escribir dos veces
     cur.execute("""
-        SELECT id, whatsapp, email FROM generador_leads
-        WHERE COALESCE(whatsapp, '') <> '' AND wa_seguimiento_at IS NULL
-          AND created_at < now() - interval '30 minutes'
-          AND created_at > now() - interval '3 days'
-        ORDER BY created_at ASC LIMIT 30
+        SELECT right(regexp_replace(COALESCE(whatsapp,''), '\D', '', 'g'), 10) FROM generador_leads WHERE wa_seguimiento_at IS NOT NULL
+        UNION
+        SELECT right(regexp_replace(COALESCE(owner_phone,''), '\D', '', 'g'), 10) FROM companies WHERE wa_seguimiento_at IS NOT NULL
     """)
-    enviados = set()
-    for lid, wa, email in cur.fetchall():
-        to = _wa_to(wa)
-        if (email or "").lower() in _RESCUE_EXCLUDE or len(to) < 12:
-            cur.execute("UPDATE generador_leads SET wa_seguimiento_at = now() WHERE id = %s", (lid,))
-            continue
-        if to not in enviados:
-            try:
-                send_whatsapp_template(token, phone_id, to, WA_SEG_TEMPLATE)
-                enviados.add(to)
-                log.info("WA SEGUIMIENTO → %s", to)
-            except Exception as e:
-                log.warning("WA SEGUIMIENTO ERROR %s: %r", to, e)
-        # marcar todos los registros de ese número
-        cur.execute("UPDATE generador_leads SET wa_seguimiento_at = now() WHERE regexp_replace(COALESCE(whatsapp,''), '\D', '', 'g') = regexp_replace(%s, '\D', '', 'g')", (wa,))
+    ya = {r[0] for r in cur.fetchall() if r[0]}
+
+    # 1) Contactos del generador
+    if _plantilla_aprobada(waba_id, token, WA_SEG_TEMPLATE):
+        cur.execute("""
+            SELECT id, whatsapp, email FROM generador_leads
+            WHERE COALESCE(whatsapp, '') <> '' AND wa_seguimiento_at IS NULL
+              AND created_at < now() - interval '30 minutes' AND created_at > now() - interval '3 days'
+            ORDER BY created_at ASC LIMIT 30
+        """)
+        for lid, wa, email in cur.fetchall():
+            to = _wa_to(wa)
+            ult = re.sub(r"\D", "", wa or "")[-10:]
+            if (email or "").lower() not in _RESCUE_EXCLUDE and len(to) >= 12 and ult not in ya:
+                try:
+                    send_whatsapp_template(token, phone_id, to, WA_SEG_TEMPLATE)
+                    ya.add(ult)
+                    log.info("WA SEGUIMIENTO (generador) → %s", to)
+                except Exception as e:
+                    log.warning("WA SEGUIMIENTO ERROR %s: %r", to, e)
+            cur.execute("UPDATE generador_leads SET wa_seguimiento_at = now() "
+                        "WHERE right(regexp_replace(COALESCE(whatsapp,''), '\D', '', 'g'), 10) = %s", (ult,))
+
+    # 2) Registrados sin pagar con WhatsApp
+    if _plantilla_aprobada(waba_id, token, WA_SEG_TEMPLATE_REG):
+        cur.execute("""
+            SELECT c.id::text, c.owner_phone, u.email FROM companies c
+            JOIN users u ON u.company_id = c.id
+            WHERE COALESCE(c.plan_code, 'free') = 'free' AND COALESCE(c.owner_phone, '') <> ''
+              AND c.wa_seguimiento_at IS NULL
+              AND u.created_at < now() - interval '1 hour' AND u.created_at > now() - interval '14 days'
+            ORDER BY u.created_at ASC LIMIT 30
+        """)
+        for cid, tel, email in cur.fetchall():
+            to = _wa_to(tel)
+            ult = re.sub(r"\D", "", tel or "")[-10:]
+            if (email or "").lower() not in _RESCUE_EXCLUDE and (email or "").lower() not in TEST_EMAILS \
+                    and len(to) >= 12 and ult not in ya:
+                try:
+                    send_whatsapp_template(token, phone_id, to, WA_SEG_TEMPLATE_REG)
+                    ya.add(ult)
+                    log.info("WA SEGUIMIENTO (registro) → %s", to)
+                except Exception as e:
+                    log.warning("WA SEGUIMIENTO REG ERROR %s: %r", to, e)
+            cur.execute("UPDATE companies SET wa_seguimiento_at = now() WHERE id = %s", (cid,))
+
+
+def _pids_seguimiento(cur) -> set:
+    """phone_number_id de las líneas desde las que se ha escrito seguimiento (ventas y demo)."""
+    pids = set()
+    try:
+        from sales_bot import CX_SALES_PHONE_NUMBER_ID
+        if CX_SALES_PHONE_NUMBER_ID:
+            pids.add(str(CX_SALES_PHONE_NUMBER_ID))
+    except Exception:
+        pass
+    cur.execute("SELECT ch.meta_phone_number_id, to_jsonb(ch)::text FROM channels ch WHERE ch.is_active = true")
+    for pid, txt in cur.fetchall():
+        if pid and WA_SEG_DIGITOS in re.sub(r"\D", "", txt or ""):
+            pids.add(str(pid))
+    return pids
 
 
 def wa_seguimiento_interceptar(company: dict, from_phone: str, msg: dict) -> bool:
-    """Si quien escribe es un contacto del generador al que le mandamos seguimiento y aún no respondía,
-    contestamos y avisamos a Alejandro. Devuelve True si ya se atendió (no pasar al bot)."""
+    """Si escribe alguien a quien le mandamos seguimiento (en los últimos 14 días), el bot NO contesta:
+    lo atiende Alejandro. En su primera respuesta le confirmamos y le avisamos a Alejandro por correo.
+    Devuelve True si ya se atendió (no pasar al bot)."""
     try:
         if not from_phone:
             return False
         c = get_conn(); c.autocommit = True
         k = c.cursor()
         try:
-            canal = _canal_seguimiento(k)
-            if not canal or str(canal[0]) != str(company.get("wa_phone_number_id")):
+            _seg_columnas(k)
+            if str(company.get("wa_phone_number_id")) not in _pids_seguimiento(k):
                 return False
             ult10 = re.sub(r"\D", "", from_phone)[-10:]
             k.execute("""
-                SELECT id, email, negocio, whatsapp FROM generador_leads
-                WHERE wa_seguimiento_at IS NOT NULL AND wa_respuesta_at IS NULL
-                  AND wa_seguimiento_at > now() - interval '14 days'
+                SELECT 'lead', email, negocio, whatsapp, wa_respuesta_at FROM generador_leads
+                WHERE wa_seguimiento_at > now() - interval '14 days'
                   AND right(regexp_replace(COALESCE(whatsapp,''), '\D', '', 'g'), 10) = %s
-                ORDER BY id DESC LIMIT 1
-            """, (ult10,))
-            lead = k.fetchone()
-            if not lead:
+                UNION ALL
+                SELECT 'registro', u.email, c.name, c.owner_phone, c.wa_respuesta_at FROM companies c
+                JOIN users u ON u.company_id = c.id
+                WHERE c.wa_seguimiento_at > now() - interval '14 days'
+                  AND right(regexp_replace(COALESCE(c.owner_phone,''), '\D', '', 'g'), 10) = %s
+                LIMIT 1
+            """, (ult10, ult10))
+            fila = k.fetchone()
+            if not fila:
                 return False
-            lid, email, negocio, wa = lead
+            origen, email, negocio, wa, ya_respondio = fila
+            if ya_respondio:
+                return True  # ya está en conversación con Alejandro: el bot no se mete
             texto = ""
             if msg.get("type") == "button":
                 texto = (msg.get("button") or {}).get("text", "")
@@ -6626,25 +6693,26 @@ def wa_seguimiento_interceptar(company: dict, from_phone: str, msg: dict) -> boo
             elif msg.get("type") == "text":
                 texto = (msg.get("text") or {}).get("body", "")
             texto = (texto or msg.get("type") or "").strip()[:500]
-            k.execute("UPDATE generador_leads SET wa_respuesta = %s, wa_respuesta_at = now() WHERE right(regexp_replace(COALESCE(whatsapp,''), '\D', '', 'g'), 10) = %s",
-                      (texto, ult10))
+            k.execute("UPDATE generador_leads SET wa_respuesta = %s, wa_respuesta_at = now() "
+                      "WHERE right(regexp_replace(COALESCE(whatsapp,''), '\D', '', 'g'), 10) = %s", (texto, ult10))
+            k.execute("UPDATE companies SET wa_respuesta = %s, wa_respuesta_at = now() "
+                      "WHERE right(regexp_replace(COALESCE(owner_phone,''), '\D', '', 'g'), 10) = %s", (texto, ult10))
         finally:
             k.close(); c.close()
         from whatsapp_api import send_whatsapp_text
-        if texto.lower().startswith("ahora no"):
-            resp = ("¡Sin problema! 🙌 Aquí queda tu cuenta lista para cuando la necesites: "
-                    "https://www.cotizaexpress.com/cotizador — cualquier duda, escríbeme por aquí.")
-        else:
-            resp = ("¡Perfecto! 🙌 Alejandro te escribe en unos minutos para ayudarte. "
-                    "Mientras, puedes entrar aquí: https://www.cotizaexpress.com/registro?utm_source=wa_seguimiento")
+        no = texto.lower().startswith("ahora no")
+        resp = ("¡Sin problema! 🙌 Aquí queda tu cuenta lista para cuando la necesites: "
+                "https://www.cotizaexpress.com/cotizador — cualquier duda, escríbeme por aquí."
+                if no else "¡Perfecto! 🙌 En unos minutos te escribo para ayudarte.")
         try:
             send_whatsapp_text(company["wa_api_key"], company["wa_phone_number_id"], from_phone, resp)
         except Exception as e:
             log.warning("WA SEG RESPUESTA ERROR: %r", e)
-        if not texto.lower().startswith("ahora no"):
+        if not no:
             for dest in ADMIN_EMAILS:
                 _send_email(dest, f"🔥 Contacto respondió por WhatsApp: {negocio or email}",
-                            f"Respondió: \"{texto}\"\n\nNegocio: {negocio or '—'}\nCorreo: {email}\nWhatsApp: {wa}\n\n"
+                            f"Respondió: \"{texto}\"\nOrigen: {'generador' if origen == 'lead' else 'registrado sin pagar'}\n\n"
+                            f"Negocio: {negocio or '—'}\nCorreo: {email}\nWhatsApp: {wa}\n\n"
                             f"Escríbele ahora: https://wa.me/{_wa_to(wa)}\n")
         log.info("WA SEGUIMIENTO RESPUESTA %s: %r", from_phone, texto)
         return True

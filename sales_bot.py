@@ -40,6 +40,10 @@ Cuando un cliente del negocio envía un mensaje de WhatsApp pidiendo precios, el
 - Funciona 24/7 sin intervención humana
 
 ## Planes y precios
+- **Generador de cotizaciones gratis** (sin registro): https://cotizaexpress.com/generador-de-cotizaciones
+- **Cotizador IA**: $299 MXN/mes (en USA $29 USD) — cotizaciones ilimitadas desde el celular: tabla tipo Excel,
+  pegar la lista o subir screenshot del WhatsApp del cliente, IVA, ganancia estimada, órdenes de cambio y PDF con logo.
+  La primera cotización es gratis. Es la mejor entrada para quien solo quiere hacer cotizaciones rápido.
 - **Plan CotizaBot**: $1,000 MXN/mes (neto)
   - Bot IA en WhatsApp
   - Cotizaciones automáticas ilimitadas
