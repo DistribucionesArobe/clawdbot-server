@@ -6412,6 +6412,38 @@ WA_SEG_DIGITOS = os.getenv("WA_SEGUIMIENTO_DIGITOS", "8342472640")  # línea des
 _WA_SEG_APROBADA = {"ok": False, "at": 0.0}
 
 
+_WABA_CACHE = {}
+
+
+def _resolver_waba(phone_number_id, token):
+    """Encuentra la cuenta de WhatsApp Business (WABA) dueña de un phone_number_id usando el token."""
+    if not phone_number_id or not token:
+        return None
+    if phone_number_id in _WABA_CACHE:
+        return _WABA_CACHE[phone_number_id]
+    env_waba = (os.getenv("WA_SEGUIMIENTO_WABA") or "").strip()
+    if env_waba:
+        _WABA_CACHE[phone_number_id] = env_waba
+        return env_waba
+    try:
+        r = requests.get("https://graph.facebook.com/v21.0/debug_token",
+                         params={"input_token": token, "access_token": token}, timeout=20)
+        ids = []
+        for gs in (r.json().get("data") or {}).get("granular_scopes", []):
+            if gs.get("scope") in ("whatsapp_business_management", "whatsapp_business_messaging"):
+                ids += gs.get("target_ids") or []
+        for w in dict.fromkeys(ids):
+            rr = requests.get(f"https://graph.facebook.com/v21.0/{w}/phone_numbers",
+                              headers={"Authorization": f"Bearer {token}"}, timeout=20)
+            if any(str(x.get("id")) == str(phone_number_id) for x in rr.json().get("data", [])):
+                _WABA_CACHE[phone_number_id] = w
+                log.info("WABA resuelta para %s: %s", phone_number_id, w)
+                return w
+    except Exception as e:
+        log.warning("RESOLVER WABA ERROR: %r", e)
+    return None
+
+
 def _canal_seguimiento(cur):
     """Canal (phone_number_id, waba_id, token, company_id, telefono) de la línea de seguimiento."""
     cur.execute("""
@@ -6425,6 +6457,8 @@ def _canal_seguimiento(cur):
             pid, waba, tok, cid, _txt = row
             if not tok:
                 tok = (os.getenv("WHATSAPP_ACCESS_TOKEN") or os.getenv("WA_API_KEY") or "").strip()
+            if not waba:
+                waba = _resolver_waba(pid, tok)
             return (pid, waba, tok, cid, WA_SEG_DIGITOS)
     return None
 
