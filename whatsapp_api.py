@@ -27,6 +27,17 @@ def send_whatsapp_text(wa_api_key: str, phone_number_id: str, to: str, text: str
         raise RuntimeError(f"WhatsApp send failed {r.status_code}: {r.text[:400]}")
 
 
+def send_whatsapp_template(wa_api_key: str, phone_number_id: str, to: str, name: str, lang: str = "es_MX"):
+    url = f"{WA_API_BASE}/{phone_number_id}/messages"
+    headers = {"Authorization": f"Bearer {wa_api_key}", "Content-Type": "application/json"}
+    payload = {"messaging_product": "whatsapp", "to": to, "type": "template",
+               "template": {"name": name, "language": {"code": lang}}}
+    r = requests.post(url, headers=headers, json=payload, timeout=20)
+    if r.status_code >= 300:
+        raise RuntimeError(f"WhatsApp template failed {r.status_code}: {r.text[:400]}")
+    return r.json()
+
+
 def send_whatsapp_list(wa_api_key: str, phone_number_id: str, to: str,
                        body_text: str, options: list, button_label: str = "Ver opciones"):
     rows = [{"id": f"spec_{i}", "title": opt[:24]} for i, opt in enumerate(options[:10])]

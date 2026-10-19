@@ -1570,6 +1570,10 @@ async def whatsapp_webhook(request: Request):
 
     from_phone = msg.get("from")
 
+    # ── Respuesta a un seguimiento de CotizaBot (contactos del generador) ──
+    if await asyncio.to_thread(wa_seguimiento_interceptar, company, from_phone, msg):
+        return {"ok": True}
+
     # ── Visto + "escribiendo..." inmediato (percepción de velocidad) ────
     if wa_msg_id:
         try:
@@ -6384,16 +6388,232 @@ def admin_generador_leads(request: Request):
     k = c.cursor()
     try:
         _leads_tabla(k)
+        k.execute("ALTER TABLE generador_leads ADD COLUMN IF NOT EXISTS wa_seguimiento_at TIMESTAMPTZ")
+        k.execute("ALTER TABLE generador_leads ADD COLUMN IF NOT EXISTS wa_respuesta TEXT")
+        k.execute("ALTER TABLE generador_leads ADD COLUMN IF NOT EXISTS wa_respuesta_at TIMESTAMPTZ")
         k.execute("""
             SELECT l.created_at, l.email, l.whatsapp, l.negocio, l.cliente, jsonb_array_length(l.items), l.fuente,
-                   EXISTS (SELECT 1 FROM users u WHERE lower(u.email) = lower(l.email)) AS se_registro
+                   EXISTS (SELECT 1 FROM users u WHERE lower(u.email) = lower(l.email)) AS se_registro,
+                   l.wa_seguimiento_at, l.wa_respuesta
             FROM generador_leads l ORDER BY l.created_at DESC LIMIT 300
         """)
         rows = k.fetchall()
     finally:
         k.close(); c.close()
     return {"leads": [{"fecha": r[0].isoformat(), "email": r[1], "whatsapp": r[2], "negocio": r[3], "cliente": r[4],
-                       "conceptos": r[5], "fuente": r[6], "se_registro": r[7]} for r in rows]}
+                       "conceptos": r[5], "fuente": r[6], "se_registro": r[7],
+                       "wa_enviado": bool(r[8]), "wa_respuesta": r[9]} for r in rows]}
+
+
+# ── Bot de seguimiento por WhatsApp para contactos del generador ─────────
+
+WA_SEG_TEMPLATE = "cotizabot_seguimiento_v1"
+WA_SEG_DIGITOS = os.getenv("WA_SEGUIMIENTO_DIGITOS", "8342472640")  # línea desde la que se escribe
+_WA_SEG_APROBADA = {"ok": False, "at": 0.0}
+
+
+def _canal_seguimiento(cur):
+    """Canal (phone_number_id, waba_id, token, company_id, telefono) de la línea de seguimiento."""
+    cur.execute("""
+        SELECT ch.meta_phone_number_id, ch.meta_waba_id, COALESCE(NULLIF(c.wa_api_key, ''), ch.access_token),
+               c.id::text, (to_jsonb(ch)::text || ' ' || COALESCE(c.name, ''))
+        FROM channels ch JOIN companies c ON c.id = ch.company_id
+        WHERE ch.is_active = true
+    """)
+    for row in cur.fetchall():
+        if WA_SEG_DIGITOS in re.sub(r"\D", "", row[4] or ""):
+            pid, waba, tok, cid, _txt = row
+            if not tok:
+                tok = (os.getenv("WHATSAPP_ACCESS_TOKEN") or os.getenv("WA_API_KEY") or "").strip()
+            return (pid, waba, tok, cid, WA_SEG_DIGITOS)
+    return None
+
+
+def _wa_to(num: str) -> str:
+    d = re.sub(r"\D", "", num or "")
+    if len(d) == 10:
+        return "52" + d
+    if len(d) == 12 and d.startswith("52"):
+        return d
+    if len(d) == 13 and d.startswith("521"):
+        return "52" + d[3:]
+    return d
+
+
+@app.get("/api/admin/wa-seguimiento")
+def admin_wa_seguimiento_estado(request: Request):
+    u = get_user_from_session(request)
+    if (u.get("email") or "").lower() not in ADMIN_EMAILS:
+        raise HTTPException(status_code=403, detail="Solo admin")
+    c = get_conn(); c.autocommit = True
+    k = c.cursor()
+    try:
+        canal = _canal_seguimiento(k)
+        k.execute("SELECT phone_display, meta_phone_number_id IS NOT NULL, meta_waba_id IS NOT NULL FROM channels WHERE is_active = true")
+        canales = [{"telefono": r[0], "tiene_phone_id": r[1], "tiene_waba": r[2]} for r in k.fetchall()]
+    finally:
+        k.close(); c.close()
+    if not canal:
+        return {"ok": False, "detalle": f"No hay canal activo con {WA_SEG_DIGITOS}", "canales": canales}
+    phone_id, waba_id, token, _cid, display = canal
+    estado = None
+    if waba_id and token:
+        try:
+            r = requests.get(f"https://graph.facebook.com/v21.0/{waba_id}/message_templates",
+                             params={"name": WA_SEG_TEMPLATE}, headers={"Authorization": f"Bearer {token}"}, timeout=20)
+            data = r.json()
+            estado = [{"name": t.get("name"), "status": t.get("status"), "lang": t.get("language")} for t in data.get("data", [])] or data
+        except Exception as e:
+            estado = repr(e)
+    return {"ok": True, "linea": display, "waba": bool(waba_id), "plantilla": estado, "canales": canales}
+
+
+@app.post("/api/admin/wa-seguimiento/crear-plantilla")
+def admin_wa_crear_plantilla(request: Request):
+    u = get_user_from_session(request)
+    if (u.get("email") or "").lower() not in ADMIN_EMAILS:
+        raise HTTPException(status_code=403, detail="Solo admin")
+    c = get_conn(); c.autocommit = True
+    k = c.cursor()
+    try:
+        canal = _canal_seguimiento(k)
+    finally:
+        k.close(); c.close()
+    if not canal or not canal[1] or not canal[2]:
+        raise HTTPException(status_code=400, detail="No encontré la línea de seguimiento con su WABA y token")
+    _phone_id, waba_id, token, _cid, _disp = canal
+    body = {
+        "name": WA_SEG_TEMPLATE,
+        "language": "es_MX",
+        "category": "MARKETING",
+        "components": [
+            {"type": "BODY", "text": (
+                "Hola 👋 Soy Alejandro de CotizaBot. Vi que armaste tu cotización en cotizaexpress.com. "
+                "¿Te sirvió? Si quieres, te enseño en 5 minutos a que la próxima se llene sola con la lista "
+                "de tu cliente y salga con tu logo y folio."
+            )},
+            {"type": "BUTTONS", "buttons": [
+                {"type": "QUICK_REPLY", "text": "Sí, enséñame"},
+                {"type": "QUICK_REPLY", "text": "Tengo una duda"},
+                {"type": "QUICK_REPLY", "text": "Ahora no"},
+            ]},
+        ],
+    }
+    r = requests.post(f"https://graph.facebook.com/v21.0/{waba_id}/message_templates",
+                      json=body, headers={"Authorization": f"Bearer {token}"}, timeout=30)
+    log.info("WA PLANTILLA CREAR %s: %s", r.status_code, r.text[:400])
+    return {"status": r.status_code, "respuesta": r.json() if r.content else None}
+
+
+def _plantilla_aprobada(waba_id, token) -> bool:
+    import time as _t
+    if _WA_SEG_APROBADA["ok"] and _t.time() - _WA_SEG_APROBADA["at"] < 6 * 3600:
+        return True
+    try:
+        r = requests.get(f"https://graph.facebook.com/v21.0/{waba_id}/message_templates",
+                         params={"name": WA_SEG_TEMPLATE}, headers={"Authorization": f"Bearer {token}"}, timeout=20)
+        ok = any(t.get("status") == "APPROVED" for t in r.json().get("data", []))
+    except Exception:
+        ok = False
+    _WA_SEG_APROBADA.update(ok=ok, at=_t.time())
+    return ok
+
+
+def _run_wa_seguimiento(cur):
+    """Manda la plantilla de seguimiento a los contactos del generador que dejaron WhatsApp."""
+    from whatsapp_api import send_whatsapp_template
+    _leads_tabla(cur)
+    cur.execute("ALTER TABLE generador_leads ADD COLUMN IF NOT EXISTS wa_seguimiento_at TIMESTAMPTZ")
+    cur.execute("ALTER TABLE generador_leads ADD COLUMN IF NOT EXISTS wa_respuesta TEXT")
+    cur.execute("ALTER TABLE generador_leads ADD COLUMN IF NOT EXISTS wa_respuesta_at TIMESTAMPTZ")
+    canal = _canal_seguimiento(cur)
+    if not canal or not canal[1] or not canal[2]:
+        return
+    phone_id, waba_id, token, _cid, _disp = canal
+    if not _plantilla_aprobada(waba_id, token):
+        return
+    cur.execute("""
+        SELECT id, whatsapp, email FROM generador_leads
+        WHERE COALESCE(whatsapp, '') <> '' AND wa_seguimiento_at IS NULL
+          AND created_at < now() - interval '30 minutes'
+          AND created_at > now() - interval '3 days'
+        ORDER BY created_at ASC LIMIT 30
+    """)
+    enviados = set()
+    for lid, wa, email in cur.fetchall():
+        to = _wa_to(wa)
+        if (email or "").lower() in _RESCUE_EXCLUDE or len(to) < 12:
+            cur.execute("UPDATE generador_leads SET wa_seguimiento_at = now() WHERE id = %s", (lid,))
+            continue
+        if to not in enviados:
+            try:
+                send_whatsapp_template(token, phone_id, to, WA_SEG_TEMPLATE)
+                enviados.add(to)
+                log.info("WA SEGUIMIENTO → %s", to)
+            except Exception as e:
+                log.warning("WA SEGUIMIENTO ERROR %s: %r", to, e)
+        # marcar todos los registros de ese número
+        cur.execute("UPDATE generador_leads SET wa_seguimiento_at = now() WHERE regexp_replace(COALESCE(whatsapp,''), '\D', '', 'g') = regexp_replace(%s, '\D', '', 'g')", (wa,))
+
+
+def wa_seguimiento_interceptar(company: dict, from_phone: str, msg: dict) -> bool:
+    """Si quien escribe es un contacto del generador al que le mandamos seguimiento y aún no respondía,
+    contestamos y avisamos a Alejandro. Devuelve True si ya se atendió (no pasar al bot)."""
+    try:
+        if not from_phone:
+            return False
+        c = get_conn(); c.autocommit = True
+        k = c.cursor()
+        try:
+            canal = _canal_seguimiento(k)
+            if not canal or str(canal[0]) != str(company.get("wa_phone_number_id")):
+                return False
+            ult10 = re.sub(r"\D", "", from_phone)[-10:]
+            k.execute("""
+                SELECT id, email, negocio, whatsapp FROM generador_leads
+                WHERE wa_seguimiento_at IS NOT NULL AND wa_respuesta_at IS NULL
+                  AND wa_seguimiento_at > now() - interval '14 days'
+                  AND right(regexp_replace(COALESCE(whatsapp,''), '\D', '', 'g'), 10) = %s
+                ORDER BY id DESC LIMIT 1
+            """, (ult10,))
+            lead = k.fetchone()
+            if not lead:
+                return False
+            lid, email, negocio, wa = lead
+            texto = ""
+            if msg.get("type") == "button":
+                texto = (msg.get("button") or {}).get("text", "")
+            elif msg.get("type") == "interactive":
+                it = msg.get("interactive") or {}
+                texto = (it.get("button_reply") or {}).get("title", "") or (it.get("list_reply") or {}).get("title", "")
+            elif msg.get("type") == "text":
+                texto = (msg.get("text") or {}).get("body", "")
+            texto = (texto or msg.get("type") or "").strip()[:500]
+            k.execute("UPDATE generador_leads SET wa_respuesta = %s, wa_respuesta_at = now() WHERE right(regexp_replace(COALESCE(whatsapp,''), '\D', '', 'g'), 10) = %s",
+                      (texto, ult10))
+        finally:
+            k.close(); c.close()
+        from whatsapp_api import send_whatsapp_text
+        if texto.lower().startswith("ahora no"):
+            resp = ("¡Sin problema! 🙌 Aquí queda tu cuenta lista para cuando la necesites: "
+                    "https://www.cotizaexpress.com/cotizador — cualquier duda, escríbeme por aquí.")
+        else:
+            resp = ("¡Perfecto! 🙌 Alejandro te escribe en unos minutos para ayudarte. "
+                    "Mientras, puedes entrar aquí: https://www.cotizaexpress.com/registro?utm_source=wa_seguimiento")
+        try:
+            send_whatsapp_text(company["wa_api_key"], company["wa_phone_number_id"], from_phone, resp)
+        except Exception as e:
+            log.warning("WA SEG RESPUESTA ERROR: %r", e)
+        if not texto.lower().startswith("ahora no"):
+            for dest in ADMIN_EMAILS:
+                _send_email(dest, f"🔥 Contacto respondió por WhatsApp: {negocio or email}",
+                            f"Respondió: \"{texto}\"\n\nNegocio: {negocio or '—'}\nCorreo: {email}\nWhatsApp: {wa}\n\n"
+                            f"Escríbele ahora: https://wa.me/{_wa_to(wa)}\n")
+        log.info("WA SEGUIMIENTO RESPUESTA %s: %r", from_phone, texto)
+        return True
+    except Exception as e:
+        log.warning("WA SEG INTERCEPT ERROR: %r", e)
+        return False
 
 
 @app.post("/api/cotizador/imagen")
@@ -6729,7 +6949,7 @@ def referidos_mi_link(request: Request):
 
 
 # ── Rescate de onboarding: emails a registros sin WhatsApp conectado ────
-ONBOARDING_RESCUE_INTERVAL_SEC = 6 * 3600  # cada 6 horas
+ONBOARDING_RESCUE_INTERVAL_SEC = 30 * 60  # cada 30 min (los correos tienen su propio control para no repetirse)
 _RESCUE_EXCLUDE = {"ealejandro.robledo@gmail.com", "pedrozv12@hotmail.com", "contacto@arobegroup.com", "morty_92@hotmail.com"}
 
 
@@ -6988,6 +7208,10 @@ def _run_onboarding_rescue_once():
             _run_leads_seguimiento(cur)
         except Exception as _le:
             log.warning("LEADS SEGUIMIENTO ERROR: %r", _le)
+        try:
+            _run_wa_seguimiento(cur)
+        except Exception as _we:
+            log.warning("WA SEGUIMIENTO LOOP ERROR: %r", _we)
     finally:
         cur.close()
         conn.close()
