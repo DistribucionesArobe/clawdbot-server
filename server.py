@@ -6420,6 +6420,7 @@ def admin_generador_leads(request: Request):
 
 WA_SEG_TEMPLATE = "cotizabot_seguimiento_v1"            # para contactos del generador
 WA_SEG_TEMPLATE_REG = "cotizabot_seguimiento_registro_v1"  # para registrados sin pagar
+WA_SEG_TEMPLATE_2 = "cotizabot_seguimiento_2_v1"  # segundo toque a quien no contestó (48 h después)
 WA_SEG_LINEA = (os.getenv("WA_SEGUIMIENTO_LINEA") or "ventas").strip().lower()   # "ventas" o "demo"
 WA_SEG_DIGITOS = os.getenv("WA_SEGUIMIENTO_DIGITOS", "8342472640")  # línea demo
 WA_VENTAS_WABA = (os.getenv("WA_VENTAS_WABA") or "4498523450386715").strip()  # Cotizaexpress.com (81 3085 0381)
@@ -6497,6 +6498,15 @@ def _plantillas_def():
                 "Hola 👋 Soy Alejandro de CotizaBot. Vi que creaste tu cuenta en cotizaexpress.com. "
                 "¿Pudiste hacer tu primera cotización? Si quieres, te ayudo en 5 minutos por aquí "
                 "para que la próxima te salga sola, con tu logo y folio.")}, botones]},
+        {"name": WA_SEG_TEMPLATE_2, "language": "es_MX", "category": "MARKETING", "components": [
+            {"type": "BODY", "text": (
+                "Hola, soy Alejandro de CotizaBot otra vez 🙂 ¿Te ayudo con tu próxima cotización? "
+                "Mándame por aquí la lista que te pidieron (o un screenshot) y te la regreso hecha en PDF, "
+                "con tu logo, en unos minutos.")},
+            {"type": "BUTTONS", "buttons": [
+                {"type": "QUICK_REPLY", "text": "Sí, ayúdame"},
+                {"type": "QUICK_REPLY", "text": "Ahora no"},
+            ]}]},
     ]
 
 
@@ -6578,6 +6588,8 @@ def _seg_columnas(cur):
     cur.execute("ALTER TABLE companies ADD COLUMN IF NOT EXISTS wa_seguimiento_at TIMESTAMPTZ")
     cur.execute("ALTER TABLE companies ADD COLUMN IF NOT EXISTS wa_respuesta TEXT")
     cur.execute("ALTER TABLE companies ADD COLUMN IF NOT EXISTS wa_respuesta_at TIMESTAMPTZ")
+    cur.execute("ALTER TABLE generador_leads ADD COLUMN IF NOT EXISTS wa_seguimiento2_at TIMESTAMPTZ")
+    cur.execute("ALTER TABLE companies ADD COLUMN IF NOT EXISTS wa_seguimiento2_at TIMESTAMPTZ")
 
 
 def _run_wa_seguimiento(cur):
@@ -6617,6 +6629,36 @@ def _run_wa_seguimiento(cur):
             cur.execute("UPDATE generador_leads SET wa_seguimiento_at = now() "
                         "WHERE right(regexp_replace(COALESCE(whatsapp,''), '\D', '', 'g'), 10) = %s", (ult,))
 
+    # 3) Segundo toque: 48 h después del primero, si no contestó (solo una vez, nunca más)
+    if _plantilla_aprobada(waba_id, token, WA_SEG_TEMPLATE_2):
+        cur.execute("""
+            SELECT 'lead', id::text, whatsapp, email FROM generador_leads
+            WHERE COALESCE(whatsapp,'') <> '' AND wa_seguimiento_at < now() - interval '48 hours'
+              AND wa_seguimiento_at > now() - interval '10 days'
+              AND wa_respuesta_at IS NULL AND wa_seguimiento2_at IS NULL
+            UNION ALL
+            SELECT 'registro', c.id::text, c.owner_phone, u.email FROM companies c JOIN users u ON u.company_id = c.id
+            WHERE COALESCE(c.owner_phone,'') <> '' AND COALESCE(c.plan_code,'free') = 'free'
+              AND c.wa_seguimiento_at < now() - interval '48 hours' AND c.wa_seguimiento_at > now() - interval '10 days'
+              AND c.wa_respuesta_at IS NULL AND c.wa_seguimiento2_at IS NULL
+            LIMIT 30
+        """)
+        hechos2 = set()
+        for origen, rid, wa, email in cur.fetchall():
+            ult = re.sub(r"\D", "", wa or "")[-10:]
+            to = _wa_to(wa)
+            if ult not in hechos2 and len(to) >= 12 and (email or "").lower() not in _RESCUE_EXCLUDE:
+                try:
+                    send_whatsapp_template(token, phone_id, to, WA_SEG_TEMPLATE_2)
+                    log.info("WA SEGUIMIENTO 2 → %s", to)
+                except Exception as e:
+                    log.warning("WA SEGUIMIENTO 2 ERROR %s: %r", to, e)
+                hechos2.add(ult)
+            cur.execute("UPDATE generador_leads SET wa_seguimiento2_at = now() "
+                        "WHERE right(regexp_replace(COALESCE(whatsapp,''), '\D', '', 'g'), 10) = %s", (ult,))
+            cur.execute("UPDATE companies SET wa_seguimiento2_at = now() "
+                        "WHERE right(regexp_replace(COALESCE(owner_phone,''), '\D', '', 'g'), 10) = %s", (ult,))
+
     # 2) Registrados sin pagar con WhatsApp
     if _plantilla_aprobada(waba_id, token, WA_SEG_TEMPLATE_REG):
         cur.execute("""
@@ -6639,6 +6681,110 @@ def _run_wa_seguimiento(cur):
                 except Exception as e:
                     log.warning("WA SEGUIMIENTO REG ERROR %s: %r", to, e)
             cur.execute("UPDATE companies SET wa_seguimiento_at = now() WHERE id = %s", (cid,))
+
+
+class AdminWAPlantilla(BaseModel):
+    numeros: list
+    plantilla: str
+
+
+@app.post("/api/admin/wa/plantilla")
+def admin_wa_plantilla(body: AdminWAPlantilla, request: Request):
+    """Manda una plantilla aprobada desde la línea de seguimiento (ventas) a números específicos."""
+    from whatsapp_api import send_whatsapp_template
+    u = get_user_from_session(request)
+    if (u.get("email") or "").lower() not in ADMIN_EMAILS:
+        raise HTTPException(status_code=403, detail="Solo admin")
+    nombres = {t["name"] for t in _plantillas_def()}
+    if body.plantilla not in nombres:
+        raise HTTPException(status_code=400, detail="Plantilla no válida")
+    c = get_conn(); c.autocommit = True
+    k = c.cursor()
+    try:
+        _seg_columnas(k)
+        canal = _canal_seguimiento(k)
+        if not canal:
+            raise HTTPException(status_code=400, detail="Línea de seguimiento no configurada")
+        phone_id, _waba, token, _cid, _et = canal
+        res = {}
+        for n in (body.numeros or [])[:20]:
+            to = _wa_to(str(n))
+            ult = re.sub(r"\D", "", str(n))[-10:]
+            try:
+                send_whatsapp_template(token, phone_id, to, body.plantilla)
+                res[to] = "enviado"
+                col = "wa_seguimiento2_at" if body.plantilla == WA_SEG_TEMPLATE_2 else "wa_seguimiento_at"
+                # marcar para que la automatización no repita
+                k.execute(f"UPDATE generador_leads SET {col} = now(), wa_seguimiento_at = COALESCE(wa_seguimiento_at, now()) "
+                          "WHERE right(regexp_replace(COALESCE(whatsapp,''), '\D', '', 'g'), 10) = %s", (ult,))
+                k.execute(f"UPDATE companies SET {col} = now(), wa_seguimiento_at = COALESCE(wa_seguimiento_at, now()) "
+                          "WHERE right(regexp_replace(COALESCE(owner_phone,''), '\D', '', 'g'), 10) = %s", (ult,))
+            except Exception as e:
+                res[to] = f"error: {e}"[:300]
+    finally:
+        k.close(); c.close()
+    log.info("ADMIN WA PLANTILLA %s: %s", body.plantilla, res)
+    return {"resultado": res}
+
+
+class AdminWATexto(BaseModel):
+    linea: str = "ventas"   # "ventas" o "demo"
+    numero: str
+    texto: str
+
+
+@app.post("/api/admin/wa/texto")
+def admin_wa_texto(body: AdminWATexto, request: Request):
+    """Texto libre (solo funciona si esa persona escribió a esa línea en las últimas 24 h)."""
+    from whatsapp_api import send_whatsapp_text
+    u = get_user_from_session(request)
+    if (u.get("email") or "").lower() not in ADMIN_EMAILS:
+        raise HTTPException(status_code=403, detail="Solo admin")
+    if not (body.texto or "").strip():
+        raise HTTPException(status_code=400, detail="Texto vacío")
+    if body.linea == "ventas":
+        from sales_bot import CX_SALES_PHONE_NUMBER_ID as pid, CX_SALES_WA_API_KEY as tok
+    else:
+        c = get_conn(); c.autocommit = True
+        k = c.cursor()
+        try:
+            k.execute("""SELECT ch.meta_phone_number_id, COALESCE(NULLIF(co.wa_api_key, ''), ch.access_token), to_jsonb(ch)::text
+                         FROM channels ch JOIN companies co ON co.id = ch.company_id WHERE ch.is_active = true""")
+            pid = tok = None
+            for a, b, txt in k.fetchall():
+                if WA_SEG_DIGITOS in re.sub(r"\D", "", txt or ""):
+                    pid, tok = a, b
+                    break
+        finally:
+            k.close(); c.close()
+    if not pid or not tok:
+        raise HTTPException(status_code=400, detail="Línea no configurada")
+    try:
+        send_whatsapp_text(tok, pid, _wa_to(body.numero), body.texto.strip()[:3000])
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"No se pudo enviar: {e}"[:400])
+    log.info("ADMIN WA TEXTO %s → %s", body.linea, body.numero)
+    return {"ok": True}
+
+
+class AdminCorreo(BaseModel):
+    para: list
+    asunto: str
+    cuerpo: str
+
+
+@app.post("/api/admin/correo")
+def admin_correo(body: AdminCorreo, request: Request):
+    u = get_user_from_session(request)
+    if (u.get("email") or "").lower() not in ADMIN_EMAILS:
+        raise HTTPException(status_code=403, detail="Solo admin")
+    res = {}
+    for dest in (body.para or [])[:20]:
+        d = str(dest).strip().lower()
+        if re.match(r"^[^@\s]+@[^@\s]+\.[a-z]{2,}$", d):
+            res[d] = _send_email(d, body.asunto[:200], body.cuerpo[:5000])
+    log.info("ADMIN CORREO: %s", res)
+    return {"resultado": res}
 
 
 def _pids_seguimiento(cur) -> set:
