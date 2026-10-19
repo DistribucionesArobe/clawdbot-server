@@ -6686,6 +6686,7 @@ def _run_wa_seguimiento(cur):
 class AdminWAPlantilla(BaseModel):
     numeros: list
     plantilla: str
+    solo_marcar: bool = False  # no envía, solo marca como contactado
 
 
 @app.post("/api/admin/wa/plantilla")
@@ -6711,16 +6712,20 @@ def admin_wa_plantilla(body: AdminWAPlantilla, request: Request):
             to = _wa_to(str(n))
             ult = re.sub(r"\D", "", str(n))[-10:]
             try:
-                send_whatsapp_template(token, phone_id, to, body.plantilla)
-                res[to] = "enviado"
-                col = "wa_seguimiento2_at" if body.plantilla == WA_SEG_TEMPLATE_2 else "wa_seguimiento_at"
-                # marcar para que la automatización no repita
-                k.execute(f"UPDATE generador_leads SET {col} = now(), wa_seguimiento_at = COALESCE(wa_seguimiento_at, now()) "
-                          "WHERE right(regexp_replace(COALESCE(whatsapp,''), '\D', '', 'g'), 10) = %s", (ult,))
-                k.execute(f"UPDATE companies SET {col} = now(), wa_seguimiento_at = COALESCE(wa_seguimiento_at, now()) "
-                          "WHERE right(regexp_replace(COALESCE(owner_phone,''), '\D', '', 'g'), 10) = %s", (ult,))
+                if not body.solo_marcar:
+                    send_whatsapp_template(token, phone_id, to, body.plantilla)
+                res[to] = "marcado" if body.solo_marcar else "enviado"
             except Exception as e:
                 res[to] = f"error: {e}"[:300]
+                continue
+            # Marcar para que la automatización no repita: si ya tenía primer toque, esto cuenta como el segundo
+            for tabla, colnum in (("generador_leads", "whatsapp"), ("companies", "owner_phone")):
+                k.execute(f"""
+                    UPDATE {tabla} SET
+                      wa_seguimiento2_at = CASE WHEN wa_seguimiento_at IS NOT NULL OR %s THEN now() ELSE wa_seguimiento2_at END,
+                      wa_seguimiento_at = COALESCE(wa_seguimiento_at, now())
+                    WHERE right(regexp_replace(COALESCE({colnum},''), '\D', '', 'g'), 10) = %s
+                """, (body.plantilla == WA_SEG_TEMPLATE_2, ult))
     finally:
         k.close(); c.close()
     log.info("ADMIN WA PLANTILLA %s: %s", body.plantilla, res)
