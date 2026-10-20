@@ -257,13 +257,14 @@ def build_quote_pdf(
         unit_price = float(item.get("unit_price", 0))
         subtotal   = float(item.get("subtotal", unit_price * qty))
         total     += subtotal
+        _por_confirmar = "To be confirmed" if en else "Por confirmar"
         table_data.append([
             Paragraph(str(i),                  S["body"]),
             Paragraph(name,                    S["body"]),
             Paragraph(_fmt_qty(qty),           S["body_right"]),
             Paragraph(unit,                    S["body"]),
-            Paragraph(_fmt_price(unit_price),  S["body_right"]),
-            Paragraph(_fmt_price(subtotal),    S["body_right"]),
+            Paragraph(_fmt_price(unit_price) if unit_price > 0 else _por_confirmar, S["body_right"]),
+            Paragraph(_fmt_price(subtotal) if unit_price > 0 else "—", S["body_right"]),
         ])
 
     light = S["_light"]

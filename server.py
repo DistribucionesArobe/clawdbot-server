@@ -757,13 +757,20 @@ def cart_render_quote(state: dict, company_id: str = "", client_phone: str = "")
         return ""
     lines = []
     total = 0.0
+    sin_precio = []
     for it in cart:
         qty = int(it.get("qty") or 0)
         price = float(it.get("price") or 0.0)
         name = it.get("name") or ""
+        if price <= 0:
+            sin_precio.append(name)
+            lines.append(f"• {qty} x {name} — precio por confirmar")
+            continue
         subtotal = qty * price
         total += subtotal
         lines.append(f"• {qty} x {name} — ${subtotal:,.0f}")
+    if sin_precio:
+        lines.append(f"\n⚠️ {len(sin_precio)} producto(s) sin precio en este momento: te confirmamos el precio en breve.")
 
     # ── Descuento por volumen ─────────────────────────────────────────────────
     descuento_txt = ""
@@ -1204,7 +1211,8 @@ def _maybe_send_quote_pdf(company, from_phone, text_body: str):
                 """
                 SELECT q.folio, q.client_phone, q.items, q.total,
                        c.name, c.address_text, c.rfc,
-                       c.owner_phone, c.email, c.logo_url, c.brand_color
+                       c.owner_phone, c.email, c.logo_url, c.brand_color,
+                       c.discount_threshold, c.discount_percent
                 FROM quotes q
                 JOIN companies c ON c.id = q.company_id
                 WHERE q.folio = %s
@@ -1221,7 +1229,7 @@ def _maybe_send_quote_pdf(company, from_phone, text_body: str):
             return
         (q_folio, client_phone, items_json, total,
          company_name, address, rfc, owner_phone,
-         company_email, logo_url, brand_color) = row
+         company_email, logo_url, brand_color, _thr, _pct) = row
         items = items_json if isinstance(items_json, list) else json.loads(items_json or "[]")
         company_dict = {
             "name":        company_name or "CotizaExpress",
@@ -1232,11 +1240,20 @@ def _maybe_send_quote_pdf(company, from_phone, text_body: str):
             "logo_url":    logo_url or "",
             "brand_color": brand_color or "",
         }
+        _disc_pct = _disc_amt = None
+        try:
+            _raw = sum(float(it.get("subtotal", 0)) or (float(it.get("unit_price", 0)) * float(it.get("qty", 0))) for it in items)
+            if _thr and _pct and _raw >= float(_thr):
+                _disc_pct, _disc_amt = float(_pct), round(_raw * float(_pct) / 100)
+        except Exception as _de:
+            log.warning("PDF SEND DISCOUNT ERROR: %r", _de)
         pdf_bytes = build_quote_pdf(
             company=company_dict,
             items=items,
             client_phone=client_phone or "",
             folio=q_folio,
+            discount_percent=_disc_pct,
+            discount_amount=_disc_amt,
         )
         filename = f"cotizacion_{q_folio}.pdf"
         media_id = upload_whatsapp_media(
