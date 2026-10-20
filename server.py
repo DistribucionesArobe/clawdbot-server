@@ -6280,8 +6280,12 @@ _GEN_LEAD_USO = {}
 @app.post("/api/generador/lead")
 def generador_lead(body: GeneradorLeadBody, request: Request):
     email = (body.email or "").strip().lower()[:120]
-    if not re.match(r"^[^@\s]+@[^@\s]+\.[a-z]{2,}$", email):
-        raise HTTPException(status_code=400, detail="Escribe un correo válido")
+    wa_digitos = re.sub(r"\D", "", body.whatsapp or "")
+    tiene_wa = 10 <= len(wa_digitos) <= 13
+    if email and not re.match(r"^[^@\s]+@[^@\s]+\.[a-z]{2,}$", email):
+        raise HTTPException(status_code=400, detail="Revisa tu correo, parece que tiene un error")
+    if not email and not tiene_wa:
+        raise HTTPException(status_code=400, detail="Escribe tu WhatsApp (10 dígitos) para mandarte tu cotización")
     _ip = (request.headers.get("x-forwarded-for") or (request.client.host if request.client else "?")).split(",")[0].strip()
     from datetime import datetime as _dtl, timezone as _tzl
     _hoy = _dtl.now(_tzl.utc).strftime("%Y%m%d")
@@ -6309,8 +6313,12 @@ def generador_lead(body: GeneradorLeadBody, request: Request):
         _leads_tabla(k)
         # Límite: 3 cotizaciones gratis al mes por correo (las cuentas de prueba no cuentan)
         if email not in _RESCUE_EXCLUDE:
-            k.execute("SELECT COUNT(*) FROM generador_leads WHERE lower(email) = %s "
-                      "AND created_at >= date_trunc('month', now())", (email,))
+            if email:
+                k.execute("SELECT COUNT(*) FROM generador_leads WHERE lower(email) = %s "
+                          "AND created_at >= date_trunc('month', now())", (email,))
+            else:
+                k.execute("SELECT COUNT(*) FROM generador_leads WHERE right(regexp_replace(COALESCE(whatsapp,''), '\D', '', 'g'), 10) = %s "
+                          "AND created_at >= date_trunc('month', now())", (wa_digitos[-10:],))
             if int(k.fetchone()[0]) >= GENERADOR_LIMITE_MES:
                 raise HTTPException(status_code=402, detail="limite_generador")
         k.execute("""
@@ -6323,7 +6331,8 @@ def generador_lead(body: GeneradorLeadBody, request: Request):
         k.close(); c.close()
     _GEN_LEAD_USO[_ip] = (_hoy, _n + 1)
     link = f"https://api.cotizaexpress.com/generador/pdf/{token}"
-    _send_email(
+    if email:
+      _send_email(
         email,
         "Tu cotización está lista 📄",
         "¡Hola!\n\n"
@@ -6376,7 +6385,7 @@ def _run_leads_seguimiento(cur):
     _leads_tabla(cur)
     cur.execute("""
         SELECT l.id, l.email, l.negocio FROM generador_leads l
-        WHERE l.seguimiento_at IS NULL
+        WHERE l.seguimiento_at IS NULL AND COALESCE(l.email, '') <> ''
           AND l.created_at < now() - interval '20 hours'
           AND l.created_at > now() - interval '7 days'
           AND NOT EXISTS (SELECT 1 FROM users u WHERE lower(u.email) = lower(l.email))
