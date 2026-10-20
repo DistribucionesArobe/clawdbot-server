@@ -1848,7 +1848,8 @@ def _gpt_smart_match(conn, company_id: str, user_query: str,
     catalog_lines = []
     for i, (sku, name, unit, price, vat_rate, bundle_size) in enumerate(rows):
         unit_txt = f" ({unit})" if unit else ""
-        catalog_lines.append(f"{i + 1}. {name}{unit_txt}")
+        sp_txt = " [SIN PRECIO]" if not price or float(price) <= 0 else ""
+        catalog_lines.append(f"{i + 1}. {name}{unit_txt}{sp_txt}")
     catalog_str = "\n".join(catalog_lines)
 
     # Build context block
@@ -1903,6 +1904,9 @@ def _gpt_smart_match(conn, company_id: str, user_query: str,
         "NO confundas 'canal 6.35' con 'canal listón' — son productos DIFERENTES.\n"
         "- Respeta medidas, calibres y tamaños exactamente como los pide el cliente.\n"
         "- Cuando hay duda entre calibres, devuelve AMBAS opciones separadas por coma.\n"
+        "- LARGOS de pijas/tornillos: '2 1/2' NO es '1/2'. Si el cliente da un largo, "
+        "elige solo productos con ese largo; si no hay, responde NO.\n"
+        "- Productos marcados [SIN PRECIO]: úsalos SOLO si no hay otro producto equivalente con precio.\n"
     )
 
     try:
@@ -1982,7 +1986,8 @@ def bulk_match(conn, company_id: str, raw_message: str) -> list | None:
     catalog_lines = []
     for i, (sku, name, unit, price, vat_rate, bundle_size) in enumerate(rows):
         unit_txt = f" ({unit})" if unit else ""
-        catalog_lines.append(f"{i + 1}. {name}{unit_txt}")
+        sp_txt = " [SIN PRECIO]" if not price or float(price) <= 0 else ""
+        catalog_lines.append(f"{i + 1}. {name}{unit_txt}{sp_txt}")
     catalog_str = "\n".join(catalog_lines)
 
     system_prompt = (
@@ -2005,6 +2010,8 @@ def bulk_match(conn, company_id: str, raw_message: str) -> list | None:
         "- Si el cliente dice 'X o Y' (ej: 'placas o galletas'), es UN solo producto.\n"
         "- IGNORA marcas de competidores (GlassRey, Ternium, etc.) y busca el tipo de producto.\n"
         "- CALIBRE debe coincidir EXACTAMENTE (cal 22 ≠ cal 26).\n"
+        "- LARGOS de pijas/tornillos deben coincidir ('2 1/2' ≠ '1/2').\n"
+        "- Productos marcados [SIN PRECIO]: úsalos SOLO si no hay otro equivalente con precio.\n"
         "- DECIDE TÚ MISMO usando las medidas/specs del cliente. Solo si de verdad "
         "es imposible decidir entre varias opciones, usa 'nums' con esas opciones.\n"
         "- Si un producto NO está en el catálogo, pon 0 como número.\n"
