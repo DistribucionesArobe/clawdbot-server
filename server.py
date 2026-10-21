@@ -791,8 +791,8 @@ def cart_render_quote(state: dict, company_id: str = "", client_phone: str = "")
             folio = save_quote(company_id, client_phone, cart, existing_folio=existing_folio)
             if not existing_folio:
                 state["folio"] = folio
-            pdf_link = f"https://api.cotizaexpress.com/cotizacion/{folio}"
-            folio_txt = f"\n📋 Folio: *{folio}*\n📄 Ver PDF: {pdf_link}"
+            pdf_link = f"https://api.cotizaexpress.com/c/{folio}"
+            folio_txt = f"\n📋 Folio: *{folio}*\n📄 Ver cotización: {pdf_link}"
         except Exception as e:
             log.error("CART RENDER SAVE QUOTE ERROR:", repr(e))
 
@@ -1263,7 +1263,7 @@ def _maybe_send_quote_pdf(company, from_phone, text_body: str):
             mime_type="application/pdf",
             filename=filename,
         )
-        public_link = f"https://api.cotizaexpress.com/cotizacion/{q_folio}"
+        public_link = f"https://api.cotizaexpress.com/c/{q_folio}"
         send_whatsapp_document(
             wa_api_key=company["wa_api_key"],
             phone_number_id=company["wa_phone_number_id"],
@@ -5653,6 +5653,150 @@ a{{color:#059669}}
     return HTMLResponse(html)
 
 
+@app.get("/c/{folio}")
+def public_quote_view(folio: str, download: int = 0):
+    """Página ligera de la cotización: se ve en cualquier celular (incluido el
+    navegador interno de WhatsApp en Android, que no descarga PDFs)."""
+    import html as _h
+    from fastapi.responses import RedirectResponse
+    folio = (folio or "").upper()[:16]
+    if download:
+        return RedirectResponse(f"/cotizacion/{folio}?download=1", status_code=302)
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT q.folio, q.items, q.created_at, c.name, c.logo_url, c.brand_color,
+                   c.owner_phone, c.discount_threshold, c.discount_percent,
+                   COALESCE(q.currency, 'MXN'), COALESCE(q.pdf_lang, 'es'), q.tax_info,
+                   COALESCE(q.doc_type, 'quote')
+            FROM quotes q JOIN companies c ON c.id = q.company_id
+            WHERE q.folio = %s LIMIT 1
+            """,
+            (folio,),
+        )
+        row = cur.fetchone()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        cur.execute(
+            """
+            SELECT q.folio, q.items, q.created_at, c.name, c.logo_url, c.brand_color,
+                   c.owner_phone, c.discount_threshold, c.discount_percent,
+                   'MXN', 'es', NULL, 'quote'
+            FROM quotes q JOIN companies c ON c.id = q.company_id
+            WHERE q.folio = %s LIMIT 1
+            """,
+            (folio,),
+        )
+        row = cur.fetchone()
+    finally:
+        cur.close()
+        conn.close()
+    if not row:
+        return HTMLResponse("<h2 style='font-family:sans-serif'>Cotización no encontrada</h2>", status_code=404)
+    (q_folio, items_json, created_at, c_name, logo_url, color, owner_phone,
+     d_thr, d_pct, currency, lang, tax_info, doc_type) = row
+    items = items_json if isinstance(items_json, list) else json.loads(items_json or "[]")
+    if isinstance(tax_info, str):
+        tax_info = json.loads(tax_info or "null")
+    en = (lang or "es") == "en"
+    sym = "US$" if currency == "USD" else "$"
+    def money(v):
+        return f"{sym}{float(v):,.2f}"
+    e = lambda t: _h.escape(str(t or ""))
+    color = color if (color or "").startswith("#") and len(color) in (4, 7) else "#16a34a"
+    rows_html = []
+    raw = 0.0
+    pend = 0
+    for it in items:
+        qty = float(it.get("qty") or 0)
+        up = float(it.get("unit_price") or 0)
+        sub = float(it.get("subtotal") or 0) or up * qty
+        qtxt = f"{qty:,.0f}" if qty == int(qty) else f"{qty:,.2f}"
+        if up <= 0:
+            pend += 1
+            price_txt = "<span class='pend'>" + ("To be confirmed" if en else "Por confirmar") + "</span>"
+        else:
+            raw += sub
+            price_txt = money(sub)
+        rows_html.append(
+            f"<div class='it'><div><div class='n'>{e(it.get('name'))}</div>"
+            f"<div class='q'>{qtxt} {e(it.get('unit') or '')}"
+            + (f" × {money(up)}" if up > 0 else "") +
+            f"</div></div><div class='p'>{price_txt}</div></div>"
+        )
+    tot_html = []
+    if tax_info:
+        tot_html.append(("Subtotal", money(tax_info.get("subtotal", raw))))
+        if float(tax_info.get("amount") or 0) > 0:
+            lbl = ("Tax" if en else "IVA") + f" {float(tax_info.get('pct') or 0):g}%"
+            tot_html.append((lbl, money(tax_info.get("amount"))))
+        total = float(tax_info.get("total") or raw)
+        tot_note = ""
+    else:
+        total = raw
+        if d_thr and d_pct and raw >= float(d_thr):
+            disc = round(raw * float(d_pct) / 100)
+            tot_html.append(("Subtotal", money(raw)))
+            tot_html.append((f"{'Discount' if en else 'Descuento'} {float(d_pct):g}%", "-" + money(disc)))
+            total = raw - disc
+        tot_note = "" if en else " (IVA incluido)"
+    tot_rows = "".join(f"<div class='t'><span>{e(a)}</span><span>{b}</span></div>" for a, b in tot_html)
+    fecha = created_at.strftime("%d/%m/%Y") if created_at else ""
+    titulo = ("Change order" if doc_type == "change_order" else "Estimate") if en else (
+        "Orden de cambio" if doc_type == "change_order" else "Cotización")
+    logo = f"<img src='{e(logo_url)}' alt='' class='logo'>" if (logo_url or "").startswith("http") else ""
+    aprobar = ""
+    if doc_type == "change_order":
+        aprobar = (f"<a class='btn' href='/cotizacion/{q_folio}/aprobar'>"
+                   + ("Review and approve" if en else "Revisar y aprobar") + "</a>")
+    pend_html = ""
+    if pend:
+        pend_html = ("<p class='aviso'>⚠️ " + (f"{pend} item(s) pending price; the business will confirm it."
+                     if en else f"{pend} producto(s) con precio por confirmar; el negocio te lo confirma.") + "</p>")
+    tip = ("Can't download? Tap ⋮ (top right) and choose “Open in Chrome”, or just take a screenshot of this page."
+           if en else "¿No se descarga? Toca ⋮ (arriba a la derecha) y elige “Abrir en Chrome”, o toma captura de esta página.")
+    page = f"""<!doctype html><html lang="{'en' if en else 'es'}"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex">
+<title>{e(titulo)} {e(q_folio)} · {e(c_name)}</title>
+<style>
+body{{margin:0;font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#f4f5f7;color:#111}}
+.w{{max-width:560px;margin:0 auto;padding:16px}}
+.card{{background:#fff;border-radius:14px;padding:18px;box-shadow:0 1px 3px rgba(0,0,0,.08)}}
+.hd{{display:flex;align-items:center;gap:12px;border-bottom:3px solid {color};padding-bottom:12px;margin-bottom:8px}}
+.logo{{width:52px;height:52px;object-fit:contain;border-radius:8px}}
+.co{{font-weight:700;font-size:18px}} .meta{{color:#666;font-size:13px}}
+.it{{display:flex;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid #eee}}
+.n{{font-weight:600}} .q{{color:#666;font-size:13px}} .p{{white-space:nowrap;font-weight:600;text-align:right}}
+.pend{{color:#b45309;font-weight:600;font-size:13px}}
+.t{{display:flex;justify-content:space-between;padding:4px 0;color:#444}}
+.tot{{display:flex;justify-content:space-between;font-size:20px;font-weight:800;padding-top:10px;margin-top:6px;border-top:2px solid #111}}
+.btn{{display:block;text-align:center;background:{color};color:#fff;text-decoration:none;font-weight:700;padding:14px;border-radius:12px;margin-top:12px}}
+.btn2{{background:#fff;color:#111;border:1px solid #ccc}}
+.aviso{{background:#fff7ed;border:1px solid #fed7aa;border-radius:10px;padding:10px;font-size:14px}}
+.tip{{color:#666;font-size:13px;text-align:center;margin-top:12px}}
+.ft{{color:#999;font-size:12px;text-align:center;margin-top:18px}}
+</style></head><body><div class="w"><div class="card">
+<div class="hd">{logo}<div><div class="co">{e(c_name)}</div>
+<div class="meta">{e(titulo)} {e(q_folio)} · {e(fecha)}</div></div></div>
+{''.join(rows_html)}
+<div style="margin-top:10px">{tot_rows}</div>
+<div class="tot"><span>Total{e(tot_note)}</span><span>{money(total)}</span></div>
+{pend_html}
+</div>
+{aprobar}
+<a class="btn" href="/cotizacion/{q_folio}?download=1">{'Download PDF' if en else 'Descargar PDF'}</a>
+<a class="btn btn2" href="/cotizacion/{q_folio}">{'Open PDF' if en else 'Abrir PDF'}</a>
+<p class="tip">{tip}</p>
+<p class="ft">{'Made with' if en else 'Hecha con'} cotizaexpress.com</p>
+</div></body></html>"""
+    return HTMLResponse(page, headers={"Cache-Control": "no-cache"})
+
+
 @app.get("/cotizacion/{folio}/aprobar")
 def change_order_view(folio: str, request: Request):
     return _co_pagina(folio, request)
@@ -7278,7 +7422,7 @@ def cotizador_guardar(body: CotizadorGuardarBody, request: Request):
         log.warning("CURRENCY SAVE ERROR: %s", repr(_e))
     total = _tax_info["total"]
     _resp = {"ok": True, "folio": folio, "total": total, "moneda": _moneda,
-             "link": f"https://api.cotizaexpress.com/cotizacion/{folio}"}
+             "link": f"https://api.cotizaexpress.com/c/{folio}"}
     if _parent:
         _resp["parent_folio"] = _parent
         _resp["aprobar_link"] = f"https://api.cotizaexpress.com/cotizacion/{folio}/aprobar"
