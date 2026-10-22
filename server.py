@@ -6500,7 +6500,7 @@ def generador_lead(body: GeneradorLeadBody, request: Request):
     finally:
         k.close(); c.close()
     _GEN_LEAD_USO[_ip] = (_hoy, _n + 1)
-    link = f"https://api.cotizaexpress.com/generador/pdf/{token}"
+    link = f"https://api.cotizaexpress.com/generador/ver/{token}"
     if email:
       _send_email(
         email,
@@ -6548,6 +6548,69 @@ def generador_pdf(token: str, download: int = 0):
     disp = "attachment" if download else "inline"
     return StreamingResponse(iter([pdf]), media_type="application/pdf",
                              headers={"Content-Disposition": f'{disp}; filename="cotizacion.pdf"', "Cache-Control": "no-cache"})
+
+
+@app.get("/generador/ver/{token}")
+def generador_ver(token: str):
+    """Página ligera de la cotización del generador (se ve en cualquier celular,
+    incluido el navegador interno de WhatsApp en Android, que no descarga PDFs)."""
+    import html as _h
+    c = get_conn(); c.autocommit = True
+    k = c.cursor()
+    try:
+        _leads_tabla(k)
+        k.execute("SELECT negocio, telefono, cliente, con_iva, items, created_at FROM generador_leads WHERE token=%s", (token,))
+        r = k.fetchone()
+    finally:
+        k.close(); c.close()
+    if not r:
+        return HTMLResponse("<h2 style='font-family:sans-serif'>Cotización no encontrada</h2>", status_code=404)
+    negocio, telefono, cliente, con_iva, items_json, created_at = r
+    filas = items_json if isinstance(items_json, list) else json.loads(items_json or "[]")
+    e = lambda t: _h.escape(str(t or ""))
+    m = lambda v: f"${float(v):,.2f}"
+    rows, sub = [], 0.0
+    for f in filas:
+        q = float(f.get("qty") or 0); pu = float(f.get("precio") or 0); st = round(q * pu, 2); sub += st
+        qt = f"{q:,.0f}" if q == int(q) else f"{q:,.2f}"
+        rows.append(f"<div class='it'><div><div class='n'>{e(f.get('desc'))}</div><div class='q'>{qt} × {m(pu)}</div></div><div class='p'>{m(st)}</div></div>")
+    sub = round(sub, 2); iva = round(sub * 0.16, 2) if con_iva else 0.0
+    tot = f"<div class='t'><span>Subtotal</span><span>{m(sub)}</span></div>"
+    if iva:
+        tot += f"<div class='t'><span>IVA 16%</span><span>{m(iva)}</span></div>"
+    fecha = created_at.strftime("%d/%m/%Y") if created_at else ""
+    folio = "COT-" + token[:6].upper()
+    page = f"""<!doctype html><html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex">
+<title>Cotización {e(folio)} · {e(negocio)}</title>
+<style>
+body{{margin:0;font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#f4f5f7;color:#111}}
+.w{{max-width:560px;margin:0 auto;padding:16px}}
+.card{{background:#fff;border-radius:14px;padding:18px;box-shadow:0 1px 3px rgba(0,0,0,.08)}}
+.hd{{border-bottom:3px solid #16a34a;padding-bottom:12px;margin-bottom:8px}}
+.co{{font-weight:700;font-size:18px}} .meta{{color:#666;font-size:13px}}
+.it{{display:flex;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid #eee}}
+.n{{font-weight:600}} .q{{color:#666;font-size:13px}} .p{{white-space:nowrap;font-weight:600}}
+.t{{display:flex;justify-content:space-between;padding:4px 0;color:#444}}
+.tot{{display:flex;justify-content:space-between;font-size:20px;font-weight:800;padding-top:10px;margin-top:6px;border-top:2px solid #111}}
+.btn{{display:block;text-align:center;background:#16a34a;color:#fff;text-decoration:none;font-weight:700;padding:14px;border-radius:12px;margin-top:12px}}
+.btn2{{background:#fff;color:#111;border:1px solid #ccc}}
+.tip{{color:#666;font-size:13px;text-align:center;margin-top:12px}} .ft{{color:#999;font-size:12px;text-align:center;margin-top:18px}}
+.ft a{{color:#16a34a}}
+</style></head><body><div class="w"><div class="card">
+<div class="hd"><div class="co">{e(negocio or 'Cotización')}</div>
+<div class="meta">Cotización {e(folio)} · {e(fecha)}{(' · Tel. ' + e(telefono)) if telefono else ''}</div>
+{('<div class="meta">Cliente: ' + e(cliente) + '</div>') if cliente else ''}</div>
+{''.join(rows)}
+<div style="margin-top:10px">{tot}</div>
+<div class="tot"><span>Total</span><span>{m(sub + iva)}</span></div>
+</div>
+<a class="btn" href="/generador/pdf/{token}?download=1">Descargar PDF</a>
+<a class="btn btn2" href="/generador/pdf/{token}">Abrir PDF</a>
+<p class="tip">¿No se descarga? Toca ⋮ (arriba a la derecha) y elige “Abrir en Chrome”, o toma captura de esta página.</p>
+<p class="ft">Hecha gratis con <a href="https://www.cotizaexpress.com/generador-de-cotizaciones?utm_source=cotizacion_compartida">cotizaexpress.com</a></p>
+</div></body></html>"""
+    return HTMLResponse(page, headers={"Cache-Control": "no-cache"})
 
 
 def _run_leads_seguimiento(cur):
