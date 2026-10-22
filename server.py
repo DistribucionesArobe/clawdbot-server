@@ -6075,6 +6075,10 @@ def register(body: RegisterBody):
         password_hash = hash_password(password)
         conn = get_conn()
         cur = conn.cursor()
+        # Si el correo ya existe, avisar ANTES de crear la empresa (evita empresas huérfanas)
+        cur.execute("SELECT 1 FROM users WHERE lower(email) = %s LIMIT 1", (email,))
+        if cur.fetchone():
+            raise HTTPException(status_code=409, detail="Email ya registrado")
 
         slug = re.sub(r'[^a-z0-9]+', '-', email.split("@")[0].lower()).strip('-')
         _nombre_emp = ((body.empresa_nombre or "").strip()[:120]) or email
@@ -6328,6 +6332,10 @@ def auth_logout(request: Request, response: Response):
 class CotizadorIABody(BaseModel):
     texto: str
 
+class _BonoGen(Exception):
+    """Salta el conteo freemium para la cotización traída del generador."""
+
+
 class CotizadorGuardarBody(BaseModel):
     items: list   # [{name, qty, unit, price, sku?}]
     cliente: str = ""
@@ -6337,6 +6345,7 @@ class CotizadorGuardarBody(BaseModel):
     idioma: str = "es"           # idioma del PDF: es | en
     parent_folio: str = ""       # si viene: es ORDEN DE CAMBIO sobre ese folio
     condiciones: dict = {}       # validez_dias, anticipo_pct, incluye, no_incluye, licencia, notas
+    desde_generador: bool = False  # la cotización que traen del generador no gasta su gratis (1 vez por cuenta)
 
 
 # Lector de imágenes PÚBLICO para el generador (sin cuenta) — con tope por IP
@@ -7354,7 +7363,17 @@ def cotizador_guardar(body: CotizadorGuardarBody, request: Request):
         conn_u = get_conn()
         conn_u.autocommit = True
         cur_u = conn_u.cursor()
+        _bono_gen = False
+        if body.desde_generador:
+            try:
+                cur_u.execute("ALTER TABLE companies ADD COLUMN IF NOT EXISTS gen_bono_usado BOOLEAN DEFAULT FALSE")
+                cur_u.execute("UPDATE companies SET gen_bono_usado = TRUE WHERE id = %s AND COALESCE(gen_bono_usado, FALSE) = FALSE RETURNING id", (company_id,))
+                _bono_gen = cur_u.fetchone() is not None
+            except Exception as _bge:
+                log.warning("GEN BONO ERROR: %r", _bge)
         try:
+            if _bono_gen:
+                raise _BonoGen()
             cur_u.execute("""
                 CREATE TABLE IF NOT EXISTS cotizador_usage (
                   company_id UUID NOT NULL,
@@ -7375,6 +7394,8 @@ def cotizador_guardar(body: CotizadorGuardarBody, request: Request):
                 INSERT INTO cotizador_usage (company_id, ym, count) VALUES (%s, %s, 1)
                 ON CONFLICT (company_id, ym) DO UPDATE SET count = cotizador_usage.count + 1
             """, (company_id, _ym))
+        except _BonoGen:
+            pass
         finally:
             cur_u.close()
             conn_u.close()
