@@ -53,10 +53,11 @@ def _intro_disponible(company_id: str) -> bool:
     try:
         k.execute("ALTER TABLE companies ADD COLUMN IF NOT EXISTS intro_usado BOOLEAN DEFAULT FALSE")
         c.commit()
-        k.execute("SELECT COALESCE(intro_usado, FALSE), mp_payment_id, COALESCE(plan_code, 'free') FROM companies WHERE id = %s",
+        k.execute("SELECT COALESCE(intro_usado, FALSE), mp_payment_id, COALESCE(plan_code, 'free'), trial_end FROM companies WHERE id = %s",
                   (company_id,))
         r = k.fetchone()
-        return bool(r) and not r[0] and not r[1] and r[2] == "free"
+        # Nunca ha pagado ni usado la oferta; vale en plan gratis o durante la prueba de 7 días
+        return bool(r) and not r[0] and not r[1] and (r[2] == "free" or r[3] is not None)
     except Exception as e:
         log.warning("INTRO DISPONIBLE ERROR: %r", e)
         return False
@@ -116,6 +117,92 @@ def oferta_intro(request: Request):
     disp = _intro_disponible(company_id)
     return {"disponible": disp, "mx": {"plan": "cotizador_intro", "precio": 99},
             "usa": {"plan": "cotizador_usa_intro", "precio": 9}}
+
+
+# ── Prueba gratis de 7 días (una por cuenta; al terminar se corta) ─────────────
+
+PRUEBA_DIAS = 7
+_PRUEBA_PLANES = {"cotizador", "cotizabot", "pro", "cotizador_usa", "cotizabot_usa", "pro_usa"}
+
+
+def _prueba_cols(cur):
+    cur.execute("ALTER TABLE companies ADD COLUMN IF NOT EXISTS trial_usado BOOLEAN DEFAULT FALSE")
+    cur.execute("ALTER TABLE companies ADD COLUMN IF NOT EXISTS trial_plan TEXT")
+    cur.execute("ALTER TABLE companies ADD COLUMN IF NOT EXISTS trial_reminder_at TIMESTAMPTZ")
+    cur.execute("ALTER TABLE companies ADD COLUMN IF NOT EXISTS paid_until TIMESTAMPTZ")
+
+
+def estado_prueba(company_id: str) -> dict:
+    """{disponible, activa, plan, dias_restantes, termina}"""
+    c = get_conn(); c.autocommit = True
+    k = c.cursor()
+    try:
+        _prueba_cols(k)
+        k.execute("""SELECT COALESCE(trial_usado, FALSE), trial_end, trial_plan, COALESCE(plan_code, 'free'),
+                            mp_payment_id, paid_until FROM companies WHERE id = %s""", (company_id,))
+        r = k.fetchone()
+    finally:
+        k.close(); c.close()
+    if not r:
+        return {"disponible": False, "activa": False}
+    usado, fin, tplan, plan, mp_id, paid_until = r
+    ahora = datetime.now(timezone.utc)
+    pagado = bool(paid_until and paid_until > ahora)
+    activa = bool(fin and fin > ahora and not pagado)
+    dias = max(0, (fin - ahora).days + (1 if (fin - ahora).seconds > 0 else 0)) if activa else 0
+    return {
+        "disponible": (not usado and not mp_id and not pagado) or activa,
+        "activa": activa,
+        "usada": bool(usado) and not activa,
+        "plan": tplan if activa else None,
+        "dias_restantes": dias,
+        "termina": fin.isoformat() if (activa and fin) else None,
+        "dias": PRUEBA_DIAS,
+    }
+
+
+class PruebaBody(BaseModel):
+    plan: str = "cotizador"
+
+
+@router.get("/api/pagos/prueba")
+def prueba_estado(request: Request):
+    company_id = require_company_id(request)
+    return estado_prueba(company_id)
+
+
+@router.post("/api/pagos/iniciar-prueba")
+def iniciar_prueba(request: Request, body: PruebaBody):
+    """Activa el plan elegido 7 días gratis, sin tarjeta. Una vez por cuenta.
+    Si ya está en prueba, puede cambiar de plan conservando la misma fecha de fin."""
+    company_id = require_company_id(request)
+    plan = (body.plan or "cotizador").strip().lower()
+    if plan not in _PRUEBA_PLANES:
+        raise HTTPException(status_code=400, detail="Plan inválido")
+    est = estado_prueba(company_id)
+    if not est.get("disponible"):
+        raise HTTPException(status_code=400, detail="Ya usaste tu prueba gratis. Activa tu plan para seguir.")
+    c = get_conn(); c.autocommit = True
+    k = c.cursor()
+    try:
+        if est.get("activa"):
+            k.execute("UPDATE companies SET plan_code=%s, trial_plan=%s, updated_at=now() WHERE id=%s RETURNING trial_end",
+                      (plan, plan, company_id))
+        else:
+            k.execute("""UPDATE companies SET plan_code=%s, trial_plan=%s, trial_usado=TRUE,
+                                trial_end=now() + make_interval(days => %s), trial_reminder_at=NULL, updated_at=now()
+                         WHERE id=%s RETURNING trial_end""", (plan, plan, PRUEBA_DIAS, company_id))
+        fin = k.fetchone()[0]
+    finally:
+        k.close(); c.close()
+    log.info("PRUEBA INICIADA: company=%s plan=%s termina=%s", company_id, plan, fin)
+    try:
+        u = get_user_from_session(request)
+        from server import registrar_evento  # import tardío para evitar ciclo
+        registrar_evento(int(u["id"]), "prueba_iniciada")
+    except Exception:
+        pass
+    return {"ok": True, "plan": plan, "termina": fin.isoformat() if fin else None, "dias": PRUEBA_DIAS}
 
 
 # ── Mercado Pago checkout ────────────────────────────────────────────────────
@@ -247,7 +334,9 @@ def pago_estado(request: Request, session_id: str = Query(None), payment_id: str
                     cur.execute(
                         """
                         UPDATE companies
-                        SET plan_code=%s, mp_payment_id=%s, updated_at=now()
+                        SET plan_code=%s, mp_payment_id=%s,
+                            paid_until=COALESCE(GREATEST(paid_until, now() + interval '30 days'), now() + interval '30 days'),
+                            trial_end=NULL, updated_at=now()
                         WHERE id=%s
                         RETURNING id
                         """,
@@ -274,25 +363,10 @@ def pago_estado(request: Request, session_id: str = Query(None), payment_id: str
             plan = parts[1] if len(parts) > 1 else None
             mp_company_id = parts[0] if len(parts) > 0 else None
 
+            # Sin id de pago verificable no activamos nada aquí (cualquiera podría armar
+            # esta URL). La activación la hace el webhook de Mercado Pago, que sí se verifica.
             if paid and mp_company_id and plan:
-                try:
-                    conn = get_conn()
-                    cur = conn.cursor()
-                    cur.execute(
-                        """
-                        UPDATE companies
-                        SET plan_code=%s, updated_at=now()
-                        WHERE id=%s
-                        RETURNING id
-                        """,
-                        (plan, mp_company_id),
-                    )
-                    conn.commit()
-                    cur.close()
-                    conn.close()
-                    log.info("MP PLAN ACTIVADO (redirect): company=%s plan=%s", mp_company_id, plan)
-                except Exception as e:
-                    log.error("MP ESTADO REDIRECT DB ERROR: %s", repr(e))
+                log.info("MP ESTADO (redirect sin verificar): company=%s plan=%s — se espera webhook", mp_company_id, plan)
 
             return {"ok": True, "paid": paid, "plan": plan, "status": _status}
 
@@ -346,6 +420,7 @@ async def mp_webhook(request: Request):
                             SET plan_code=%s, mp_payment_id=%s,
                                 paid_until=now() + interval '30 days',
                                 renewal_reminder_at=NULL,
+                                trial_end=NULL,
                                 updated_at=now()
                             WHERE id=%s
                             RETURNING id

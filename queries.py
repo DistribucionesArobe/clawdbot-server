@@ -192,19 +192,29 @@ def get_company_plan_code(company_id: str) -> str:
     conn = get_conn()
     cur = conn.cursor()
     try:
-        cur.execute("SELECT plan_code, trial_end FROM companies WHERE id=%s LIMIT 1", (company_id,))
+        try:
+            cur.execute("SELECT plan_code, trial_end, paid_until, COALESCE(trial_usado, FALSE) FROM companies WHERE id=%s LIMIT 1", (company_id,))
+        except Exception:
+            conn.rollback()
+            cur.execute("SELECT plan_code, trial_end, NULL, FALSE FROM companies WHERE id=%s LIMIT 1", (company_id,))
         row = cur.fetchone()
         if not row:
             return "free"
         plan_code = (row[0] or "free").strip()
         trial_end = row[1]
-        if trial_end and plan_code in ("pro", "complete"):
-            if datetime.now(timezone.utc) > trial_end:
+        paid_until = row[2]
+        trial_nuevo = bool(row[3])
+        _ahora = datetime.now(timezone.utc)
+        _pagado = bool(paid_until and paid_until > _ahora)
+        # Prueba de 7 días (cualquier plan): al vencer se corta, salvo que ya haya pagado
+        if trial_end and not _pagado and (plan_code in ("pro", "complete") or (trial_nuevo and plan_code not in ("free", "owner"))):
+            if _ahora > trial_end:
                 try:
                     cur.execute(
-                        "UPDATE companies SET plan_code='free', trial_end=NULL, updated_at=now() WHERE id=%s",
+                        "UPDATE companies SET plan_code='free', updated_at=now() WHERE id=%s",
                         (company_id,),
                     )
+                    conn.commit()
                     log.warning("TRIAL EXPIRADO: company=%s plan=%s -> free", company_id, plan_code)
                 except Exception as e:
                     log.error("TRIAL EXPIRE ERROR: %s", repr(e))

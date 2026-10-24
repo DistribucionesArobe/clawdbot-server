@@ -1065,6 +1065,7 @@ class RegisterBody(BaseModel):
     signup_source: Optional[str] = None
     empresa_nombre: Optional[str] = None
     whatsapp: Optional[str] = None
+    plan_prueba: Optional[str] = None   # cotizador (default) | cotizabot | pro (+ _usa)
 
 class LoginBody(BaseModel):
     email: str
@@ -2237,6 +2238,26 @@ def build_reply_for_company(company_id: str, user_text: str, wa_from: str = "", 
         # initial setup — let them use the bot (onboarding flow gives
         # some free usage).  Or this is the shared Twilio number.
         # Don't block — fall through to normal processing.
+        # Cuentas nuevas (desde la prueba de 7 días): el primer uso del bot
+        # arranca su prueba de CotizaBot; al vencer, el bot se corta.
+        try:
+            _ac = get_conn(); _ac.autocommit = True
+            _ak = _ac.cursor()
+            try:
+                _ak.execute("ALTER TABLE companies ADD COLUMN IF NOT EXISTS trial_usado BOOLEAN DEFAULT FALSE")
+                _ak.execute("ALTER TABLE companies ADD COLUMN IF NOT EXISTS trial_plan TEXT")
+                _ak.execute("""UPDATE companies SET plan_code='cotizabot', trial_plan='cotizabot', trial_usado=TRUE,
+                                      trial_end=now() + interval '7 days', updated_at=now()
+                               WHERE id=%s AND COALESCE(plan_code,'free')='free' AND trial_end IS NULL
+                                 AND COALESCE(trial_usado, FALSE) = FALSE AND mp_payment_id IS NULL
+                                 AND created_at > '2026-10-24'
+                               RETURNING id""", (company_id,))
+                if _ak.fetchone():
+                    log.info("PRUEBA BOT AUTO: company=%s (7 días)", company_id)
+            finally:
+                _ak.close(); _ac.close()
+        except Exception as _abe:
+            log.warning("PRUEBA BOT AUTO ERROR: %r", _abe)
 
     # ── Check for button clicks BEFORE buffer flush ─────────────────
     # The message buffer could prepend stale text like "salor" to the
@@ -6128,6 +6149,15 @@ def register(body: RegisterBody):
                 _wa_reg = re.sub(r"\D", "", body.whatsapp or "")
                 if 10 <= len(_wa_reg) <= 13:
                     _ks.execute("UPDATE companies SET owner_phone = %s WHERE id = %s", (_wa_reg, company_id))
+                # Prueba gratis de 7 días del plan elegido (por defecto, el Cotizador)
+                _pp = (body.plan_prueba or "cotizador").strip().lower()
+                if _pp not in ("cotizador", "cotizabot", "pro", "cotizador_usa", "cotizabot_usa", "pro_usa"):
+                    _pp = "cotizador"
+                _ks.execute("ALTER TABLE companies ADD COLUMN IF NOT EXISTS trial_usado BOOLEAN DEFAULT FALSE")
+                _ks.execute("ALTER TABLE companies ADD COLUMN IF NOT EXISTS trial_plan TEXT")
+                _ks.execute("""UPDATE companies SET plan_code=%s, trial_plan=%s, trial_usado=TRUE,
+                                      trial_end=now() + interval '7 days'
+                               WHERE id=%s AND COALESCE(plan_code,'free')='free'""", (_pp, _pp, company_id))
             finally:
                 _ks.close(); _cs.close()
         except Exception as _src_e:
@@ -7879,6 +7909,60 @@ def _es_plan_usa(plan_code: str) -> bool:
     return (plan_code or "").endswith("_usa")
 
 
+_PRUEBA_NOMBRE = {"cotizador": "Cotizador IA", "cotizabot": "CotizaBot", "pro": "CotizaBot Pro",
+                  "cotizador_usa": "Cotizador IA", "cotizabot_usa": "CotizaBot", "pro_usa": "CotizaBot Pro"}
+
+
+def _run_pruebas(cur):
+    cur.execute("ALTER TABLE companies ADD COLUMN IF NOT EXISTS trial_reminder_at TIMESTAMPTZ")
+    cur.execute("ALTER TABLE companies ADD COLUMN IF NOT EXISTS trial_plan TEXT")
+    cur.execute("ALTER TABLE companies ADD COLUMN IF NOT EXISTS trial_usado BOOLEAN DEFAULT FALSE")
+    _correo_sql = """COALESCE(NULLIF(c.email, ''), (SELECT u.email FROM users u WHERE u.company_id = c.id ORDER BY u.id LIMIT 1))"""
+    # Aviso: faltan 2 días o menos
+    cur.execute(f"""
+        SELECT c.id::text, c.name, {_correo_sql}, c.plan_code, c.trial_end FROM companies c
+        WHERE c.trial_end IS NOT NULL AND c.trial_end > now() AND c.trial_end <= now() + interval '2 days'
+          AND c.plan_code NOT IN ('free', 'owner') AND (c.paid_until IS NULL OR c.paid_until < now())
+          AND c.trial_reminder_at IS NULL AND COALESCE(c.trial_usado, FALSE)
+    """)
+    for cid, cname, cemail, cplan, cfin in cur.fetchall():
+        cur.execute("UPDATE companies SET trial_reminder_at = now() WHERE id=%s", (cid,))
+        if not cemail or cemail in _RESCUE_EXCLUDE:
+            continue
+        usa = _es_plan_usa(cplan)
+        nombre = _PRUEBA_NOMBRE.get(cplan, "CotizaBot")
+        precio = ("$9 USD el primer mes" if usa else "$99 el primer mes") if cplan.startswith("cotizador") else "tu plan"
+        _send_email(cemail, f"Tu prueba de {nombre} termina en 2 días",
+            f"Hola {cname or ''},\n\n"
+            f"Tu prueba gratis de {nombre} termina el {cfin.strftime('%d/%m')}. "
+            "Ese día tu cuenta regresa al plan gratis (1 cotización al mes"
+            + (" y el bot deja de contestar" if not cplan.startswith("cotizador") else "") + ").\n\n"
+            f"Para seguir sin cortes, actívalo por {precio}:\n"
+            "https://cotizaexpress.com/precios?utm_source=prueba_aviso\n\n"
+            "No hay cargos automáticos: pagas solo si quieres seguir.\n\n— Alejandro, CotizaExpress")
+        log.info("PRUEBA AVISO: %s plan=%s termina=%s", cname, cplan, cfin)
+    # Corte: venció y no pagó
+    cur.execute(f"""
+        SELECT c.id::text, c.name, {_correo_sql}, c.plan_code FROM companies c
+        WHERE c.trial_end IS NOT NULL AND c.trial_end < now() AND COALESCE(c.trial_usado, FALSE)
+          AND c.plan_code NOT IN ('free', 'owner') AND (c.paid_until IS NULL OR c.paid_until < now())
+    """)
+    for cid, cname, cemail, cplan in cur.fetchall():
+        cur.execute("UPDATE companies SET plan_code='free', paid_until=NULL, updated_at=now() WHERE id=%s", (cid,))
+        log.info("PRUEBA TERMINADA: %s plan=%s -> free", cname, cplan)
+        if not cemail or cemail in _RESCUE_EXCLUDE:
+            continue
+        nombre = _PRUEBA_NOMBRE.get(cplan, "CotizaBot")
+        _send_email(cemail, f"Terminó tu prueba de {nombre} — actívalo cuando quieras",
+            f"Hola {cname or ''},\n\n"
+            f"Terminó tu prueba gratis de {nombre} y tu cuenta pasó al plan gratis. "
+            "Tu catálogo, tu logo y tus cotizaciones siguen guardados.\n\n"
+            "Para seguir con todo, actívalo aquí:\n"
+            "https://cotizaexpress.com/precios?utm_source=prueba_fin\n\n"
+            + ("🎁 Tu primer mes del Cotizador cuesta solo $99.\n\n" if cplan.startswith("cotizador") else "")
+            + "— Alejandro, CotizaExpress")
+
+
 def _run_renewal_once():
     """Diario: migra activos sin vencimiento, recuerda a 5 días, y baja a free al vencer."""
     conn = get_conn()
@@ -7887,6 +7971,13 @@ def _run_renewal_once():
     try:
         cur.execute("ALTER TABLE companies ADD COLUMN IF NOT EXISTS paid_until TIMESTAMPTZ")
         cur.execute("ALTER TABLE companies ADD COLUMN IF NOT EXISTS renewal_reminder_at TIMESTAMPTZ")
+
+        # 0) Prueba de 7 días: aviso a 2 días y corte al vencer (antes del paso 1,
+        #    para que una prueba vencida nunca reciba 30 días "pagados")
+        try:
+            _run_pruebas(cur)
+        except Exception as _pe:
+            log.error("PRUEBAS LOOP ERROR: %r", _pe)
 
         # 1) Planes pagados activos sin fecha: arrancan sus 30 días hoy
         cur.execute("""
