@@ -1063,6 +1063,7 @@ class RegisterBody(BaseModel):
     promo_code: Optional[str] = None
     referral_code: Optional[str] = None
     signup_source: Optional[str] = None
+    signup_campaign: Optional[str] = None
     empresa_nombre: Optional[str] = None
     whatsapp: Optional[str] = None
     plan_prueba: Optional[str] = None   # cotizador (default) | cotizabot | pro (+ _usa)
@@ -6144,8 +6145,11 @@ def register(body: RegisterBody):
             _ks = _cs.cursor()
             try:
                 _ks.execute("ALTER TABLE companies ADD COLUMN IF NOT EXISTS signup_source TEXT")
+                _ks.execute("ALTER TABLE companies ADD COLUMN IF NOT EXISTS signup_campaign TEXT")
                 _ks.execute("UPDATE companies SET signup_source=%s WHERE id=%s",
                             (((body.signup_source or "directo").strip()[:60]), company_id))
+                _ks.execute("UPDATE companies SET signup_campaign=%s WHERE id=%s",
+                            (((body.signup_campaign or "").strip()[:120]), company_id))
                 _wa_reg = re.sub(r"\D", "", body.whatsapp or "")
                 if 10 <= len(_wa_reg) <= 13:
                     _ks.execute("UPDATE companies SET owner_phone = %s WHERE id = %s", (_wa_reg, company_id))
@@ -6199,7 +6203,17 @@ def register(body: RegisterBody):
             except Exception as pe:
                 log.error("REGISTRO PROMO ERROR (non-fatal): %s", repr(pe))
 
-        return {"ok": True, "user_id": user_id, "company_id": str(company_id), "api_key": token, "promo_applied": promo_applied}
+        # Report only an actually enabled trial, not merely a successful signup.
+        trial = None
+        try:
+            cur.execute("SELECT trial_plan, trial_end FROM companies WHERE id=%s", (company_id,))
+            _trial = cur.fetchone()
+            if _trial and _trial[0] and _trial[1] and _trial[1] > datetime.now(timezone.utc):
+                trial = {"started": True, "plan": _trial[0], "ends_at": _trial[1].isoformat()}
+                registrar_evento(int(user_id), "prueba_iniciada")
+        except Exception as exc:
+            log.warning("REGISTER TRIAL MEASUREMENT (non-fatal): %r", exc)
+        return {"ok": True, "user_id": user_id, "company_id": str(company_id), "api_key": token, "promo_applied": promo_applied, "trial": trial}
     except IntegrityError:
         raise HTTPException(status_code=409, detail="Email ya registrado")
     except HTTPException:

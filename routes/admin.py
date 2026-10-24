@@ -549,6 +549,7 @@ def admin_companies(request: Request):
         base_cols = ["id", "name"]
         optional_cols = [
             "plan_code", "mp_payment_id", "trial_end", "created_at", "updated_at",
+            "trial_plan", "signup_source", "signup_campaign", "paid_until",
             "owner_phone", "telefono_atencion", "address_text", "hours_text",
             "onboarding_completed", "wa_phone_number_id",
             "construccion_ligera_enabled", "rejacero_enabled",
@@ -606,7 +607,7 @@ def admin_companies(request: Request):
         for row in rows:
             company = dict(zip(cols, row))
             # Convert datetimes to ISO strings
-            for k in ("trial_end", "created_at", "updated_at", "ultima_actividad"):
+            for k in ("trial_end", "created_at", "updated_at", "ultima_actividad", "paid_until"):
                 if company.get(k):
                     try:
                         company[k] = company[k].isoformat()

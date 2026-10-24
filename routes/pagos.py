@@ -202,7 +202,7 @@ def iniciar_prueba(request: Request, body: PruebaBody):
         registrar_evento(int(u["id"]), "prueba_iniciada")
     except Exception:
         pass
-    return {"ok": True, "plan": plan, "termina": fin.isoformat() if fin else None, "dias": PRUEBA_DIAS}
+    return {"ok": True, "plan": plan, "termina": fin.isoformat() if fin else None, "dias": PRUEBA_DIAS, "started": not est.get("activa")}
 
 
 # ── Mercado Pago checkout ────────────────────────────────────────────────────
@@ -354,7 +354,9 @@ def pago_estado(request: Request, session_id: str = Query(None), payment_id: str
                 except Exception as e:
                     log.error("MP ESTADO DB ERROR: %s", repr(e))
 
-            return {"ok": True, "paid": paid, "plan": plan, "status": payment.get("status", "unknown")}
+            return {"ok": True, "paid": paid, "plan": plan, "status": payment.get("status", "unknown"),
+                    "verified": True, "payment_id": str(payment.get("id") or _payment_id),
+                    "value": payment.get("transaction_amount"), "currency": payment.get("currency_id")}
 
         elif _status:
             # Trust the redirect params but also check external_reference
