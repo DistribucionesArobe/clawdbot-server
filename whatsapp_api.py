@@ -38,6 +38,24 @@ def send_whatsapp_template(wa_api_key: str, phone_number_id: str, to: str, name:
     return r.json()
 
 
+def send_whatsapp_buttons(wa_api_key: str, phone_number_id: str, to: str, body_text: str, buttons: list):
+    """Mensaje con hasta 3 botones de respuesta (solo dentro de la ventana de 24 h)."""
+    payload = {
+        "messaging_product": "whatsapp", "to": to, "type": "interactive",
+        "interactive": {
+            "type": "button",
+            "body": {"text": body_text},
+            "action": {"buttons": [{"type": "reply", "reply": {"id": f"b{i}", "title": b[:20]}}
+                                   for i, b in enumerate(buttons[:3])]},
+        },
+    }
+    url = f"{WA_API_BASE}/{phone_number_id}/messages"
+    headers = {"Authorization": f"Bearer {wa_api_key}", "Content-Type": "application/json"}
+    r = requests.post(url, headers=headers, json=payload, timeout=20)
+    if r.status_code >= 300:
+        raise RuntimeError(f"WA buttons failed {r.status_code}: {r.text[:400]}")
+
+
 def send_whatsapp_list(wa_api_key: str, phone_number_id: str, to: str,
                        body_text: str, options: list, button_label: str = "Ver opciones"):
     rows = [{"id": f"spec_{i}", "title": opt[:24]} for i, opt in enumerate(options[:10])]

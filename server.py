@@ -6720,6 +6720,7 @@ def admin_generador_leads(request: Request):
 
 WA_SEG_TEMPLATE = "cotizabot_seguimiento_v1"            # para contactos del generador
 WA_SEG_TEMPLATE_REG = "cotizabot_seguimiento_registro_v1"  # para registrados sin pagar
+WA_SEG_ENCUESTA = "cotizabot_encuesta_v1"  # encuesta automática: qué les quita tiempo y cuánto pagarían
 WA_SEG_TEMPLATE_2 = "cotizabot_seguimiento_2_v1"  # segundo toque a quien no contestó (48 h después)
 WA_SEG_LINEA = (os.getenv("WA_SEGUIMIENTO_LINEA") or "ventas").strip().lower()   # "ventas" o "demo"
 WA_SEG_DIGITOS = os.getenv("WA_SEGUIMIENTO_DIGITOS", "8342472640")  # línea demo
@@ -6806,6 +6807,15 @@ def _plantillas_def():
             {"type": "BUTTONS", "buttons": [
                 {"type": "QUICK_REPLY", "text": "Sí, ayúdame"},
                 {"type": "QUICK_REPLY", "text": "Ahora no"},
+            ]}]},
+        {"name": WA_SEG_ENCUESTA, "language": "es_MX", "category": "MARKETING", "components": [
+            {"type": "BODY", "text": (
+                "Hola, soy Alejandro de CotizaBot 🙂 Estoy mejorando la app y tu respuesta me ayuda mucho. "
+                "Cuando un cliente te pide precio, ¿qué te quita más tiempo?")},
+            {"type": "BUTTONS", "buttons": [
+                {"type": "QUICK_REPLY", "text": "Armar la cotización"},
+                {"type": "QUICK_REPLY", "text": "Contestar mensajes"},
+                {"type": "QUICK_REPLY", "text": "Así estoy bien"},
             ]}]},
     ]
 
@@ -6907,6 +6917,10 @@ def _seg_columnas(cur):
     cur.execute("ALTER TABLE companies ADD COLUMN IF NOT EXISTS wa_respuesta_at TIMESTAMPTZ")
     cur.execute("ALTER TABLE generador_leads ADD COLUMN IF NOT EXISTS wa_seguimiento2_at TIMESTAMPTZ")
     cur.execute("ALTER TABLE companies ADD COLUMN IF NOT EXISTS wa_seguimiento2_at TIMESTAMPTZ")
+    for _t in ("generador_leads", "companies"):
+        cur.execute(f"ALTER TABLE {_t} ADD COLUMN IF NOT EXISTS encuesta_at TIMESTAMPTZ")
+        cur.execute(f"ALTER TABLE {_t} ADD COLUMN IF NOT EXISTS encuesta_tiempo TEXT")
+        cur.execute(f"ALTER TABLE {_t} ADD COLUMN IF NOT EXISTS encuesta_pago TEXT")
 
 
 def _run_wa_seguimiento(cur):
@@ -6975,6 +6989,36 @@ def _run_wa_seguimiento(cur):
                         "WHERE right(regexp_replace(COALESCE(whatsapp,''), '\D', '', 'g'), 10) = %s", (ult,))
             cur.execute("UPDATE companies SET wa_seguimiento2_at = now() "
                         "WHERE right(regexp_replace(COALESCE(owner_phone,''), '\D', '', 'g'), 10) = %s", (ult,))
+
+    # 4) Encuesta automática (una vez por número), 4 días después del primer seguimiento
+    if _plantilla_aprobada(waba_id, token, WA_SEG_ENCUESTA):
+        cur.execute("""
+            SELECT whatsapp, email FROM generador_leads
+            WHERE COALESCE(whatsapp,'') <> '' AND wa_seguimiento_at < now() - interval '4 days'
+              AND wa_seguimiento_at > now() - interval '30 days' AND encuesta_at IS NULL
+            UNION ALL
+            SELECT c.owner_phone, u.email FROM companies c JOIN users u ON u.company_id = c.id
+            WHERE COALESCE(c.owner_phone,'') <> '' AND c.mp_payment_id IS NULL
+              AND c.wa_seguimiento_at < now() - interval '4 days' AND c.wa_seguimiento_at > now() - interval '30 days'
+              AND c.encuesta_at IS NULL
+            LIMIT 40
+        """)
+        hechos_e = set()
+        for wa, email in cur.fetchall():
+            ult = re.sub(r"\D", "", wa or "")[-10:]
+            to = _wa_to(wa)
+            if ult and ult not in hechos_e and len(to) >= 12 and (email or "").lower() not in _RESCUE_EXCLUDE \
+                    and (email or "").lower() not in TEST_EMAILS:
+                try:
+                    send_whatsapp_template(token, phone_id, to, WA_SEG_ENCUESTA)
+                    log.info("WA ENCUESTA → %s", to)
+                except Exception as e:
+                    log.warning("WA ENCUESTA ERROR %s: %r", to, e)
+            hechos_e.add(ult)
+            cur.execute("UPDATE generador_leads SET encuesta_at = now() "
+                        "WHERE right(regexp_replace(COALESCE(whatsapp,''), '\D', '', 'g'), 10) = %s AND encuesta_at IS NULL", (ult,))
+            cur.execute("UPDATE companies SET encuesta_at = now() "
+                        "WHERE right(regexp_replace(COALESCE(owner_phone,''), '\D', '', 'g'), 10) = %s AND encuesta_at IS NULL", (ult,))
 
     # 2) Registrados sin pagar con WhatsApp
     if _plantilla_aprobada(waba_id, token, WA_SEG_TEMPLATE_REG):
@@ -7222,6 +7266,45 @@ def wa_seguimiento_interceptar(company: dict, from_phone: str, msg: dict) -> boo
             if str(company.get("wa_phone_number_id")) not in _pids_seguimiento(k):
                 return False
             ult10 = re.sub(r"\D", "", from_phone)[-10:]
+            # ── Encuesta: si le mandamos encuesta y aún no termina, sus respuestas van aquí
+            k.execute("""
+                SELECT encuesta_tiempo, encuesta_pago FROM generador_leads
+                WHERE encuesta_at > now() - interval '7 days'
+                  AND right(regexp_replace(COALESCE(whatsapp,''), '\D', '', 'g'), 10) = %s
+                UNION ALL
+                SELECT encuesta_tiempo, encuesta_pago FROM companies
+                WHERE encuesta_at > now() - interval '7 days'
+                  AND right(regexp_replace(COALESCE(owner_phone,''), '\D', '', 'g'), 10) = %s
+                LIMIT 1
+            """, (ult10, ult10))
+            _enc = k.fetchone()
+            if _enc and not _enc[1]:
+                _t = ""
+                if msg.get("type") == "button":
+                    _t = (msg.get("button") or {}).get("text", "")
+                elif msg.get("type") == "interactive":
+                    _t = ((msg.get("interactive") or {}).get("button_reply") or {}).get("title", "")
+                elif msg.get("type") == "text":
+                    _t = (msg.get("text") or {}).get("body", "")
+                _t = (_t or "").strip()[:300]
+                if _t:
+                    from whatsapp_api import send_whatsapp_text, send_whatsapp_buttons
+                    _col = "encuesta_tiempo" if not _enc[0] else "encuesta_pago"
+                    k.execute(f"UPDATE generador_leads SET {_col} = %s WHERE right(regexp_replace(COALESCE(whatsapp,''), '\\D', '', 'g'), 10) = %s", (_t, ult10))
+                    k.execute(f"UPDATE companies SET {_col} = %s WHERE right(regexp_replace(COALESCE(owner_phone,''), '\\D', '', 'g'), 10) = %s", (_t, ult10))
+                    try:
+                        if not _enc[0]:
+                            send_whatsapp_buttons(company["wa_api_key"], company["wa_phone_number_id"], from_phone,
+                                "¡Gracias! 🙏 Última pregunta: si la app te ahorra ese tiempo, ¿cuánto pagarías al mes?",
+                                ["Nada", "$99", "$299 o más"])
+                        else:
+                            send_whatsapp_text(company["wa_api_key"], company["wa_phone_number_id"], from_phone,
+                                "¡Mil gracias! Con esto mejoro la app 🙌 Si quieres probarla completa, tienes 7 días gratis "
+                                "sin tarjeta: https://www.cotizaexpress.com/registro?utm_source=encuesta")
+                    except Exception as _ee:
+                        log.warning("WA ENCUESTA RESP ERROR: %r", _ee)
+                    log.info("WA ENCUESTA RESPUESTA %s %s=%r", from_phone, _col, _t)
+                    return True
             k.execute("""
                 SELECT 'lead', email, negocio, whatsapp, wa_respuesta_at FROM generador_leads
                 WHERE wa_seguimiento_at > now() - interval '14 days'
@@ -7927,6 +8010,91 @@ _PRUEBA_NOMBRE = {"cotizador": "Cotizador IA", "cotizabot": "CotizaBot", "pro": 
                   "cotizador_usa": "Cotizador IA", "cotizabot_usa": "CotizaBot", "pro_usa": "CotizaBot Pro"}
 
 
+def _metricas_embudo(cur, dias: int = 7) -> dict:
+    """Métricas del embudo de los últimos N días (sin cuentas de prueba internas)."""
+    _seg_columnas(cur)
+    cur.execute("ALTER TABLE companies ADD COLUMN IF NOT EXISTS trial_usado BOOLEAN DEFAULT FALSE")
+    excl = tuple(sorted(_RESCUE_EXCLUDE | TEST_EMAILS))
+    cur.execute(f"""SELECT count(*), count(DISTINCT right(regexp_replace(COALESCE(whatsapp, email, ''), '\\D', '', 'g'), 10))
+                    FROM generador_leads WHERE created_at > now() - interval '{dias} days'
+                      AND lower(COALESCE(email,'')) NOT IN %s""", (excl,))
+    leads, leads_unicos = cur.fetchone()
+    cur.execute(f"""SELECT c.id, COALESCE(c.trial_usado, FALSE), c.mp_payment_id,
+                           (SELECT count(*) FROM quotes q WHERE q.company_id = c.id)
+                    FROM companies c JOIN users u ON u.company_id = c.id
+                    WHERE u.created_at > now() - interval '{dias} days' AND lower(u.email) NOT IN %s""", (excl,))
+    filas = cur.fetchall()
+    registros = len(filas)
+    con_prueba = sum(1 for f in filas if f[1])
+    con_1 = sum(1 for f in filas if (f[3] or 0) >= 1)
+    con_2 = sum(1 for f in filas if (f[3] or 0) >= 2)
+    cur.execute("""SELECT count(*) FROM companies c JOIN users u ON u.company_id = c.id
+                   WHERE COALESCE(c.trial_usado, FALSE) AND c.trial_end < now() AND lower(u.email) NOT IN %s""", (excl,))
+    pruebas_vencidas = cur.fetchone()[0]
+    cur.execute("""SELECT count(*) FROM companies c JOIN users u ON u.company_id = c.id
+                   WHERE COALESCE(c.trial_usado, FALSE) AND c.mp_payment_id IS NOT NULL AND lower(u.email) NOT IN %s""", (excl,))
+    pruebas_pagadas = cur.fetchone()[0]
+    cur.execute("""SELECT count(*) FROM companies c JOIN users u ON u.company_id = c.id
+                   WHERE c.mp_payment_id IS NOT NULL AND lower(u.email) NOT IN %s""", (excl,))
+    pagos_total = cur.fetchone()[0]
+    enc = {"tiempo": {}, "pago": {}, "enviadas": 0}
+    for t, col_tel in (("generador_leads", "whatsapp"), ("companies", "owner_phone")):
+        cur.execute(f"SELECT encuesta_at, encuesta_tiempo, encuesta_pago FROM {t} WHERE encuesta_at IS NOT NULL")
+        for at, et, ep in cur.fetchall():
+            enc["enviadas"] += 1
+            if et: enc["tiempo"][et] = enc["tiempo"].get(et, 0) + 1
+            if ep: enc["pago"][ep] = enc["pago"].get(ep, 0) + 1
+    return {"dias": dias, "leads": leads, "leads_unicos": leads_unicos, "registros": registros,
+            "registros_con_prueba": con_prueba, "con_1_cotizacion": con_1, "con_2_cotizaciones": con_2,
+            "pruebas_vencidas_total": pruebas_vencidas, "pruebas_que_pagaron_total": pruebas_pagadas,
+            "pagos_total": pagos_total, "encuesta": enc}
+
+
+def _reporte_semanal(cur):
+    """Cada lunes: resumen del embudo y la encuesta a los correos admin (una vez por semana)."""
+    ahora = datetime.now(timezone.utc) - timedelta(hours=6)  # hora de México
+    if ahora.weekday() != 0:
+        return
+    semana = ahora.strftime("%G-W%V")
+    cur.execute("CREATE TABLE IF NOT EXISTS admin_reportes (semana TEXT PRIMARY KEY, enviado_at TIMESTAMPTZ DEFAULT now())")
+    cur.execute("INSERT INTO admin_reportes (semana) VALUES (%s) ON CONFLICT DO NOTHING RETURNING semana", (semana,))
+    if not cur.fetchone():
+        return
+    m = _metricas_embudo(cur, 7)
+    e = m["encuesta"]
+    fmt = lambda d: ", ".join(f"{k}: {v}" for k, v in sorted(d.items(), key=lambda x: -x[1])) or "sin respuestas aún"
+    cuerpo = (
+        f"Resumen de la semana ({semana})\n\n"
+        f"Contactos del generador: {m['leads']} ({m['leads_unicos']} distintos)\n"
+        f"Cuentas nuevas: {m['registros']} (con prueba de 7 días: {m['registros_con_prueba']})\n"
+        f"  - hicieron 1 cotización o más: {m['con_1_cotizacion']}\n"
+        f"  - hicieron 2 o más (uso repetido): {m['con_2_cotizaciones']}\n\n"
+        f"Pruebas vencidas (total): {m['pruebas_vencidas_total']}\n"
+        f"Pruebas que terminaron en pago (total): {m['pruebas_que_pagaron_total']}\n"
+        f"Clientes que han pagado (total): {m['pagos_total']}\n\n"
+        f"Encuesta por WhatsApp (enviadas: {e['enviadas']})\n"
+        f"  ¿Qué te quita más tiempo? {fmt(e['tiempo'])}\n"
+        f"  ¿Cuánto pagarías al mes? {fmt(e['pago'])}\n\n"
+        "Detalle en https://www.cotizaexpress.com/admin\n— Reporte automático de CotizaBot"
+    )
+    for dest in ADMIN_EMAILS:
+        _send_email(dest, f"📊 CotizaBot — resumen semanal: {m['registros']} cuentas, {m['pagos_total']} pagos", cuerpo)
+    log.info("REPORTE SEMANAL enviado %s", semana)
+
+
+@app.get("/api/admin/embudo")
+def admin_embudo(request: Request, dias: int = 7):
+    u = get_user_from_session(request)
+    if (u.get("email") or "").lower() not in ADMIN_EMAILS:
+        raise HTTPException(status_code=403, detail="Solo admin")
+    c = get_conn(); c.autocommit = True
+    k = c.cursor()
+    try:
+        return _metricas_embudo(k, max(1, min(int(dias), 90)))
+    finally:
+        k.close(); c.close()
+
+
 def _run_pruebas(cur):
     cur.execute("ALTER TABLE companies ADD COLUMN IF NOT EXISTS trial_reminder_at TIMESTAMPTZ")
     cur.execute("ALTER TABLE companies ADD COLUMN IF NOT EXISTS trial_plan TEXT")
@@ -7992,6 +8160,10 @@ def _run_renewal_once():
             _run_pruebas(cur)
         except Exception as _pe:
             log.error("PRUEBAS LOOP ERROR: %r", _pe)
+        try:
+            _reporte_semanal(cur)
+        except Exception as _rse:
+            log.error("REPORTE SEMANAL ERROR: %r", _rse)
 
         # 1) Planes pagados activos sin fecha: arrancan sus 30 días hoy
         cur.execute("""
