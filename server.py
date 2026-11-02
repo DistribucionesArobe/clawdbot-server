@@ -8354,6 +8354,171 @@ def _send_email(to: str, subject: str, body_text: str) -> bool:
         return False
 
 
+# ── Prospección por correo (borradores diarios que Alejandro aprueba) ─────────
+
+def _prospectos_tabla(cur):
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS prospectos (
+          id SERIAL PRIMARY KEY,
+          empresa TEXT, ciudad TEXT, giro TEXT,
+          correo TEXT UNIQUE NOT NULL,
+          sitio TEXT, fuente_url TEXT,
+          asunto TEXT, cuerpo TEXT,
+          estado TEXT DEFAULT 'pendiente',   -- pendiente | enviado | descartado | baja | error
+          token TEXT,
+          creado_at TIMESTAMPTZ DEFAULT now(),
+          enviado_at TIMESTAMPTZ
+        )""")
+
+
+def _solo_admin(request: Request):
+    u = get_user_from_session(request)
+    if (u.get("email") or "").lower() not in ADMIN_EMAILS:
+        raise HTTPException(status_code=403, detail="Solo admin")
+    return u
+
+
+class ProspectoIn(BaseModel):
+    empresa: str
+    correo: str
+    ciudad: str = ""
+    giro: str = ""
+    sitio: str = ""
+    fuente_url: str = ""
+    asunto: str
+    cuerpo: str
+
+
+class ProspectosBody(BaseModel):
+    prospectos: list
+
+
+@app.post("/api/admin/prospectos")
+def admin_prospectos_agregar(body: ProspectosBody, request: Request):
+    """Agrega borradores. Nunca repite un correo que ya esté en la tabla (aunque se haya descartado)."""
+    _solo_admin(request)
+    import secrets as _sec
+    nuevos, repetidos, malos = 0, 0, 0
+    c = get_conn(); c.autocommit = True
+    k = c.cursor()
+    try:
+        _prospectos_tabla(k)
+        for raw in (body.prospectos or [])[:50]:
+            try:
+                p = ProspectoIn(**raw)
+            except Exception:
+                malos += 1; continue
+            correo = (p.correo or "").strip().lower()
+            if not re.match(r"^[^@\s]+@[^@\s]+\.[a-z]{2,}$", correo):
+                malos += 1; continue
+            k.execute("""INSERT INTO prospectos (empresa, ciudad, giro, correo, sitio, fuente_url, asunto, cuerpo, token)
+                         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (correo) DO NOTHING RETURNING id""",
+                      (p.empresa[:150], p.ciudad[:80], p.giro[:80], correo, p.sitio[:200], p.fuente_url[:300],
+                       p.asunto[:150], p.cuerpo[:4000], _sec.token_urlsafe(12)))
+            if k.fetchone():
+                nuevos += 1
+            else:
+                repetidos += 1
+    finally:
+        k.close(); c.close()
+    return {"ok": True, "nuevos": nuevos, "repetidos": repetidos, "invalidos": malos}
+
+
+@app.get("/api/admin/prospectos")
+def admin_prospectos_lista(request: Request, estado: str = "pendiente", limit: int = 100):
+    _solo_admin(request)
+    c = get_conn(); c.autocommit = True
+    k = c.cursor()
+    try:
+        _prospectos_tabla(k)
+        if estado == "todos":
+            k.execute("SELECT id, empresa, ciudad, giro, correo, sitio, fuente_url, asunto, cuerpo, estado, creado_at, enviado_at FROM prospectos ORDER BY id DESC LIMIT %s", (min(limit, 1000),))
+        else:
+            k.execute("SELECT id, empresa, ciudad, giro, correo, sitio, fuente_url, asunto, cuerpo, estado, creado_at, enviado_at FROM prospectos WHERE estado=%s ORDER BY id DESC LIMIT %s", (estado, min(limit, 1000)))
+        cols = ["id", "empresa", "ciudad", "giro", "correo", "sitio", "fuente_url", "asunto", "cuerpo", "estado", "creado_at", "enviado_at"]
+        filas = [dict(zip(cols, r)) for r in k.fetchall()]
+        for f in filas:
+            for t in ("creado_at", "enviado_at"):
+                f[t] = f[t].isoformat() if f[t] else None
+        k.execute("SELECT estado, count(*) FROM prospectos GROUP BY estado")
+        resumen = {e: n for e, n in k.fetchall()}
+    finally:
+        k.close(); c.close()
+    return {"ok": True, "prospectos": filas, "resumen": resumen}
+
+
+def _mandar_prospecto(correo: str, asunto: str, cuerpo: str, token: str) -> bool:
+    host = os.environ.get("SMTP_HOST", "mail.privateemail.com")
+    port = int(os.environ.get("SMTP_PORT", "465"))
+    user = os.environ.get("SMTP_USER", "")
+    pwd = os.environ.get("SMTP_PASS", "")
+    if not (user and pwd):
+        return False
+    import smtplib
+    from email.mime.text import MIMEText
+    from email.utils import formataddr
+    baja = f"https://api.cotizaexpress.com/baja/{token}"
+    texto = cuerpo.rstrip() + f"\n\n—\nSi no quieres recibir más correos míos, responde 'baja' o entra aquí: {baja}"
+    msg = MIMEText(texto, "plain", "utf-8")
+    msg["From"] = formataddr(("Alejandro Robledo · CotizaBot", user))
+    msg["To"] = correo
+    msg["Subject"] = asunto
+    msg["Reply-To"] = user
+    msg["List-Unsubscribe"] = f"<{baja}>, <mailto:{user}?subject=baja>"
+    try:
+        with smtplib.SMTP_SSL(host, port) as smtp:
+            smtp.login(user, pwd)
+            smtp.send_message(msg)
+        return True
+    except Exception as e:
+        log.warning("PROSPECTO SEND ERROR %s: %r", correo, e)
+        return False
+
+
+class ProspectosAccion(BaseModel):
+    ids: list
+    accion: str = "enviar"   # enviar | descartar
+
+
+@app.post("/api/admin/prospectos/accion")
+def admin_prospectos_accion(body: ProspectosAccion, request: Request):
+    _solo_admin(request)
+    ids = [int(i) for i in (body.ids or [])][:30]
+    if not ids:
+        return {"ok": True, "enviados": 0}
+    c = get_conn(); c.autocommit = True
+    k = c.cursor()
+    enviados, fallidos = 0, 0
+    try:
+        _prospectos_tabla(k)
+        if body.accion == "descartar":
+            k.execute("UPDATE prospectos SET estado='descartado' WHERE id = ANY(%s) AND estado='pendiente'", (ids,))
+            return {"ok": True, "descartados": k.rowcount}
+        k.execute("SELECT id, correo, asunto, cuerpo, token FROM prospectos WHERE id = ANY(%s) AND estado='pendiente'", (ids,))
+        for pid, correo, asunto, cuerpo, token in k.fetchall():
+            ok = _mandar_prospecto(correo, asunto, cuerpo, token)
+            k.execute("UPDATE prospectos SET estado=%s, enviado_at=now() WHERE id=%s", ("enviado" if ok else "error", pid))
+            enviados += 1 if ok else 0
+            fallidos += 0 if ok else 1
+    finally:
+        k.close(); c.close()
+    log.info("PROSPECTOS ENVIADOS: %s (fallidos %s)", enviados, fallidos)
+    return {"ok": True, "enviados": enviados, "fallidos": fallidos}
+
+
+@app.get("/baja/{token}")
+def prospecto_baja(token: str):
+    c = get_conn(); c.autocommit = True
+    k = c.cursor()
+    try:
+        _prospectos_tabla(k)
+        k.execute("UPDATE prospectos SET estado='baja' WHERE token=%s", (token[:40],))
+    finally:
+        k.close(); c.close()
+    return HTMLResponse("<div style='font-family:sans-serif;max-width:480px;margin:60px auto;text-align:center'>"
+                        "<h2>Listo, no te volveremos a escribir.</h2><p>Gracias y disculpa la molestia.</p></div>")
+
+
 @app.post("/api/auth/forgot-password")
 def forgot_password(body: ForgotPasswordBody):
     email = (body.email or "").strip().lower()
