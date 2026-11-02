@@ -8393,10 +8393,70 @@ class ProspectosBody(BaseModel):
     prospectos: list
 
 
+def _prospectos_key_ok(request: Request) -> bool:
+    """Llave solo para AGREGAR borradores (la usa la tarea diaria en la nube). Se guarda hasheada."""
+    import hashlib as _hl
+    llave = (request.headers.get("x-prospectos-key") or "").strip()
+    if len(llave) < 24:
+        return False
+    c = get_conn(); c.autocommit = True
+    k = c.cursor()
+    try:
+        k.execute("CREATE TABLE IF NOT EXISTS admin_config (clave TEXT PRIMARY KEY, valor TEXT)")
+        k.execute("SELECT valor FROM admin_config WHERE clave='prospectos_key_sha256'")
+        r = k.fetchone()
+    finally:
+        k.close(); c.close()
+    return bool(r) and r[0] == _hl.sha256(llave.encode()).hexdigest()
+
+
+@app.post("/api/admin/prospectos/llave")
+def admin_prospectos_llave(request: Request):
+    """Genera (o reemplaza) la llave para que la tarea diaria agregue borradores. Se muestra una sola vez."""
+    import hashlib as _hl, secrets as _sec
+    _solo_admin(request)
+    llave = "px_" + _sec.token_urlsafe(32)
+    c = get_conn(); c.autocommit = True
+    k = c.cursor()
+    try:
+        k.execute("CREATE TABLE IF NOT EXISTS admin_config (clave TEXT PRIMARY KEY, valor TEXT)")
+        k.execute("""INSERT INTO admin_config (clave, valor) VALUES ('prospectos_key_sha256', %s)
+                     ON CONFLICT (clave) DO UPDATE SET valor = EXCLUDED.valor""", (_hl.sha256(llave.encode()).hexdigest(),))
+    finally:
+        k.close(); c.close()
+    return {"ok": True, "llave": llave}
+
+
+@app.get("/api/prospectos/existentes")
+def prospectos_existentes(request: Request):
+    """Para la tarea diaria: correos y empresas que ya están (para no repetir). Requiere la llave."""
+    if not _prospectos_key_ok(request):
+        _solo_admin(request)
+    c = get_conn(); c.autocommit = True
+    k = c.cursor()
+    try:
+        _prospectos_tabla(k)
+        k.execute("SELECT correo, empresa FROM prospectos ORDER BY id DESC LIMIT 3000")
+        return {"ok": True, "existentes": [{"correo": a, "empresa": b} for a, b in k.fetchall()]}
+    finally:
+        k.close(); c.close()
+
+
+@app.post("/api/prospectos")
+def prospectos_agregar_con_llave(body: ProspectosBody, request: Request):
+    if not _prospectos_key_ok(request):
+        raise HTTPException(status_code=403, detail="Llave inválida")
+    return _agregar_prospectos(body)
+
+
 @app.post("/api/admin/prospectos")
 def admin_prospectos_agregar(body: ProspectosBody, request: Request):
     """Agrega borradores. Nunca repite un correo que ya esté en la tabla (aunque se haya descartado)."""
     _solo_admin(request)
+    return _agregar_prospectos(body)
+
+
+def _agregar_prospectos(body: ProspectosBody):
     import secrets as _sec
     nuevos, repetidos, malos = 0, 0, 0
     c = get_conn(); c.autocommit = True
