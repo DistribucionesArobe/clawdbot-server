@@ -7930,6 +7930,10 @@ def _run_onboarding_rescue_once():
     conn.autocommit = True
     cur = conn.cursor()
     try:
+        try:
+            _prospectos_diarios(cur)
+        except Exception as _pde:
+            log.warning("PROSPECTOS DIARIOS ERROR: %r", _pde)
         cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT now()")
         cur.execute("""
             CREATE TABLE IF NOT EXISTS onboarding_emails (
@@ -8564,6 +8568,159 @@ def admin_prospectos_accion(body: ProspectosAccion, request: Request):
         k.close(); c.close()
     log.info("PROSPECTOS ENVIADOS: %s (fallidos %s)", enviados, fallidos)
     return {"ok": True, "enviados": enviados, "fallidos": fallidos}
+
+
+# ── Generador automático de prospectos (OpenAI con búsqueda web + verificación del correo en la página) ──
+
+_PROSP_CIUDADES = ["Monterrey", "Guadalajara", "CDMX", "Puebla", "Querétaro", "León", "Saltillo", "Chihuahua",
+                   "Hermosillo", "Mérida", "Cancún", "Tijuana", "San Luis Potosí", "Aguascalientes", "Toluca",
+                   "Morelia", "Culiacán", "Veracruz", "Villahermosa", "Torreón", "Ciudad Victoria", "Tampico",
+                   "Reynosa", "Oaxaca", "Tuxtla Gutiérrez", "Durango", "Mexicali", "Celaya", "Irapuato", "Pachuca"]
+_PROSP_ESTADO = {"corriendo": False, "ultimo": None}
+_PROSP_ASUNTOS = ["{e}: cotizaciones de WhatsApp en un minuto", "Pregunta rápida para {e}",
+                  "{e}: ¿cuánto tardan en armar una cotización?"]
+
+
+def _prosp_cuerpo(empresa: str, vende: str, ciudad: str) -> str:
+    return (f"Hola, equipo de {empresa}:\n\n"
+            f"Soy Alejandro, de CotizaBot. Vi que venden {vende} en {ciudad}. Cuando un cliente les manda por "
+            "WhatsApp su lista de material, ¿cuánto tarda su vendedor en armar la cotización?\n\n"
+            "Hicimos CotizaBot justo para eso: el vendedor pega la lista (o una foto) y en segundos sale la "
+            "cotización con sus precios, IVA y PDF con folio, lista para mandar. El cliente sigue tratando con su "
+            "vendedor de siempre; solo le quitamos el tecleo.\n\n"
+            "Se prueba 7 días gratis, sin tarjeta: https://cotizaexpress.com/registro?utm_source=correo_prospeccion\n"
+            "Si les sirve, con gusto les preparo una demo con 10 productos de su catálogo.\n\n"
+            "Saludos,\nAlejandro Robledo\nCotizaBot · cotizaexpress.com · WhatsApp 81 3085 0381")
+
+
+def _correo_en_pagina(correo: str, urls: list) -> str:
+    """Devuelve la URL donde aparece el correo escrito, o '' si no aparece en ninguna."""
+    import html as _h
+    c = correo.lower()
+    usuario, dominio = c.split("@", 1)
+    for u in urls:
+        if not u or not u.startswith("http"):
+            continue
+        try:
+            r = requests.get(u, timeout=12, headers={"User-Agent": "Mozilla/5.0 (compatible; CotizaBot/1.0)"})
+            t = _h.unescape(r.text or "").lower()
+            t = t.replace("[at]", "@").replace("(at)", "@").replace(" @ ", "@")
+            if c in t or (f"{usuario}@{dominio}" in t.replace("%40", "@")):
+                return u
+        except Exception:
+            continue
+    return ""
+
+
+def _generar_prospectos_job(meta: int = 15):
+    if _PROSP_ESTADO["corriendo"]:
+        return
+    _PROSP_ESTADO["corriendo"] = True
+    nuevos = 0
+    detalle = []
+    try:
+        if not openai_client:
+            raise RuntimeError("OpenAI no configurado")
+        c = get_conn(); c.autocommit = True
+        k = c.cursor()
+        try:
+            _prospectos_tabla(k)
+            k.execute("SELECT correo, lower(COALESCE(empresa,'')) FROM prospectos")
+            filas = k.fetchall()
+        finally:
+            k.close(); c.close()
+        correos = {a for a, _ in filas}
+        dominios = {a.split("@", 1)[1] for a, _ in filas if "@" in a and not a.endswith(("gmail.com", "hotmail.com", "outlook.com", "yahoo.com", "prodigy.net.mx"))}
+        empresas = {b for _, b in filas}
+        hoy = datetime.now(timezone.utc).timetuple().tm_yday
+        for ronda in range(3):
+            if nuevos >= meta:
+                break
+            ciudades = [_PROSP_CIUDADES[(hoy * 3 + ronda * 2 + i) % len(_PROSP_CIUDADES)] for i in range(2)]
+            excl = ", ".join(sorted(dominios)[:150]) or "ninguno"
+            prompt = (
+                f"Busca en la web 20 negocios REALES en {ciudades[0]} y {ciudades[1]}, México, que sean ferreterías, casas de "
+                "materiales para construcción, distribuidoras de tablaroca/plafones, acero y perfiles, material eléctrico o "
+                "plomería. Prefiere negocios medianos (1 a 20 sucursales); excluye cadenas grandes (Home Depot, Truper, Comex, "
+                "Lowe's, Construrama, Cemex). Para cada uno, el correo DEBE estar escrito en su propio sitio web; da la URL "
+                f"exacta de esa página. No uses estos dominios: {excl}. "
+                "Responde SOLO un arreglo JSON: [{\"empresa\":\"\",\"ciudad\":\"\",\"giro\":\"\",\"vende\":\"frase corta en español de lo que venden\","
+                "\"sitio\":\"https://...\",\"fuente_url\":\"https://...\",\"correo\":\"...\"}]")
+            try:
+                resp = openai_client.responses.create(model="gpt-4.1", tools=[{"type": "web_search_preview"}], input=prompt)
+                txt = (getattr(resp, "output_text", "") or "").strip()
+            except Exception as e:
+                detalle.append(f"busqueda error: {e!r}"[:200])
+                continue
+            m = re.search(r"\[.*\]", txt, re.S)
+            try:
+                candidatos = json.loads(m.group(0)) if m else []
+            except Exception:
+                candidatos = []
+            lote = []
+            for cd in candidatos:
+                if nuevos + len(lote) >= meta:
+                    break
+                correo = str(cd.get("correo", "")).strip().lower()
+                emp = str(cd.get("empresa", "")).strip()
+                if not re.match(r"^[^@\s]+@[^@\s]+\.[a-z]{2,}$", correo) or not emp:
+                    continue
+                if correo in correos or emp.lower() in empresas:
+                    continue
+                sitio = str(cd.get("sitio", "")).strip()
+                fuente = str(cd.get("fuente_url", "")).strip()
+                base = sitio.rstrip("/")
+                verificada = _correo_en_pagina(correo, [fuente, sitio, base + "/contacto", base + "/contacto.html", base + "/contact"])
+                if not verificada:
+                    continue
+                ciudad = str(cd.get("ciudad", "")).strip() or ciudades[0]
+                vende = str(cd.get("vende", "")).strip() or str(cd.get("giro", "materiales")).strip()
+                lote.append({"empresa": emp, "correo": correo, "ciudad": ciudad, "giro": str(cd.get("giro", ""))[:80],
+                             "sitio": sitio, "fuente_url": verificada,
+                             "asunto": _PROSP_ASUNTOS[(nuevos + len(lote)) % 3].format(e=emp),
+                             "cuerpo": _prosp_cuerpo(emp, vende, ciudad)})
+                correos.add(correo); empresas.add(emp.lower())
+            if lote:
+                res = _agregar_prospectos(ProspectosBody(prospectos=lote))
+                nuevos += res.get("nuevos", 0)
+            detalle.append(f"{'/'.join(ciudades)}: {len(candidatos)} candidatos, {len(lote)} verificados")
+    except Exception as e:
+        detalle.append(f"error: {e!r}"[:200])
+    finally:
+        _PROSP_ESTADO["corriendo"] = False
+        _PROSP_ESTADO["ultimo"] = {"fecha": datetime.now(timezone.utc).isoformat(), "nuevos": nuevos, "detalle": detalle}
+        log.info("PROSPECTOS GENERADOS: %s | %s", nuevos, detalle)
+
+
+@app.post("/api/admin/prospectos/generar")
+def admin_prospectos_generar(request: Request):
+    _solo_admin(request)
+    if _PROSP_ESTADO["corriendo"]:
+        return {"ok": True, "corriendo": True}
+    import threading as _th
+    _th.Thread(target=_generar_prospectos_job, args=(15,), daemon=True).start()
+    return {"ok": True, "corriendo": True}
+
+
+@app.get("/api/admin/prospectos/generar")
+def admin_prospectos_generar_estado(request: Request):
+    _solo_admin(request)
+    return {"ok": True, **_PROSP_ESTADO}
+
+
+def _prospectos_diarios(cur):
+    """Lunes a viernes, después de las 7 am de México: genera 15 borradores una vez al día."""
+    ahora = datetime.now(timezone.utc) - timedelta(hours=6)
+    if ahora.weekday() > 4 or ahora.hour < 7:
+        return
+    cur.execute("CREATE TABLE IF NOT EXISTS admin_config (clave TEXT PRIMARY KEY, valor TEXT)")
+    hoy = ahora.strftime("%Y-%m-%d")
+    cur.execute("""INSERT INTO admin_config (clave, valor) VALUES ('prospectos_ultimo_dia', %s)
+                   ON CONFLICT (clave) DO UPDATE SET valor = EXCLUDED.valor
+                   WHERE admin_config.valor IS DISTINCT FROM EXCLUDED.valor RETURNING valor""", (hoy,))
+    if cur.fetchone():
+        import threading as _th
+        _th.Thread(target=_generar_prospectos_job, args=(15,), daemon=True).start()
 
 
 @app.get("/baja/{token}")
