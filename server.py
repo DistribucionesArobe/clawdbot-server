@@ -8602,7 +8602,7 @@ def _correo_en_pagina(correo: str, urls: list) -> str:
         if not u or not u.startswith("http"):
             continue
         try:
-            r = requests.get(u, timeout=12, headers={"User-Agent": "Mozilla/5.0 (compatible; CotizaBot/1.0)"})
+            r = requests.get(u, timeout=12, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36", "Accept-Language": "es-MX,es;q=0.9"})
             t = _h.unescape(r.text or "").lower()
             t = t.replace("[at]", "@").replace("(at)", "@").replace(" @ ", "@")
             if c in t or (f"{usuario}@{dominio}" in t.replace("%40", "@")):
@@ -8633,13 +8633,13 @@ def _generar_prospectos_job(meta: int = 15):
         dominios = {a.split("@", 1)[1] for a, _ in filas if "@" in a and not a.endswith(("gmail.com", "hotmail.com", "outlook.com", "yahoo.com", "prodigy.net.mx"))}
         empresas = {b for _, b in filas}
         hoy = datetime.now(timezone.utc).timetuple().tm_yday
-        for ronda in range(3):
+        for ronda in range(6):
             if nuevos >= meta:
                 break
             ciudades = [_PROSP_CIUDADES[(hoy * 3 + ronda * 2 + i) % len(_PROSP_CIUDADES)] for i in range(2)]
             excl = ", ".join(sorted(dominios)[:150]) or "ninguno"
             prompt = (
-                f"Busca en la web 20 negocios REALES en {ciudades[0]} y {ciudades[1]}, México, que sean ferreterías, casas de "
+                f"Busca en la web 25 negocios REALES en {ciudades[0]} y {ciudades[1]}, México, que sean ferreterías, casas de "
                 "materiales para construcción, distribuidoras de tablaroca/plafones, acero y perfiles, material eléctrico o "
                 "plomería. Prefiere negocios medianos (1 a 20 sucursales); excluye cadenas grandes (Home Depot, Truper, Comex, "
                 "Lowe's, Construrama, Cemex). Para cada uno, el correo DEBE estar escrito en su propio sitio web; da la URL "
@@ -8670,7 +8670,7 @@ def _generar_prospectos_job(meta: int = 15):
                 sitio = str(cd.get("sitio", "")).strip()
                 fuente = str(cd.get("fuente_url", "")).strip()
                 base = sitio.rstrip("/")
-                verificada = _correo_en_pagina(correo, [fuente, sitio, base + "/contacto", base + "/contacto.html", base + "/contact"])
+                verificada = _correo_en_pagina(correo, [fuente, sitio, base + "/contacto", base + "/contacto/", base + "/contacto.html", base + "/contactanos", base + "/contact", base + "/contact-us"])
                 if not verificada:
                     continue
                 ciudad = str(cd.get("ciudad", "")).strip() or ciudades[0]
