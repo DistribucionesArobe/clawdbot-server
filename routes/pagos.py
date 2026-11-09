@@ -762,3 +762,84 @@ def promo_aplicar(request: Request, body: PromoCodeApply):
     finally:
         if cur: cur.close()
         if conn: conn.close()
+
+
+# ── Admin: pagos recientes en Mercado Pago (para ver quién pagó y si se activó) ──
+
+def _solo_admin_pagos(request: Request):
+    from server import ADMIN_EMAILS
+    u = get_user_from_session(request)
+    if (u.get("email") or "").lower() not in ADMIN_EMAILS:
+        raise HTTPException(status_code=403, detail="Solo admin")
+
+
+@router.get("/api/admin/pagos/mp-recientes")
+def admin_mp_recientes(request: Request, limit: int = 20):
+    _solo_admin_pagos(request)
+    if not _MP_ACCESS_TOKEN:
+        raise HTTPException(status_code=500, detail="MP_ACCESS_TOKEN no configurada")
+    sdk = mercadopago.SDK(_MP_ACCESS_TOKEN)
+    res = sdk.payment().search({"sort": "date_created", "criteria": "desc", "limit": max(1, min(limit, 50))})
+    pagos = []
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        for p in (res.get("response") or {}).get("results", []):
+            ext = p.get("external_reference") or ""
+            parts = ext.split("|")
+            cid = parts[0] if parts else ""
+            empresa = plan_actual = paid_until = None
+            if cid:
+                try:
+                    cur.execute("SELECT name, plan_code, paid_until, mp_payment_id FROM companies WHERE id::text=%s", (cid,))
+                    r = cur.fetchone()
+                    if r:
+                        empresa, plan_actual, paid_until, mp_id = r
+                except Exception:
+                    conn.rollback()
+            pagos.append({
+                "id": p.get("id"), "fecha": p.get("date_created"), "aprobado": p.get("date_approved"),
+                "estado": p.get("status"), "detalle": p.get("status_detail"),
+                "monto": p.get("transaction_amount"), "moneda": p.get("currency_id"),
+                "metodo": p.get("payment_method_id"), "tipo": p.get("payment_type_id"),
+                "descripcion": p.get("description"), "external_reference": ext,
+                "plan_pagado": parts[1] if len(parts) > 1 else None, "intro": len(parts) > 2 and parts[2] == "intro",
+                "empresa": empresa, "plan_actual": plan_actual,
+                "paid_until": paid_until.isoformat() if paid_until else None,
+            })
+    finally:
+        cur.close(); conn.close()
+    return {"ok": True, "pagos": pagos}
+
+
+class ActivarPagoBody(BaseModel):
+    payment_id: int
+
+
+@router.post("/api/admin/pagos/activar")
+def admin_activar_pago(body: ActivarPagoBody, request: Request):
+    """Activa el plan de un pago APROBADO en Mercado Pago (por si el webhook no llegó)."""
+    _solo_admin_pagos(request)
+    sdk = mercadopago.SDK(_MP_ACCESS_TOKEN)
+    p = (sdk.payment().get(int(body.payment_id)) or {}).get("response") or {}
+    if p.get("status") != "approved":
+        raise HTTPException(status_code=400, detail=f"El pago no está aprobado ({p.get('status')})")
+    parts = (p.get("external_reference") or "").split("|")
+    if len(parts) < 2:
+        raise HTTPException(status_code=400, detail="El pago no trae empresa/plan")
+    cid, plan = parts[0], parts[1]
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("ALTER TABLE companies ADD COLUMN IF NOT EXISTS paid_until TIMESTAMPTZ")
+        cur.execute("""UPDATE companies SET plan_code=%s, mp_payment_id=%s,
+                          paid_until=GREATEST(COALESCE(paid_until, now()), now()) + interval '30 days',
+                          trial_end=NULL, renewal_reminder_at=NULL, updated_at=now()
+                       WHERE id::text=%s RETURNING name""", (plan, str(body.payment_id), cid))
+        r = cur.fetchone()
+        if len(parts) > 2 and parts[2] == "intro":
+            cur.execute("ALTER TABLE companies ADD COLUMN IF NOT EXISTS intro_usado BOOLEAN DEFAULT FALSE")
+            cur.execute("UPDATE companies SET intro_usado=TRUE WHERE id::text=%s", (cid,))
+        conn.commit()
+    finally:
+        cur.close(); conn.close()
+    log.info("ADMIN ACTIVÓ PAGO %s → company=%s plan=%s", body.payment_id, cid, plan)
+    return {"ok": True, "empresa": r[0] if r else None, "plan": plan}
