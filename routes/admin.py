@@ -473,7 +473,9 @@ def admin_stats(request: Request):
 
         # Suscripciones activas (plan != 'free')
         try:
-            cur.execute("SELECT COUNT(*) FROM companies WHERE plan_code IS NOT NULL AND plan_code != 'free'")
+            cur.execute("""SELECT COUNT(*) FROM companies
+                           WHERE plan_code IS NOT NULL AND plan_code NOT IN ('free', 'owner')
+                             AND mp_payment_id IS NOT NULL""")
             result["suscripciones_activas"] = cur.fetchone()[0]
         except Exception as e:
             log.warning("admin_stats companies: %s", e)
